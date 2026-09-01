@@ -19,20 +19,40 @@ Enforced here:
    `Playbook` version, is validated on every insert/update — the same path,
    including the UPI AutoPay `max_attempts <= 3` ceiling, that guards the base
    playbook (Section 4.2 defense-in-depth).
+7. `ActionCase` attribution: every `Action` has >= 1 row; exactly one
+   `is_primary`; the `is_primary` row's `case_id` == `Action.primary_case_id`;
+   Σ `credit_weight` == Decimal("1.00000") (exact); the complete set is present
+   in the same flush (Milestone 5).
+8. `Action` <-> `CaseEvent` atomicity: every new `Action` must be accompanied,
+   in the same flush, by a new `CaseEvent` for `Action.primary_case_id` whose
+   `event_type` matches the outcome (`ACTION_BLOCKED` iff
+   `BLOCKED_BY_GUARDRAIL`, else `ACTION_EXECUTED`) and whose `payload.action_id`
+   equals the Action's id — the explicit correlation value.
+
+   INTENTIONAL DEVIATION (Milestone 5): Blueprint Section 2.3 frames Action <->
+   CaseEvent atomicity as "a Module 5 code-review checklist item, not a design
+   aspiration". Torque strengthens it to a structurally enforced invariant here,
+   for the same reason tenancy, append-only history, typed contexts, and
+   Playbook immutability are guard-enforced: code review is not an invariant and
+   audit integrity is critical. `CaseEvent` gains NO `action_id` column and NO
+   FK to `Action` — the correlation lives only in the event payload string.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
+from decimal import Decimal
 
 from sqlalchemy import event, select
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import Session
 
 from torque.contexts.registry import validate_context
-from torque.enums import MacTier
+from torque.enums import ActionOutcome, CaseEventType, MacTier
 from torque.exceptions import (
+    ActionAtomicityError,
+    ActionCaseInvariantError,
     AppendOnlyViolation,
     MonotonicityViolation,
     OwnershipViolation,
@@ -42,6 +62,13 @@ from torque.models.case_event import CaseEvent
 from torque.models.merchant_playbook_config import MerchantPlaybookConfig
 from torque.models.playbook import Playbook
 from torque.models.revenue_leak_case import RevenueLeakCase
+
+# `Action` / `ActionCase` are imported lazily inside the flush listener:
+# `torque.models.__init__` imports `action` first, and this module is pulled in
+# (via `torque.db.session`) mid-way through that import, so a top-level import
+# here would be circular.
+
+_FULL_WEIGHT = Decimal("1")
 
 _M7_FLAG = "torque.module7_writer"
 _ND_FLAG = "torque.network_directive_writer"
@@ -119,6 +146,11 @@ def _before_flush(session: Session, flush_context, instances) -> None:
     m7 = bool(session.info.get(_M7_FLAG))
     nd = bool(session.info.get(_ND_FLAG))
 
+    from torque.models.action import Action
+    from torque.models.action_case import ActionCase
+
+    new_action_ids = {a.action_id for a in session.new if isinstance(a, Action)}
+
     for obj in [*session.new, *session.dirty]:
         if isinstance(obj, RevenueLeakCase):
             _guard_case(obj, m7=m7, nd=nd)
@@ -126,6 +158,23 @@ def _before_flush(session: Session, flush_context, instances) -> None:
             _guard_playbook(obj)
         elif isinstance(obj, MerchantPlaybookConfig):
             _guard_merchant_playbook_config(session, obj)
+        elif isinstance(obj, Action) and obj in session.new:
+            _guard_action_write(session, obj)
+
+    # ActionCase edits on already-persisted Actions (e.g. Module 7 re-weighting).
+    touched = {
+        ac.action_id
+        for bucket in (session.new, session.dirty, session.deleted)
+        for ac in bucket
+        if isinstance(ac, ActionCase)
+    }
+    for aid in touched - new_action_ids:
+        action = session.get(Action, aid)
+        if action is None:
+            raise ActionCaseInvariantError(
+                f"ActionCase rows reference unknown action_id {aid}"
+            )
+        _validate_action_case_set(session, aid, action.primary_case_id)
 
 
 def _guard_case(case: RevenueLeakCase, *, m7: bool, nd: bool) -> None:
@@ -196,6 +245,83 @@ def _guard_merchant_playbook_config(
     )
     if normalised != cfg.stopping_rules_override:
         cfg.stopping_rules_override = normalised
+
+
+def _validate_action_case_set(session: Session, action_id, primary_case_id) -> None:
+    """Every `Action` has >= 1 `ActionCase`; exactly one `is_primary`; that row's
+    `case_id` == `Action.primary_case_id`; Σ `credit_weight` == 1.00000 (exact
+    Decimal). The full set = pending new rows + persisted rows - pending deletes.
+    """
+    from torque.models.action_case import ActionCase
+
+    deleted = {
+        id(ac)
+        for ac in session.deleted
+        if isinstance(ac, ActionCase) and ac.action_id == action_id
+    }
+    rows = [
+        ac
+        for ac in session.new
+        if isinstance(ac, ActionCase) and ac.action_id == action_id
+    ]
+    rows += [
+        ac
+        for ac in session.scalars(
+            select(ActionCase).where(ActionCase.action_id == action_id)
+        ).all()
+        if id(ac) not in deleted
+    ]
+
+    if not rows:
+        raise ActionCaseInvariantError(
+            f"Action {action_id} has no ActionCase attribution rows — every "
+            f"Action requires at least one (Milestone 5)"
+        )
+    primaries = [ac for ac in rows if ac.is_primary]
+    if len(primaries) != 1:
+        raise ActionCaseInvariantError(
+            f"Action {action_id} must have exactly one is_primary ActionCase "
+            f"(has {len(primaries)})"
+        )
+    if primaries[0].case_id != primary_case_id:
+        raise ActionCaseInvariantError(
+            f"the is_primary ActionCase for action {action_id} must reference "
+            f"Action.primary_case_id ({primary_case_id}), not {primaries[0].case_id}"
+        )
+    total = sum(
+        (Decimal(str(ac.credit_weight)) for ac in rows), Decimal("0")
+    )
+    if total != _FULL_WEIGHT:
+        raise ActionCaseInvariantError(
+            f"ActionCase credit_weight for action {action_id} must sum to exactly "
+            f"1.00000 (got {total})"
+        )
+
+
+def _guard_action_write(session: Session, action) -> None:
+    _validate_action_case_set(session, action.action_id, action.primary_case_id)
+
+    want = (
+        CaseEventType.ACTION_BLOCKED
+        if ActionOutcome(action.outcome) is ActionOutcome.BLOCKED_BY_GUARDRAIL
+        else CaseEventType.ACTION_EXECUTED
+    )
+    aid = str(action.action_id)
+    for ce in session.new:
+        if not isinstance(ce, CaseEvent):
+            continue
+        if CaseEventType(ce.event_type) is not want:
+            continue
+        if ce.case_id != action.primary_case_id:
+            continue
+        if (ce.payload or {}).get("action_id") == aid:
+            return
+
+    raise ActionAtomicityError(
+        f"Action {aid} was written without a correlated {want.value} CaseEvent "
+        f"(case_id={action.primary_case_id}, payload.action_id={aid}) in the same "
+        f"transaction (Section 2.3) — use torque.events.write_action_and_event"
+    )
 
 
 def register_guards(session_factory) -> None:

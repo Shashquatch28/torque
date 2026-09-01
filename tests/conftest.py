@@ -288,3 +288,45 @@ def make_playbook_run(db, make_case, make_playbook):
         return run
 
     return _make
+
+
+@pytest.fixture()
+def make_action(db, make_case):
+    from datetime import UTC, datetime
+
+    from torque.enums import ActionOutcome, ActionType, Actor, BlockReason
+    from torque.events import write_action_and_event
+    from torque.models import Action
+
+    def _make(
+        *,
+        case=None,
+        run=None,
+        outcome=ActionOutcome.SUCCESS,
+        action_type=ActionType.SEND_WHATSAPP,
+        channel="whatsapp",
+        block_reason=None,
+        cost=None,
+        attributions=None,
+        content_sent=None,
+    ):
+        c = case or make_case()
+        blocked = ActionOutcome(outcome) is ActionOutcome.BLOCKED_BY_GUARDRAIL
+        action = Action(
+            merchant_id=c.merchant_id,
+            primary_case_id=c.case_id,
+            run_id=(run.run_id if run is not None else None),
+            action_type=action_type,
+            channel=channel,
+            content_sent=content_sent,
+            executed_at=None if blocked else datetime.now(UTC),
+            outcome=outcome,
+            block_reason=(block_reason or BlockReason.QUIET_HOURS) if blocked else None,
+            cost=cost,
+        )
+        write_action_and_event(
+            db, action=action, actor=Actor.SYSTEM, attributions=attributions
+        )
+        return action
+
+    return _make

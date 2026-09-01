@@ -87,3 +87,22 @@ class PlaybookValidationError(TorqueError):
 class PlaybookNotFoundError(TorqueError):
     """A `MerchantPlaybookConfig` references a `playbook_id` that has no
     published `playbook` version to validate the override against."""
+
+
+# --- Action / ActionCase (Blueprint Section 3 / Section 2.3) ---------------
+
+
+class ActionAtomicityError(TorqueError):
+    """An `Action` was flushed without its correlated `CaseEvent`
+    (`ACTION_EXECUTED` / `ACTION_BLOCKED` with a matching `action_id` in the
+    payload) in the same transaction.
+
+    Blueprint Section 2.3 frames this as a code-review checklist item; Torque
+    strengthens it to a structurally enforced invariant (see the Milestone 5
+    intentional-deviations note in `torque.models.guards`)."""
+
+
+class ActionCaseInvariantError(TorqueError):
+    """The `ActionCase` attribution set for an `action_id` is missing, or
+    violates: exactly one `is_primary`, `is_primary.case_id ==
+    Action.primary_case_id`, or Σ `credit_weight` == Decimal('1.00000')."""

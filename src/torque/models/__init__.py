@@ -4,6 +4,8 @@ Deliberately absent (Blueprint Section 2.3 / Section 3, "eliminated, do not
 recreate"): `AuditLogEntry`, `PlaybookRun.step_history`, `Action.merged_case_ids`.
 """
 
+from torque.models.action import Action
+from torque.models.action_case import ActionCase
 from torque.models.b2b_invoice import B2BInvoice
 from torque.models.card_retry_budget import CardRetryBudget
 from torque.models.case_event import CaseEvent
@@ -24,6 +26,8 @@ from torque.models.systemic_event import SystemicEvent
 from torque.models.upi_retry_budget import UPIRetryBudget
 
 __all__ = [
+    "Action",
+    "ActionCase",
     "B2BInvoice",
     "CardRetryBudget",
     "CaseEvent",

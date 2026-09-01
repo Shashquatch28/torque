@@ -43,9 +43,17 @@ def test_every_event_type_has_a_payload_schema():
 def test_valid_payload_normalised():
     out = validate_payload(
         CaseEventType.ACTION_BLOCKED,
-        {"action_type": "SEND_WHATSAPP", "block_reason": "QUIET_HOURS"},
+        {
+            "action_id": "11111111-1111-1111-1111-111111111111",
+            "action_type": "SEND_WHATSAPP",
+            "block_reason": "QUIET_HOURS",
+        },
     )
-    assert out == {"action_type": "SEND_WHATSAPP", "block_reason": "QUIET_HOURS"}
+    assert out == {
+        "action_id": "11111111-1111-1111-1111-111111111111",
+        "action_type": "SEND_WHATSAPP",
+        "block_reason": "QUIET_HOURS",
+    }
 
 
 def test_unknown_event_type_rejected():

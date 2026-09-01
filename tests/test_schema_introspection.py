@@ -80,6 +80,9 @@ def test_expected_tables_present(engine):
         "playbook",
         "merchant_playbook_config",
         "playbook_run",
+        # Milestone 5
+        "action",
+        "action_case",
     } <= tables
 
 
@@ -191,3 +194,51 @@ def test_merchant_playbook_config_playbook_id_is_a_real_fk(engine):
     ]
     assert len(fks) == 1
     assert fks[0]["referred_table"] == "playbook_identity"
+
+
+# --- Milestone 5 structural invariants -------------------------------------
+
+
+def test_m5_tenant_scoped_tables(engine):
+    for table in ("action", "action_case"):
+        cols = {c["name"] for c in inspect(engine).get_columns(table)}
+        assert "merchant_id" in cols
+
+
+def test_action_has_no_merged_case_ids(engine):
+    cols = {c["name"] for c in inspect(engine).get_columns("action")}
+    assert "merged_case_ids" not in cols
+
+
+def test_action_run_id_is_nullable(engine):
+    col = next(c for c in inspect(engine).get_columns("action") if c["name"] == "run_id")
+    assert col["nullable"] is True
+
+
+def test_action_case_composite_pk(engine):
+    pk = inspect(engine).get_pk_constraint("action_case")["constrained_columns"]
+    assert set(pk) == {"action_id", "case_id"}
+
+
+def test_case_event_has_no_action_id_column(engine):
+    # explicit correlation lives in the payload string only — no column, no FK
+    cols = {c["name"] for c in inspect(engine).get_columns("case_event")}
+    assert "action_id" not in cols
+    fk_tables = {fk["referred_table"] for fk in inspect(engine).get_foreign_keys("case_event")}
+    assert "action" not in fk_tables
+
+
+def test_action_executed_payload_channel_and_cost_nullable():
+    from torque.enums import CaseEventType
+    from torque.events import validate_payload
+
+    out = validate_payload(
+        CaseEventType.ACTION_EXECUTED,
+        {
+            "action_id": "22222222-2222-2222-2222-222222222222",
+            "action_type": "RETRY_PAYMENT",
+            "outcome": "SUCCESS",
+        },
+    )
+    assert out["channel"] is None
+    assert out["cost"] is None

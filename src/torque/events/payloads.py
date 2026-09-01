@@ -45,13 +45,20 @@ class DiagnosisCompletedPayload(_Payload):
 
 
 class ActionExecutedPayload(_Payload):
+    # `action_id` is the explicit Action<->CaseEvent correlation value (Milestone
+    # 5). CaseEvent gains NO action_id column or FK — the string lives only in
+    # the payload and is checked by the before_flush atomicity guard.
+    action_id: str
     action_type: ActionType
-    channel: str
+    # Nullable (Milestone 5 deviation 3): cost computation is deferred and some
+    # action types (e.g. RETRY_PAYMENT) have no messaging channel.
+    channel: str | None = None
     outcome: ActionOutcome
-    cost: Decimal
+    cost: Decimal | None = None
 
 
 class ActionBlockedPayload(_Payload):
+    action_id: str
     action_type: ActionType
     block_reason: BlockReason
 

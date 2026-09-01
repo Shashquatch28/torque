@@ -36,6 +36,10 @@ Enforced here:
    Playbook immutability are guard-enforced: code review is not an invariant and
    audit integrity is critical. `CaseEvent` gains NO `action_id` column and NO
    FK to `Action` — the correlation lives only in the event payload string.
+9. `PromiseToPay.status`: a new row must be `PENDING`; any status change on an
+   existing row must be a legal transition (`PENDING -> KEPT` / `PENDING ->
+   BROKEN`; `KEPT` / `BROKEN` terminal). Same graph as `torque.promises`
+   (Milestone 6a). No `CaseEvent` is written.
 """
 
 from __future__ import annotations
@@ -49,7 +53,7 @@ from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import Session
 
 from torque.contexts.registry import validate_context
-from torque.enums import ActionOutcome, CaseEventType, MacTier
+from torque.enums import ActionOutcome, CaseEventType, MacTier, PromiseStatus
 from torque.exceptions import (
     ActionAtomicityError,
     ActionCaseInvariantError,
@@ -57,11 +61,13 @@ from torque.exceptions import (
     MonotonicityViolation,
     OwnershipViolation,
     PlaybookNotFoundError,
+    PromiseTransitionError,
 )
 from torque.models.case_event import CaseEvent
 from torque.models.merchant_playbook_config import MerchantPlaybookConfig
 from torque.models.playbook import Playbook
 from torque.models.revenue_leak_case import RevenueLeakCase
+from torque.promises import assert_promise_transition
 
 # `Action` / `ActionCase` are imported lazily inside the flush listener:
 # `torque.models.__init__` imports `action` first, and this module is pulled in
@@ -148,6 +154,7 @@ def _before_flush(session: Session, flush_context, instances) -> None:
 
     from torque.models.action import Action
     from torque.models.action_case import ActionCase
+    from torque.models.promise_to_pay import PromiseToPay
 
     new_action_ids = {a.action_id for a in session.new if isinstance(a, Action)}
 
@@ -160,6 +167,8 @@ def _before_flush(session: Session, flush_context, instances) -> None:
             _guard_merchant_playbook_config(session, obj)
         elif isinstance(obj, Action) and obj in session.new:
             _guard_action_write(session, obj)
+        elif isinstance(obj, PromiseToPay):
+            _guard_promise_to_pay(obj, is_new=obj in session.new)
 
     # ActionCase edits on already-persisted Actions (e.g. Module 7 re-weighting).
     touched = {
@@ -322,6 +331,32 @@ def _guard_action_write(session: Session, action) -> None:
         f"(case_id={action.primary_case_id}, payload.action_id={aid}) in the same "
         f"transaction (Section 2.3) — use torque.events.write_action_and_event"
     )
+
+
+def _guard_promise_to_pay(promise, *, is_new: bool) -> None:
+    """Enforce the same PromiseToPay.status graph as `torque.promises`: a new row
+    must be PENDING; any status change on an existing row must be a legal
+    transition (PENDING -> KEPT / PENDING -> BROKEN)."""
+    if is_new:
+        # `status` may still be None pre-flush (the column default is applied at
+        # INSERT); None means "will be PENDING", which is fine.
+        raw = promise.status
+        effective = PromiseStatus.PENDING if raw is None else PromiseStatus(raw)
+        if effective is not PromiseStatus.PENDING:
+            raise PromiseTransitionError(
+                f"a PromiseToPay is created PENDING (got {promise.status}); "
+                f"advance it with torque.promises.transition_promise()"
+            )
+        return
+
+    hist = sa_inspect(promise).attrs["status"].history
+    if not hist.has_changes():
+        return
+    old = hist.deleted[0] if hist.deleted else None
+    new = hist.added[0] if hist.added else None
+    if old is None:
+        return
+    assert_promise_transition(PromiseStatus(old), PromiseStatus(new))
 
 
 def register_guards(session_factory) -> None:

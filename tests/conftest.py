@@ -330,3 +330,62 @@ def make_action(db, make_case):
         return action
 
     return _make
+
+
+@pytest.fixture()
+def make_payment_link(db, make_case, make_action):
+    from decimal import Decimal
+
+    from torque.enums import PaymentLinkStatus
+    from torque.models import PaymentLink
+
+    seq = {"n": 0}
+
+    def _make(*, case=None, action="default", **kw):
+        seq["n"] += 1
+        c = case or make_case()
+        if action == "default":
+            act = make_action(case=c)
+        else:
+            act = action  # None -> unattributed link, or an explicit Action
+        link = PaymentLink(
+            link_id=kw.pop("link_id", f"plink_test_{seq['n']}"),
+            merchant_id=c.merchant_id,
+            action_id=(act.action_id if act is not None else None),
+            case_id=c.case_id,
+            status=kw.pop("status", PaymentLinkStatus.ISSUED),
+            amount_paid=kw.pop("amount_paid", Decimal("0")),
+            **kw,
+        )
+        db.add(link)
+        db.flush()
+        return link
+
+    return _make
+
+
+@pytest.fixture()
+def make_promise(db, make_case, make_action):
+    from datetime import date
+    from decimal import Decimal
+
+    from torque.enums import PromiseStatus
+    from torque.models import PromiseToPay
+
+    def _make(*, case=None, action=None, **kw):
+        c = case or make_case()
+        act = action or make_action(case=c)
+        promise = PromiseToPay(
+            merchant_id=c.merchant_id,
+            case_id=c.case_id,
+            captured_via=act.action_id,
+            promised_amount=kw.pop("promised_amount", Decimal("1000.00")),
+            promised_date=kw.pop("promised_date", date(2026, 10, 1)),
+            status=kw.pop("status", PromiseStatus.PENDING),
+            **kw,
+        )
+        db.add(promise)
+        db.flush()
+        return promise
+
+    return _make

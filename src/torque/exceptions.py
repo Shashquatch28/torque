@@ -106,3 +106,9 @@ class ActionCaseInvariantError(TorqueError):
     """The `ActionCase` attribution set for an `action_id` is missing, or
     violates: exactly one `is_primary`, `is_primary.case_id ==
     Action.primary_case_id`, or Σ `credit_weight` == Decimal('1.00000')."""
+
+
+class PromiseTransitionError(TorqueError):
+    """A `PromiseToPay.status` change is not a legal transition. Only
+    `PENDING -> KEPT` and `PENDING -> BROKEN` are permitted; `KEPT` and
+    `BROKEN` are terminal, and a `PromiseToPay` is created `PENDING`."""

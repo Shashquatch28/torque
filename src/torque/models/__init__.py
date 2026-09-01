@@ -17,10 +17,12 @@ from torque.models.merchant import Merchant
 from torque.models.merchant_counterparty import MerchantCounterparty
 from torque.models.merchant_playbook_config import MerchantPlaybookConfig
 from torque.models.nach_retry_policy import NACHRetryPolicy
+from torque.models.payment_link import PaymentLink
 from torque.models.playbook import Playbook
 from torque.models.playbook_identity import PlaybookIdentity
 from torque.models.playbook_run import PlaybookRun
 from torque.models.pre_debit_notification import PreDebitNotification
+from torque.models.promise_to_pay import PromiseToPay
 from torque.models.revenue_leak_case import RevenueLeakCase
 from torque.models.systemic_event import SystemicEvent
 from torque.models.upi_retry_budget import UPIRetryBudget
@@ -39,10 +41,12 @@ __all__ = [
     "MerchantCounterparty",
     "MerchantPlaybookConfig",
     "NACHRetryPolicy",
+    "PaymentLink",
     "Playbook",
     "PlaybookIdentity",
     "PlaybookRun",
     "PreDebitNotification",
+    "PromiseToPay",
     "RevenueLeakCase",
     "SystemicEvent",
     "UPIRetryBudget",

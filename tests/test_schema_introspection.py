@@ -83,6 +83,9 @@ def test_expected_tables_present(engine):
         # Milestone 5
         "action",
         "action_case",
+        # Milestone 6a
+        "payment_link",
+        "promise_to_pay",
     } <= tables
 
 
@@ -242,3 +245,39 @@ def test_action_executed_payload_channel_and_cost_nullable():
     )
     assert out["channel"] is None
     assert out["cost"] is None
+
+
+# --- Milestone 6a structural invariants -----------------------------------
+
+
+def test_m6a_tenant_scoped_tables(engine):
+    for table in ("payment_link", "promise_to_pay"):
+        cols = {c["name"] for c in inspect(engine).get_columns(table)}
+        assert "merchant_id" in cols
+
+
+def test_payment_link_action_id_is_nullable_fk(engine):
+    insp = inspect(engine)
+    col = next(c for c in insp.get_columns("payment_link") if c["name"] == "action_id")
+    assert col["nullable"] is True
+    fk = next(
+        fk for fk in insp.get_foreign_keys("payment_link")
+        if fk["constrained_columns"] == ["action_id"]
+    )
+    assert fk["referred_table"] == "action"
+
+
+def test_payment_link_has_paid_biconditional_check(engine):
+    names = {c["name"] for c in inspect(engine).get_check_constraints("payment_link")}
+    assert "ck_payment_link_paid_status_matches_paid_at" in names
+    assert "ck_payment_link_amount_paid_non_negative" in names
+
+
+def test_promise_to_pay_captured_via_is_unique(engine):
+    uniques = inspect(engine).get_unique_constraints("promise_to_pay")
+    assert any(u["column_names"] == ["captured_via"] for u in uniques)
+
+
+def test_promise_to_pay_has_no_on_broken_column(engine):
+    cols = {c["name"] for c in inspect(engine).get_columns("promise_to_pay")}
+    assert "on_broken" not in cols

@@ -13,7 +13,11 @@ from torque.models.event import Event
 from torque.models.mac_code_registry import MacCodeRegistry
 from torque.models.merchant import Merchant
 from torque.models.merchant_counterparty import MerchantCounterparty
+from torque.models.merchant_playbook_config import MerchantPlaybookConfig
 from torque.models.nach_retry_policy import NACHRetryPolicy
+from torque.models.playbook import Playbook
+from torque.models.playbook_identity import PlaybookIdentity
+from torque.models.playbook_run import PlaybookRun
 from torque.models.pre_debit_notification import PreDebitNotification
 from torque.models.revenue_leak_case import RevenueLeakCase
 from torque.models.systemic_event import SystemicEvent
@@ -29,7 +33,11 @@ __all__ = [
     "MacCodeRegistry",
     "Merchant",
     "MerchantCounterparty",
+    "MerchantPlaybookConfig",
     "NACHRetryPolicy",
+    "Playbook",
+    "PlaybookIdentity",
+    "PlaybookRun",
     "PreDebitNotification",
     "RevenueLeakCase",
     "SystemicEvent",

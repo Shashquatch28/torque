@@ -200,3 +200,91 @@ def make_case(db, make_merchant, make_counterparty, make_event):
         return case
 
     return _make
+
+
+# --- Milestone 4 playbook fixtures ---------------------------------------
+
+VALID_STEPS_GRAPH = {
+    "entry": "n1",
+    "nodes": [
+        {
+            "id": "n1",
+            "action_template": {"type": "SEND_WHATSAPP"},
+            "timing_offset_hours": 0,
+            "params": {},
+        },
+        {
+            "id": "n2",
+            "action_template": {"type": "ESCALATE_HUMAN"},
+            "timing_offset_hours": 24,
+            "params": {},
+        },
+    ],
+    "edges": [
+        {"from": "n1", "condition": "on_success", "to": "n2"},
+        {"from": "n1", "condition": "on_failed", "to": "n2"},
+    ],
+}
+
+VALID_STOPPING_RULES = {
+    "max_attempts": 3,
+    "max_duration_days": 7,
+    "allowed_hours": {"start": "08:00", "end": "19:00"},
+    "escalation_ceiling": 2,
+}
+
+
+@pytest.fixture()
+def make_playbook(db):
+    """Create (or reuse) a `playbook_identity` row and insert one `playbook`
+    version. Returns the `Playbook` instance."""
+    from copy import deepcopy
+
+    from torque.enums import LegType
+    from torque.models import Playbook, PlaybookIdentity
+
+    seq = {"n": 0}
+
+    def _make(**kw):
+        seq["n"] += 1
+        playbook_id = kw.pop("playbook_id", f"pb_test_{seq['n']}")
+        version = kw.pop("version", 1)
+        if db.get(PlaybookIdentity, playbook_id) is None:
+            db.add(PlaybookIdentity(playbook_id=playbook_id))
+            db.flush()
+        pb = Playbook(
+            playbook_id=playbook_id,
+            version=version,
+            leg_type=kw.pop("leg_type", LegType.PAYMENT_DEGRADATION),
+            mandate_type=kw.pop("mandate_type", None),
+            trigger_condition=kw.pop("trigger_condition", {}),
+            steps_graph=kw.pop("steps_graph", deepcopy(VALID_STEPS_GRAPH)),
+            stopping_rules=kw.pop("stopping_rules", deepcopy(VALID_STOPPING_RULES)),
+            **kw,
+        )
+        db.add(pb)
+        db.flush()
+        return pb
+
+    return _make
+
+
+@pytest.fixture()
+def make_playbook_run(db, make_case, make_playbook):
+    from torque.models import PlaybookRun
+
+    def _make(*, case=None, playbook=None, **kw):
+        pb = playbook or make_playbook()
+        c = case or make_case()
+        run = PlaybookRun(
+            merchant_id=c.merchant_id,
+            case_id=c.case_id,
+            playbook_id=pb.playbook_id,
+            playbook_version=pb.version,
+            **kw,
+        )
+        db.add(run)
+        db.flush()
+        return run
+
+    return _make

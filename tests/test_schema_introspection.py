@@ -75,6 +75,11 @@ def test_expected_tables_present(engine):
         # Milestone 3
         "systemic_event",
         "channel_rate_card",
+        # Milestone 4
+        "playbook_identity",
+        "playbook",
+        "merchant_playbook_config",
+        "playbook_run",
     } <= tables
 
 
@@ -137,3 +142,52 @@ def test_revenue_leak_case_systemic_event_id_is_a_real_fk(engine):
     assert len(fks) == 1
     assert fks[0]["referred_table"] == "systemic_event"
     assert fks[0]["referred_columns"] == ["systemic_event_id"]
+
+
+# --- Milestone 4 structural invariants -------------------------------------
+
+
+def test_playbook_tables_are_global(engine):
+    for table in ("playbook_identity", "playbook"):
+        cols = {c["name"] for c in inspect(engine).get_columns(table)}
+        assert "merchant_id" not in cols
+
+
+def test_playbook_is_append_only_shape(engine):
+    cols = {c["name"] for c in inspect(engine).get_columns("playbook")}
+    assert "updated_at" not in cols
+    assert "created_at" in cols
+
+
+def test_m4_tenant_scoped_tables(engine):
+    for table in ("merchant_playbook_config", "playbook_run"):
+        cols = {c["name"] for c in inspect(engine).get_columns(table)}
+        assert "merchant_id" in cols
+
+
+def test_playbook_run_has_no_step_history(engine):
+    cols = {c["name"] for c in inspect(engine).get_columns("playbook_run")}
+    assert "step_history" not in cols
+
+
+def test_playbook_run_pins_version_via_composite_fk(engine):
+    insp = inspect(engine)
+    fks = [
+        fk
+        for fk in insp.get_foreign_keys("playbook_run")
+        if set(fk["constrained_columns"]) == {"playbook_id", "playbook_version"}
+    ]
+    assert len(fks) == 1
+    assert fks[0]["referred_table"] == "playbook"
+    assert set(fks[0]["referred_columns"]) == {"playbook_id", "version"}
+
+
+def test_merchant_playbook_config_playbook_id_is_a_real_fk(engine):
+    insp = inspect(engine)
+    fks = [
+        fk
+        for fk in insp.get_foreign_keys("merchant_playbook_config")
+        if fk["constrained_columns"] == ["playbook_id"]
+    ]
+    assert len(fks) == 1
+    assert fks[0]["referred_table"] == "playbook_identity"

@@ -72,3 +72,18 @@ class IllegalTransitionError(TorqueError):
 
 class CohortAlreadyAssignedError(TorqueError):
     """`Merchant_Counterparty.in_control_cohort` is assigned once and immutable."""
+
+
+# --- Playbook (Blueprint Section 3 / Section 4.2) ---------------------------
+
+
+class PlaybookValidationError(TorqueError):
+    """A `Playbook` version (or a `MerchantPlaybookConfig` override merged onto
+    one) failed a save-time validation rule: malformed `steps_graph`, malformed
+    `stopping_rules`, or a UPI AutoPay `max_attempts > 3` ceiling (Section 4.2).
+    """
+
+
+class PlaybookNotFoundError(TorqueError):
+    """A `MerchantPlaybookConfig` references a `playbook_id` that has no
+    published `playbook` version to validate the override against."""

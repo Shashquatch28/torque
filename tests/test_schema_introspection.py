@@ -86,6 +86,8 @@ def test_expected_tables_present(engine):
         # Milestone 6a
         "payment_link",
         "promise_to_pay",
+        # Milestone 6b
+        "merchant_whatsapp_template",
     } <= tables
 
 
@@ -281,3 +283,39 @@ def test_promise_to_pay_captured_via_is_unique(engine):
 def test_promise_to_pay_has_no_on_broken_column(engine):
     cols = {c["name"] for c in inspect(engine).get_columns("promise_to_pay")}
     assert "on_broken" not in cols
+
+
+# --- Milestone 6b structural invariants -----------------------------------
+
+
+def test_m6b_merchant_whatsapp_template_is_tenant_scoped(engine):
+    cols = {c["name"] for c in inspect(engine).get_columns("merchant_whatsapp_template")}
+    assert "merchant_id" in cols
+
+
+def test_m6b_approval_status_is_not_a_pg_enum(engine):
+    col = next(
+        c
+        for c in inspect(engine).get_columns("merchant_whatsapp_template")
+        if c["name"] == "approval_status"
+    )
+    assert col["type"].__class__.__name__ in {"VARCHAR", "String"}
+    assert getattr(col["type"], "name", None) != "whatsapp_approval_status"
+
+
+def test_m6b_no_uniqueness_beyond_pk(engine):
+    assert inspect(engine).get_unique_constraints("merchant_whatsapp_template") == []
+    pk = inspect(engine).get_pk_constraint("merchant_whatsapp_template")
+    assert pk["constrained_columns"] == ["template_id"]
+
+
+def test_m6b_gate_index_present_and_exact(engine):
+    idx = {
+        i["name"]: i["column_names"]
+        for i in inspect(engine).get_indexes("merchant_whatsapp_template")
+    }
+    assert idx["ix_merchant_whatsapp_template_gate"] == [
+        "merchant_id",
+        "leg_type",
+        "category",
+    ]

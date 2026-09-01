@@ -167,6 +167,22 @@ class LanguagePref(StrEnum):
     ENGLISH = "ENGLISH"
 
 
+class WhatsAppTemplateCategory(StrEnum):
+    """Meta WABA template category (Blueprint Section 3: "utility/marketing").
+
+    `AUTHENTICATION` is a deferred Meta category (OTP/auth templates) — add it
+    with an explicit `ALTER TYPE whatsapp_template_category ADD VALUE
+    'AUTHENTICATION'` migration only if Torque ever introduces such a use case.
+
+    NOTE: `MerchantWhatsAppTemplate.approval_status` is deliberately NOT an enum
+    — Meta owns and evolves that vocabulary. See
+    `torque.compliance.whatsapp.WHATSAPP_APPROVED`.
+    """
+
+    UTILITY = "UTILITY"
+    MARKETING = "MARKETING"
+
+
 # Enums that back an actual column somewhere in the Milestone 1 schema. Migration
 # 0001 creates a Postgres type for every enum in this module; this tuple is the
 # subset the 0002-0005 tables reference, kept here as documentation.
@@ -200,4 +216,5 @@ ALL_ENUMS = (
     ClearingCycleStatus,
     SystemicScope,
     LanguagePref,
+    WhatsAppTemplateCategory,
 )

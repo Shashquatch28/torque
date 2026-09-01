@@ -389,3 +389,37 @@ def make_promise(db, make_case, make_action):
         return promise
 
     return _make
+
+
+@pytest.fixture()
+def make_wa_template(db, make_merchant):
+    from torque.enums import LegType, WhatsAppTemplateCategory
+    from torque.models import MerchantWhatsAppTemplate
+
+    seq = {"n": 0}
+
+    def _make(
+        *,
+        merchant=None,
+        leg_type=LegType.PAYMENT_DEGRADATION,
+        category=WhatsAppTemplateCategory.UTILITY,
+        approval_status="APPROVED",
+        template_name="nudge_tmpl",
+        **kw,
+    ):
+        seq["n"] += 1
+        m = merchant or make_merchant()
+        tmpl = MerchantWhatsAppTemplate(
+            template_id=kw.pop("template_id", f"wamtpl_test_{seq['n']}"),
+            merchant_id=m.merchant_id,
+            template_name=template_name,
+            category=category,
+            approval_status=approval_status,
+            leg_type=leg_type,
+            **kw,
+        )
+        db.add(tmpl)
+        db.flush()
+        return tmpl
+
+    return _make

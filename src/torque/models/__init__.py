@@ -16,6 +16,7 @@ from torque.models.mac_code_registry import MacCodeRegistry
 from torque.models.merchant import Merchant
 from torque.models.merchant_counterparty import MerchantCounterparty
 from torque.models.merchant_playbook_config import MerchantPlaybookConfig
+from torque.models.merchant_whatsapp_template import MerchantWhatsAppTemplate
 from torque.models.nach_retry_policy import NACHRetryPolicy
 from torque.models.payment_link import PaymentLink
 from torque.models.playbook import Playbook
@@ -40,6 +41,7 @@ __all__ = [
     "Merchant",
     "MerchantCounterparty",
     "MerchantPlaybookConfig",
+    "MerchantWhatsAppTemplate",
     "NACHRetryPolicy",
     "PaymentLink",
     "Playbook",

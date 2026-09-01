@@ -24,6 +24,7 @@ from torque.compliance.retry_rails import (
     within_upi_execution_window,
 )
 from torque.compliance.systemic import systemic_resolved, systemic_threshold_breached
+from torque.compliance.whatsapp import WHATSAPP_APPROVED, approved_template_exists
 
 __all__ = [
     "tier_for",
@@ -40,4 +41,6 @@ __all__ = [
     "within_upi_execution_window",
     "systemic_threshold_breached",
     "systemic_resolved",
+    "WHATSAPP_APPROVED",
+    "approved_template_exists",
 ]

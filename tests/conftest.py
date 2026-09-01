@@ -174,3 +174,29 @@ def make_event(db):
         return ev
 
     return _make
+
+
+@pytest.fixture()
+def make_case(db, make_merchant, make_counterparty, make_event):
+    from torque.enums import LegType
+    from torque.models import RevenueLeakCase
+
+    def _make(*, merchant=None, counterparty=None, leg=LegType.PAYMENT_DEGRADATION, **kw):
+        m = merchant or make_merchant()
+        cp = counterparty or make_counterparty()
+        ev = make_event(m)
+        default_ctx = {} if leg is LegType.B2B_RECEIVABLE else {"gateway": "razorpay"}
+        case = RevenueLeakCase(
+            merchant_id=m.merchant_id,
+            leg_type=leg,
+            source_event_id=ev.event_id,
+            counterparty_id=cp.counterparty_id,
+            amount_at_risk=kw.pop("amount_at_risk", 1000),
+            context=kw.pop("context", default_ctx),
+            **kw,
+        )
+        db.add(case)
+        db.flush()
+        return case
+
+    return _make

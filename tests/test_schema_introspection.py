@@ -66,4 +66,46 @@ def test_expected_tables_present(engine):
         "revenue_leak_case",
         "b2b_invoice",
         "case_event",
+        # Milestone 2
+        "mac_code_registry",
+        "card_retry_budget",
+        "upi_retry_budget",
+        "nach_retry_policy",
+        "pre_debit_notification",
     } <= tables
+
+
+# --- Milestone 2 structural invariants -------------------------------------
+
+_TENANT_SCOPED_M2 = (
+    "card_retry_budget",
+    "upi_retry_budget",
+    "nach_retry_policy",
+    "pre_debit_notification",
+)
+
+
+def test_m2_retry_tables_are_tenant_scoped(engine):
+    cols = _all_columns(engine)
+    for table in _TENANT_SCOPED_M2:
+        assert "merchant_id" in cols[table], f"{table} must carry merchant_id (decision 1)"
+
+
+def test_mac_code_registry_is_not_tenant_scoped(engine):
+    cols = {c["name"] for c in inspect(engine).get_columns("mac_code_registry")}
+    assert "merchant_id" not in cols  # global static config (R3)
+
+
+def test_upi_retry_budget_has_no_execution_window_column(engine):
+    cols = {c["name"] for c in inspect(engine).get_columns("upi_retry_budget")}
+    assert "permitted_execution_window" not in cols  # decision 3: constant + predicate
+
+
+def test_mandate_id_is_not_a_foreign_key(engine):
+    """decision 2 - mandate_id is an external identifier String, no DB FK."""
+    insp = inspect(engine)
+    for table in ("upi_retry_budget", "nach_retry_policy"):
+        fk_cols = {c for fk in insp.get_foreign_keys(table) for c in fk["constrained_columns"]}
+        assert "mandate_id" not in fk_cols
+        col = next(c for c in insp.get_columns(table) if c["name"] == "mandate_id")
+        assert col["type"].__class__.__name__ in {"VARCHAR", "String"}

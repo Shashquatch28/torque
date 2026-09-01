@@ -58,6 +58,11 @@ class PolicyConfig(BaseSettings):
     warm_start_cap_high: float = 1.3
     # SystemicEvent resolution sustain window (Decision J).
     systemic_sustain_window_minutes: int = 10
+    # NACHRetryPolicy Section 3 — self-imposed representment ceiling. NACH has
+    # no NPCI cap; this "recommended default 3 per billing cycle" is what
+    # Module 4 copies into Playbook.stopping_rules.max_attempts for NACH
+    # playbooks. Consumed by torque.compliance.retry_rails.nach_retry_eligible.
+    nach_representment_ceiling_default: int = 3
 
 
 @lru_cache

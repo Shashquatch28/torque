@@ -7,7 +7,7 @@ this package — those are Modules 5 and 6. This is the checkable logic they wil
 call, isolated so it can be unit-tested in one place.
 
 Blueprint references: Section 2.6 (three rails, three postures), Section 3
-(entity specs), Decision K (demo scenarios).
+(entity specs), Decision J (systemic threshold), Decision K (demo scenarios).
 """
 
 from torque.compliance.mac_registry import tier_for
@@ -23,6 +23,7 @@ from torque.compliance.retry_rails import (
     upi_attempt_gate_open,
     within_upi_execution_window,
 )
+from torque.compliance.systemic import systemic_resolved, systemic_threshold_breached
 
 __all__ = [
     "tier_for",
@@ -37,4 +38,6 @@ __all__ = [
     "nach_retry_eligible",
     "upi_attempt_gate_open",
     "within_upi_execution_window",
+    "systemic_threshold_breached",
+    "systemic_resolved",
 ]

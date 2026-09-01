@@ -56,8 +56,16 @@ class PolicyConfig(BaseSettings):
     # Module 8 Section 8.1 — warm-start multiplier bounds (Part E item 12).
     warm_start_cap_low: float = 0.5
     warm_start_cap_high: float = 1.3
-    # SystemicEvent resolution sustain window (Decision J).
+    # SystemicEvent threshold + resolution (Blueprint Section 3 / Decision J).
+    # `systemic_sustain_window_minutes` gates `resolved_at`; the other three feed
+    # `torque.compliance.systemic.systemic_threshold_breached`. N and M are
+    # per-scope config values in the blueprint; the numeric defaults below are
+    # unverified placeholders (no blueprint figure) to be tuned when Module 2
+    # Section 2.5 is built.
     systemic_sustain_window_minutes: int = 10
+    systemic_spike_multiplier: float = 5.0        # Decision J: 5x baseline
+    systemic_baseline_floor_per_min: float = 1.0  # N: min baseline failures/min
+    systemic_absolute_count_floor: int = 20       # M: min absolute failures in window
     # NACHRetryPolicy Section 3 — self-imposed representment ceiling. NACH has
     # no NPCI cap; this "recommended default 3 per billing cycle" is what
     # Module 4 copies into Playbook.stopping_rules.max_attempts for NACH

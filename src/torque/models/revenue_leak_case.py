@@ -70,10 +70,16 @@ class RevenueLeakCase(Base, TenantScoped, TimestampMixin):
         Uuid, ForeignKey("counterparty.counterparty_id"), nullable=False, index=True
     )
 
-    # Nullable FK -> SystemicEvent. The SystemicEvent table lands in Milestone 2;
-    # the column exists now (no FK constraint yet) so the case shape is stable.
-    # When set, playbook execution is suppressed (SYSTEMIC_HOLD status).
-    systemic_event_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    # Nullable FK -> SystemicEvent (wired in Milestone 3). Default RESTRICT delete
+    # behaviour: a referenced SystemicEvent cannot be deleted. When set, playbook
+    # execution is suppressed (SYSTEMIC_HOLD status) — that transition itself is
+    # Module 2 Section 2.5, not this model.
+    systemic_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("systemic_event.systemic_event_id"),
+        nullable=True,
+        index=True,
+    )
 
     amount_at_risk: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
 

@@ -72,6 +72,9 @@ def test_expected_tables_present(engine):
         "upi_retry_budget",
         "nach_retry_policy",
         "pre_debit_notification",
+        # Milestone 3
+        "systemic_event",
+        "channel_rate_card",
     } <= tables
 
 
@@ -109,3 +112,28 @@ def test_mandate_id_is_not_a_foreign_key(engine):
         assert "mandate_id" not in fk_cols
         col = next(c for c in insp.get_columns(table) if c["name"] == "mandate_id")
         assert col["type"].__class__.__name__ in {"VARCHAR", "String"}
+
+
+# --- Milestone 3 structural invariants -------------------------------------
+
+
+def test_m3_systemic_event_is_tenant_scoped(engine):
+    cols = {c["name"] for c in inspect(engine).get_columns("systemic_event")}
+    assert "merchant_id" in cols  # decision A
+
+
+def test_channel_rate_card_is_not_tenant_scoped(engine):
+    cols = {c["name"] for c in inspect(engine).get_columns("channel_rate_card")}
+    assert "merchant_id" not in cols  # global static config (R3 / decision C-D)
+
+
+def test_revenue_leak_case_systemic_event_id_is_a_real_fk(engine):
+    insp = inspect(engine)
+    fks = [
+        fk
+        for fk in insp.get_foreign_keys("revenue_leak_case")
+        if fk["constrained_columns"] == ["systemic_event_id"]
+    ]
+    assert len(fks) == 1
+    assert fks[0]["referred_table"] == "systemic_event"
+    assert fks[0]["referred_columns"] == ["systemic_event_id"]

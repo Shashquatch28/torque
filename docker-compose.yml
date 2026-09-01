@@ -1,0 +1,28 @@
+# Local dev infrastructure. Free / self-hosted only (Blueprint v7 build constraint).
+# Host ports are offset (5442 / 6389) so a pre-existing local Postgres/Redis on
+# the standard ports does not conflict. Container-internal ports are unchanged.
+# Redis is declared now for Module 2's ingestion queue; it is unused in Milestone 1.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: torque
+    ports:
+      - "5442:5432"
+    volumes:
+      - torque_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6389:6379"
+
+volumes:
+  torque_pgdata:

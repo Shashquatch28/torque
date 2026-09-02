@@ -14,17 +14,26 @@ dependencies = [
     "psycopg[binary]>=3.1",
     "pydantic>=2.7",
     "pydantic-settings>=2.2",
+    # HTTP surface. Added in Milestone 7a (Module 2 — Signal Ingestion),
+    # alongside the first real route: the Razorpay webhook endpoint.
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    # Inbound delayed-job mechanism for Module 2 (Milestone 7b): the §2.3
+    # self-recovery buffer. Celery is the Python-native stand-in for the
+    # blueprint's "BullMQ + Redis" inbound role (Decision C). Redis is broker
+    # only — no result backend; Postgres is the source of truth for ingestion
+    # outcomes.
+    "celery>=5.4",
+    "redis>=5",
 ]
-
-# FastAPI + uvicorn are part of the approved stack but are only added in
-# Module 2, alongside the first real HTTP route (the Razorpay webhook
-# endpoint). Milestone 1 has no HTTP surface by design.
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
     "pytest-cov>=5",
     "ruff>=0.6",
+    # Starlette's TestClient transport (FastAPI webhook tests, M7a).
+    "httpx>=0.27",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -40,3 +49,8 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# FastAPI's dependency-injection idiom puts callables (Depends/Path/Query) in
+# parameter defaults; B008 flags exactly that pattern and does not apply here.
+"src/torque/api/*" = ["B008"]

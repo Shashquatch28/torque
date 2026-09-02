@@ -319,3 +319,77 @@ def test_m6b_gate_index_present_and_exact(engine):
         "leg_type",
         "category",
     ]
+
+
+# --- Milestone 7a structural invariants ----------------------------------
+
+
+def test_m7a_event_ingestion_index_present_and_exact(engine):
+    idx = {i["name"]: i["column_names"] for i in inspect(engine).get_indexes("event")}
+    # migration 0013 — the trailing-window lookup Module 2 §2.4/§2.5 needs.
+    assert idx["ix_event_merchant_type_received_at"] == [
+        "merchant_id",
+        "type",
+        "received_at",
+    ]
+
+
+def test_m7a_event_idempotency_uniqueness_unchanged(engine):
+    # M7a adds an HTTP endpoint and one index — no new table, and the
+    # idempotency contract is still the single UNIQUE(idempotency_key).
+    uqs = inspect(engine).get_unique_constraints("event")
+    assert [u["column_names"] for u in uqs] == [["idempotency_key"]]
+
+
+# --- Milestone 7b structural invariants ----------------------------------
+
+
+def test_m7b_is_logic_only_no_schema_change(engine):
+    # M7b is pure ingestion logic (Celery buffer + dedup + Leg-1 case creation).
+    # It adds no table, no enum, no migration.
+    tables = set(inspect(engine).get_table_names())
+    assert {"revenue_leak_case", "card_retry_budget", "counterparty", "event"} <= tables
+    assert not {
+        "scheduled_jobs",
+        "buffered_event",
+        "checkout_session",
+        "celery_taskmeta",
+    } & tables
+
+
+def test_m7b_payment_degradation_context_allows_unset_hard_decline():
+    # Ingestion must be able to write is_hard_decline=None (Module 3 owns the
+    # hard/soft verdict). Also carries the merged abandonment context.
+    from torque.contexts import validate_context
+    from torque.enums import LegType
+
+    out = validate_context(LegType.PAYMENT_DEGRADATION, {"gateway": "razorpay"})
+    assert out["is_hard_decline"] is None
+    assert out["merged_abandonment_context"] is None
+
+
+# --- Milestone 7c structural invariants ---------------------------------
+
+
+def test_m7c_is_logic_only_no_schema_change(engine):
+    # Systemic detection (§2.5, NETWORK_WIDE) is pure ingestion logic + one
+    # state-machine edge. It adds no table, no enum, no CaseEventType, no
+    # migration.
+    tables = set(inspect(engine).get_table_names())
+    assert {"systemic_event", "revenue_leak_case", "event", "case_event"} <= tables
+    assert not {"systemic_baseline", "systemic_window", "celerybeat"} & tables
+
+    from torque.enums import CaseEventType
+
+    assert len(list(CaseEventType)) == 10  # no SYSTEMIC_HOLD_RESOLVED added
+
+
+def test_m7c_state_machine_has_exactly_the_approved_edge():
+    from torque.enums import CaseStatus
+    from torque.state_machine import _TRANSITIONS
+
+    assert CaseStatus.SYSTEMIC_HOLD in _TRANSITIONS[CaseStatus.PLAYBOOK_ACTIVE]
+    assert _TRANSITIONS[CaseStatus.SYSTEMIC_HOLD] == {CaseStatus.DIAGNOSING}
+    # the withheld edges are still withheld
+    assert CaseStatus.SYSTEMIC_HOLD not in _TRANSITIONS[CaseStatus.DIAGNOSING]
+    assert CaseStatus.CANCELLED not in _TRANSITIONS[CaseStatus.DETECTED]

@@ -23,6 +23,11 @@ services:
     image: redis:7-alpine
     ports:
       - "6389:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
 volumes:
   torque_pgdata:

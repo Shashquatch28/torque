@@ -13,13 +13,17 @@ Also here: `apply_network_directive` (the only sanctioned writer of
 `sync_control_group` (keeps the denormalised `control_group` in step with the
 cohort assignment).
 
+`PLAYBOOK_ACTIVE -> SYSTEMIC_HOLD` was ADDED in Milestone 7c (U-01 #3, approved):
+Module 2 §2.5's outage sweep may catch an already-active case. It is a legal but
+DORMANT edge — M7c's systemic-detection job only sweeps `DETECTED` cases, and no
+case reaches `PLAYBOOK_ACTIVE` until Module 5 exists. Resume is the existing
+`SYSTEMIC_HOLD -> DIAGNOSING` (§3: "re-queued for diagnosis in a batch"); there is
+deliberately NO `SYSTEMIC_HOLD -> PLAYBOOK_ACTIVE` restoration edge.
+
 NOT YET ADDED — flagged, pending confirmation before the owning module is built:
 * `DETECTED -> CANCELLED`, `DIAGNOSING -> CANCELLED` — required by Module 7
   §7.1.4 (payment arrives before diagnosis finishes). Not in the Section 4
   diagram.
-* `PLAYBOOK_ACTIVE -> SYSTEMIC_HOLD` — implied by Module 2 §2.5 (an outage wave
-  sweeps already-active cases into hold). The diagram only shows
-  `DETECTED -> SYSTEMIC_HOLD`.
 """
 
 from __future__ import annotations
@@ -46,6 +50,7 @@ _TRANSITIONS: dict[CaseStatus, set[CaseStatus]] = {
         CaseStatus.ESCALATED_TO_HUMAN,
         CaseStatus.PAUSED,
         CaseStatus.CANCELLED,
+        CaseStatus.SYSTEMIC_HOLD,  # U-01 #3 — approved M7c; dormant until Module 5
     },
     CaseStatus.PAUSED: {CaseStatus.PLAYBOOK_ACTIVE},
     CaseStatus.ESCALATED_TO_HUMAN: {

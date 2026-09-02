@@ -100,3 +100,77 @@ def test_transition_case_rejects_illegal(db, make_merchant, make_counterparty, m
     case = _case(db, m, cp, ev)
     with pytest.raises(IllegalTransitionError):
         transition_case(db, case, CaseStatus.RECOVERED, trigger="nope")
+
+
+# --- Milestone 7c — U-01 #3: PLAYBOOK_ACTIVE -> SYSTEMIC_HOLD (approved) ---
+
+
+def test_playbook_active_to_systemic_hold_is_legal():
+    assert_transition(
+        CaseStatus.PLAYBOOK_ACTIVE, CaseStatus.SYSTEMIC_HOLD, LegType.PAYMENT_DEGRADATION
+    )
+
+
+def test_playbook_active_targets_are_exactly_expected():
+    assert allowed_targets(CaseStatus.PLAYBOOK_ACTIVE, LegType.PAYMENT_DEGRADATION) == {
+        CaseStatus.RECOVERED,
+        CaseStatus.PARTIALLY_RECOVERED,
+        CaseStatus.EXHAUSTED,
+        CaseStatus.ESCALATED_TO_HUMAN,
+        CaseStatus.PAUSED,
+        CaseStatus.CANCELLED,
+        CaseStatus.SYSTEMIC_HOLD,
+    }
+
+
+def test_systemic_hold_targets_unchanged():
+    # resume is only ever -> DIAGNOSING; no SYSTEMIC_HOLD -> PLAYBOOK_ACTIVE edge
+    assert allowed_targets(CaseStatus.SYSTEMIC_HOLD, LegType.PAYMENT_DEGRADATION) == {
+        CaseStatus.DIAGNOSING
+    }
+
+
+def test_diagnosing_to_systemic_hold_still_illegal():
+    with pytest.raises(IllegalTransitionError):
+        assert_transition(
+            CaseStatus.DIAGNOSING, CaseStatus.SYSTEMIC_HOLD, LegType.PAYMENT_DEGRADATION
+        )
+
+
+def test_detected_to_cancelled_still_illegal():
+    with pytest.raises(IllegalTransitionError):
+        assert_transition(
+            CaseStatus.DETECTED, CaseStatus.CANCELLED, LegType.PAYMENT_DEGRADATION
+        )
+
+
+def test_diagnosing_to_cancelled_still_illegal():
+    with pytest.raises(IllegalTransitionError):
+        assert_transition(
+            CaseStatus.DIAGNOSING, CaseStatus.CANCELLED, LegType.PAYMENT_DEGRADATION
+        )
+
+
+def test_transition_case_executes_playbook_active_to_systemic_hold(
+    db, make_merchant, make_counterparty, make_event
+):
+    m, cp = make_merchant(), make_counterparty()
+    ev = make_event(m)
+    case = _case(db, m, cp, ev, status=CaseStatus.PLAYBOOK_ACTIVE)
+    transition_case(db, case, CaseStatus.SYSTEMIC_HOLD, trigger="systemic_network_wide")
+    db.flush()
+
+    assert case.status is CaseStatus.SYSTEMIC_HOLD
+    row = db.execute(
+        text(
+            "SELECT event_type, payload FROM case_event WHERE case_id = :c "
+            "ORDER BY event_seq_id DESC LIMIT 1"
+        ),
+        {"c": case.case_id},
+    ).one()
+    assert row.event_type == "STATUS_CHANGED"
+    assert row.payload == {
+        "from_status": "PLAYBOOK_ACTIVE",
+        "to_status": "SYSTEMIC_HOLD",
+        "trigger": "systemic_network_wide",
+    }

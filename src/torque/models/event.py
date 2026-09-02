@@ -13,7 +13,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -23,6 +23,17 @@ from torque.models.mixins import TimestampMixin, uuid_pk
 
 class Event(Base, TenantScoped, TimestampMixin):
     __tablename__ = "event"
+    __table_args__ = (
+        # Module 2 §2.4 (cross-leg dedup) and §2.5 (systemic detection) both
+        # scan a merchant's events of a given type within a trailing time
+        # window. Added in migration 0013 (Milestone 7a).
+        Index(
+            "ix_event_merchant_type_received_at",
+            "merchant_id",
+            "type",
+            "received_at",
+        ),
+    )
 
     event_id: Mapped[uuid.UUID] = uuid_pk()
     merchant_id: Mapped[str] = mapped_column(

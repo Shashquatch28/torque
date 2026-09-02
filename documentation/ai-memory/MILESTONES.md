@@ -1,0 +1,631 @@
+# MILESTONE HISTORY (append-only per-milestone sections)
+
+One section per completed milestone. **Append new sections; never rewrite a past
+one.** If a later milestone changes something a past section described, note it in
+the *new* section (and, if it reverses a decision, in `DECISIONS.md`).
+
+## Verification vocabulary
+
+A milestone is "complete + verified" when, at its commit: `uv run pytest` is
+fully green, `uv run ruff check .` is clean, `alembic upgrade head` +
+up→down→up roundtrip pass (`tests/test_zz_migrations_roundtrip.py`), and the
+`state_machine.py` / `guards.py` diffs are intentional.
+
+## Test-count note (read before trusting any number below)
+
+- **Verified this session (2026-09-02) at HEAD `47cf6d7`:** `pytest` collects and
+  passes **417** tests; there are **358** `def test_` functions (the gap is
+  `@pytest.mark.parametrize` expansion).
+- **`def test_` function counts per milestone commit** (verified read-only via
+  `git show <commit>:tests/*`): M1 **66**, M2 **119**, M3 **153**, M4 **241**,
+  M5 **285**, M6a **327**, M6b **358**.
+- **pytest-collected counts at M1–M6a completion** were reported in each
+  milestone's own verification report as **66 / 142 / 176 / 278 / 323 / 370**.
+  Only the M6b figure (**417**) was re-verified in this session. Treat
+  142/176/278/323/370 as **historical, not re-verified** — the collected count
+  can only be reproduced by checking out each commit and running the suite
+  against a matching DB, which was not done.
+
+---
+
+## Milestone 1 — Core Data Model: case spine, tenancy, atomic history
+
+- **Commit:** `abbab18` "Initial commit: Torque Milestone 1 core data model"
+- **Migrations:** `0001_enums` … `0005_case_event`
+- **Objective:** Stand up the shared case object, application-layer
+  multi-tenancy, PII isolation, the typed leg-context boundary, the append-only
+  `CaseEvent` stream, and the `RevenueLeakCase` status state machine.
+- **Scope delivered:**
+  - `src/torque/enums.py` — all blueprint §4 enums (19 PG types in `0001`).
+  - `db/base.py` (`Base` + `NAMING_CONVENTION` + `TenantScoped`), `db/scoped.py`
+    (`TenantScope`), `db/session.py` (engine, `SessionLocal`, guard wiring).
+  - Models: `Merchant`, `Counterparty` (+`redact_pii`), `MerchantCounterparty`
+    (+`assign_cohort`), `Event`, `RevenueLeakCase`, `B2BInvoice`, `CaseEvent`.
+  - `contexts/` — `PaymentDegradationContext`, `CheckoutAbandonmentContext`,
+    `SubscriptionFailureContext`, `validate_context` (B2B → no blob).
+  - `events/payloads.py` — 10 locked `CaseEvent` payload schemas +
+    `validate_payload`. `events/case_event_writer.py` — `atomic`,
+    `append_case_event` (M1 form).
+  - `state_machine.py` — `transition_case`, `apply_network_directive`,
+    `sync_control_group`; §4 diagram + Part C edge + R4 B2B exception.
+  - `models/guards.py` — `before_flush` enforcement (tenancy, CaseEvent
+    append-only, typed context, network-directive monotonicity, Module-7-only
+    fields).
+  - `security/razorpay_signature.py` — pure HMAC helper.
+  - `config.py` — `Settings` + `PolicyConfig` (declared, unused).
+  - DB trigger `case_event_no_mutate` (`0005`).
+- **Decisions:** D-001..D-015, D-049, D-050. (See `DECISIONS.md`.)
+- **Deviations from blueprint:** none material; `state_machine.py` documents the
+  3 withheld edges (D-010).
+- **Deferred work introduced:** erasure-request intake UI; webhook HTTP
+  endpoint; everything Module 2+.
+- **Unresolved introduced:** 3 state-machine edges; `STEP_TRANSITIONED` payload
+  shape.
+- **Tests at completion:** 66 `def test_` functions (files:
+  `test_atomicity`, `test_case_event`, `test_context_validation`, `test_enums`,
+  `test_event_idempotency`, `test_identity_erasure`, `test_module7_ownership`,
+  `test_network_directive`, `test_razorpay_signature`, `test_schema_introspection`,
+  `test_state_machine`, `test_tenancy`, `test_zz_migrations_roundtrip`).
+  Reported collected count: 66.
+- **Verification status:** complete + verified at `abbab18`.
+- **Recommended commit message (as used):** "Initial commit: Torque Milestone 1
+  core data model".
+
+---
+
+## Milestone 2 — Three retry rails + pre-debit compliance schema
+
+- **Commit:** `24ab187` "Milestone 2: three retry rails + pre-debit compliance schema"
+- **Migrations:** `0006_mac_code_registry`, `0007_retry_budgets`
+- **Objective:** Model the three structurally different retry-compliance
+  postures (card / UPI AutoPay / NACH) and per-attempt pre-debit tracking, plus
+  the pure predicates later modules will call.
+- **Scope delivered:**
+  - Models: `MacCodeRegistry` (composite PK, global), `CardRetryBudget`,
+    `UPIRetryBudget`, `NACHRetryPolicy`, `PreDebitNotification`.
+  - `compliance/` package: `mac_registry.tier_for`,
+    `pre_debit.gap_satisfied` (+`PRE_DEBIT_MIN_GAP_HOURS`),
+    `retry_rails` (`card_retry_within_budget`, `upi_attempt_gate_open`,
+    `within_upi_execution_window`, `nach_retry_eligible`; constants
+    `CARD_ATTEMPTS_24H_CAP`, `CARD_ATTEMPTS_30D_CAP`, `UPI_AUTOPAY_HARD_CAP`,
+    `IST`, `UPI_PEAK_WINDOWS_IST`).
+  - `0006` seeds the 13 locked MAC rows only. `0007` creates the four tables
+    with their coherence CHECKs (`hard_stop_reason_coherent`,
+    `upi_hard_cap_locked` = `CHECK (hard_cap = 3)`).
+  - `PolicyConfig` gains `nach_representment_ceiling_default = 3`.
+- **Decisions:** D-016..D-020.
+- **Deviations:** none material (`mandate_id` as indexed String, D-019, is a
+  deliberate modelling choice within the blueprint's intent).
+- **Deferred work introduced:** `CardRetryBudget`/`UPIRetryBudget` counter
+  seeding at ingestion (Module 2 runtime); MAC unseeded codes + Visa set;
+  "unseeded → default TIER_2 + flag CaseEvent" fallback (Module 5); all rail
+  *enforcement* (Module 5).
+- **Unresolved introduced:** Tier 1 vs Tier 3 precedence remains a stated
+  default (blueprint Part E item 2).
+- **Tests at completion:** 119 `def test_` functions (new files:
+  `test_card_retry_budget`, `test_decision_k_scenarios`, `test_mac_code_registry`,
+  `test_nach_retry_policy`, `test_pre_debit_notification`; `test_upi_retry_budget`
+  added at M2). Reported collected count: 142.
+- **Verification status:** complete + verified at `24ab187`.
+- **Recommended commit message (as used):** "Milestone 2: three retry rails +
+  pre-debit compliance schema".
+
+---
+
+## Milestone 3 — SystemicEvent + ChannelRateCard (Phase-1 foundation complete)
+
+- **Commit:** `d51c228`
+- **Migrations:** `0008_systemic_and_rate_card`
+- **Objective:** Outage-scale suppression schema + the channel rate card; wire
+  `RevenueLeakCase.systemic_event_id`.
+- **Scope delivered:**
+  - Models: `SystemicEvent` (tenant-scoped, scope-coherence CHECK),
+    `ChannelRateCard` (global, freeform `channel` PK, seeded `whatsapp` / `email`
+    / `sms`).
+  - `compliance/systemic.py`: `systemic_threshold_breached` (compound),
+    `systemic_resolved` (sustain window).
+  - `RevenueLeakCase.systemic_event_id` nullable FK added (`0008`), index
+    `ix_revenue_leak_case_systemic_event_id`.
+  - `PolicyConfig` gains `systemic_*` fields (spike multiplier 5.0 from Decision
+    J; baseline floor / absolute floor / sustain window are **placeholder
+    numbers**).
+- **Decisions:** D-046, D-047, D-048.
+- **Deviations:** none.
+- **Deferred work introduced:** 60-second detection job, rollups, rolling
+  baseline, `SYSTEMIC_HOLD` transitions, batch re-queue (all Module 2); N/M
+  tuning; `Action.cost` / Module 8 cost-term consumption of `ChannelRateCard`.
+- **Tests at completion:** 153 `def test_` functions (new files:
+  `test_channel_rate_card`, `test_systemic_event`). Reported collected count: 176.
+- **Verification status:** complete + verified at `d51c228`.
+- **Recommended commit message (as used):** "Milestone 3: SystemicEvent +
+  ChannelRateCard (Phase-1 foundation complete)".
+
+---
+
+## Milestone 4 — Playbook definition contract
+
+- **Commit:** `e363eb6` "Milestone 4: playbook definition contract"
+- **Migrations:** `0009_playbooks`
+- **Objective:** The locked `steps_graph` format, typed `stopping_rules`,
+  merchant-override resolution, and **save-time** validation — no runtime
+  traversal.
+- **Scope delivered:**
+  - Models: `PlaybookIdentity`, `Playbook` (composite PK, append-only, trigger
+    `playbook_no_mutate`), `MerchantPlaybookConfig` (tenant-scoped partial
+    override), `PlaybookRun` (composite version FK, schema only).
+  - `playbooks/` package: `graph.py` (`StepGraph` / `StepNode` / `StepEdge` /
+    `ActionTemplate`, `parse_step_graph`, `validate_step_graph` — entry/edge/
+    unique-id/on_success+fallback/**no-cycle** rules); `stopping_rules.py`
+    (`StoppingRules` / `AllowedHours` + `Partial*`); `resolution.py`
+    (`deep_merge`, `effective_stopping_rules`); `validation.py`
+    (`validate_playbook`, `validate_merchant_playbook_config`, UPI `max_attempts
+    <= 3` importing `UPI_AUTOPAY_HARD_CAP`).
+  - `guards.py` gains `_guard_playbook` and `_guard_merchant_playbook_config`
+    branches (validate + normalize in place; reject dirty/deleted `Playbook`).
+  - `exceptions.py` gains `PlaybookValidationError`, `PlaybookNotFoundError`.
+- **Decisions:** D-021..D-025.
+- **Deviations:** none.
+- **Deferred work introduced:** playbook *runtime* (run instantiation,
+  `active_step_id` advancement, `PlaybookRun.status` transitions, step timing
+  semantics execution) — Module 4/5; the playbook *catalog* (concrete playbooks
+  per `root_cause_code`) — Module 4; action-specific `params` schemas — Module 5.
+- **Tests at completion:** 241 `def test_` functions (new files:
+  `test_merchant_playbook_config`, `test_playbook_graph`, `test_playbook_guard`,
+  `test_playbook_model`, `test_playbook_resolution`, `test_playbook_run`,
+  `test_playbook_validation`, `test_stopping_rules`). Reported collected count: 278.
+- **Verification status:** complete + verified at `e363eb6`. `guards.py` gained
+  the two playbook branches here; `state_machine.py` was **not** touched (it has
+  been unchanged since M1 `abbab18`).
+- **Recommended commit message (as used):** "Milestone 4: playbook definition
+  contract".
+
+---
+
+## Milestone 5 — The atomic, always-attributed action ledger
+
+- **Commit:** `1fbe67d` "Milestone 5: the atomic, always-attributed action ledger (Action / ActionCase)"
+- **Migrations:** `0010_actions`
+- **Objective:** `Action` + `ActionCase` with universal attribution, and the
+  atomic `Action`+`ActionCase`+`CaseEvent` write primitive.
+- **Scope delivered:**
+  - Models: `Action` (nullable `run_id`, coherence CHECKs), `ActionCase`
+    (composite PK, `Numeric(6,5)` weight, unit-range CHECK).
+  - `events/case_event_writer.py` extended: `write_action_and_event(...)`,
+    `Attribution` frozen dataclass, `_build_action_cases`, `_event_for`;
+    `_FULL_WEIGHT = Decimal("1.00000")`.
+  - `events/payloads.py`: `ActionExecutedPayload` gains `action_id: str`;
+    `channel` / `cost` made nullable.
+  - `guards.py` gains `_guard_action_write` + `_validate_action_case_set`
+    (≥1 row; exactly one `is_primary`; its `case_id == primary_case_id`;
+    Σ `credit_weight == Decimal("1")`; same-flush completeness; Action↔CaseEvent
+    atomicity via `payload.action_id` string match). Also handles `ActionCase`
+    edits on already-persisted Actions (Module 7 re-weighting path).
+  - `exceptions.py` gains `ActionAtomicityError`, `ActionCaseInvariantError`.
+- **Decisions:** D-026..D-032.
+- **Deviations (documented in code):** D-026 (universal `ActionCase`),
+  D-030 (atomicity promoted to a structural invariant), D-031 (nullable
+  `channel`/`cost`), D-032 (added `action` coherence CHECKs).
+- **Deferred work introduced:** action *execution* (all channel adapters, retry
+  APIs, payment-link creation, promise logging); `GuardrailEngine`; cost
+  computation from `ChannelRateCard`; Module 7's `credit_weight` re-split logic.
+- **Tests at completion:** 285 `def test_` functions (new files:
+  `test_action`, `test_action_atomicity`, `test_action_case`). Reported collected
+  count: 323.
+- **Verification status:** complete + verified at `1fbe67d`.
+- **Recommended commit message (as used):** "Milestone 5: the atomic,
+  always-attributed action ledger (Action / ActionCase)".
+
+---
+
+## Milestone 6a — PaymentLink + PromiseToPay
+
+- **Commit:** `624ebb2` "Milestone 6a: PaymentLink + PromiseToPay"
+- **Migrations:** `0011_payment_link_promise`
+- **Objective:** The two recovery-signal entities: the payment-link lifecycle
+  (Module 7's key attribution signal) and promise-to-pay.
+- **Scope delivered:**
+  - Models: `PaymentLink` (`link_id` PK, nullable `action_id`, non-null
+    `case_id`, `payment_link_status` enum via `values_callable`, paid⇔paid_at
+    CHECK, `amount_paid >= 0` CHECK), `PromiseToPay` (surrogate `promise_id` PK,
+    `UNIQUE(captured_via)`, `promise_status` enum default `PENDING`, no
+    `on_broken` column).
+  - `promises.py`: `PROMISE_TRANSITIONS` (`PENDING → {KEPT, BROKEN}`),
+    `assert_promise_transition`, `transition_promise` (writes no CaseEvent).
+  - `guards.py` gains `_guard_promise_to_pay` (item 9): new row must be
+    `PENDING` (pre-flush `None` counts as `PENDING`); status change on an
+    existing row must be a legal transition.
+  - `exceptions.py` gains `PromiseTransitionError`.
+- **Decisions:** D-033..D-038.
+- **Deviations:** none beyond deliberate modelling (surrogate PK D-036, no
+  `on_broken` D-038 — recorded against internal M6a decision ids "D10"/"D4" in
+  the code, which are *not* blueprint Part D items).
+- **Deferred work introduced:** webhook-driven `PaymentLink.status` /
+  `amount_paid` / `paid_at` transitions (Module 2/7); promise-broken → human
+  queue routing (Module 6); `GENERATE_PAYMENT_LINK` / `LOG_PROMISE` execution
+  (Module 5).
+- **Tests at completion:** 327 `def test_` functions (new files:
+  `test_payment_link`, `test_promise_to_pay`). Reported collected count: 370.
+- **Verification status:** complete + verified at `624ebb2`.
+- **Recommended commit message (as used):** "Milestone 6a: PaymentLink +
+  PromiseToPay".
+- **Note:** M6a and M6b are **separate milestones and separate commits**. Do not
+  merge or re-order them.
+
+---
+
+## Milestone 6b — MerchantWhatsAppTemplate + approved_template_exists
+
+- **Commit:** `47cf6d7` "Milestone 6b: MerchantWhatsAppTemplate + approved_template_exists"
+- **Migrations:** `0012_merchant_whatsapp_template`
+- **Objective:** WhatsApp gate #2 of 2 — the per-merchant template-approval
+  table and its pure lookup predicate. **This closes blueprint Section 3 — every
+  Part A entity is now implemented.**
+- **Scope delivered:**
+  - Model: `MerchantWhatsAppTemplate` (`template_id` PK, tenant-scoped,
+    `whatsapp_template_category` enum `UTILITY|MARKETING`, `approval_status`
+    plain `String(32)` — no enum/CHECK, `leg_type` reuses `leg_type` enum, gate
+    index `(merchant_id, leg_type, category)`, no uniqueness beyond PK).
+  - `enums.py`: `WhatsAppTemplateCategory` added; `ALL_ENUMS` now 20.
+  - `compliance/whatsapp.py`: `WHATSAPP_APPROVED = "APPROVED"`,
+    `approved_template_exists(session, *, merchant_id, leg_type, category)` —
+    EXISTS query, exact case-sensitive `== "APPROVED"`, fail-closed.
+  - `compliance/__init__.py` re-exports both.
+  - `0012` creates the `whatsapp_template_category` PG type
+    (`create`/`drop` with `checkfirst`), the table, the `merchant_id` index, and
+    the gate index. `down_revision = "0011_payment_link_promise"`.
+  - `tests/conftest.py` gains the `make_wa_template` fixture.
+- **Decisions:** D-039..D-045.
+- **Deviations (documented in code):** D-042 (Meta vocabulary gap — plain
+  String, no enum/CHECK); D-041 (`AUTHENTICATION` excluded).
+- **Deferred work introduced:** the full `SEND_WHATSAPP` guardrail (gate #1
+  `whatsapp_opt_in` + gate #2 + open-conversation check + `BLOCKED_BY_GUARDRAIL`
+  / `CONSENT_NOT_OBTAINED` / `TEMPLATE_NOT_APPROVED` production) — Module 6;
+  Meta/WABA sync of templates and statuses; template version / quality-rating
+  tracking; `AUTHENTICATION` category.
+- **Tests at completion:** 358 `def test_` functions; **`pytest` collects and
+  passes 417** (re-verified 2026-09-02). New file: `test_merchant_whatsapp_template`
+  (43 `def test_` functions). `test_schema_introspection` extended.
+- **Verification status:** complete + verified at `47cf6d7`.
+  `state_machine.py` unchanged; `guards.py` unchanged by M6b (last touched M6a).
+  Migration up→down→up roundtrip clean. `ruff` clean.
+- **Recommended commit message (as used):** "Milestone 6b: MerchantWhatsAppTemplate
+  + approved_template_exists".
+
+---
+
+## Milestone 7a — FastAPI app + Razorpay webhook verify/ingest (Module 2 begins)
+
+- **Commit:** *(uncommitted at time of writing — maintainer commits)*. Recommended
+  message below.
+- **Migrations:** `0013_event_ingestion_index` — **first zero-table migration**;
+  adds one composite index `ix_event_merchant_type_received_at` on
+  `event (merchant_id, type, received_at)`. No table, column, or enum.
+- **Objective:** Torque's first HTTP surface. A FastAPI app and a single Razorpay
+  webhook endpoint implementing blueprint §2.2's verify-before-parse pipeline:
+  HMAC-SHA256 over the raw body (constant-time, via the existing
+  `torque.security.razorpay_signature` helper) → silent HTTP-200 drop with zero
+  side effects on any failure → `X-Razorpay-Event-Id` idempotency check →
+  exactly one `Event` row (`processed=False`) written through `TenantScope`.
+  Nothing downstream of a verified, deduplicated `Event`.
+- **Scope delivered:**
+  - `src/torque/api/` package: `app.py` (`create_app()` factory — routes only,
+    no startup work; `GET /health` + the webhook router; FastAPI auto-docs left
+    at defaults), `deps.py` (`get_db` request dependency — yields a `SessionLocal`
+    session, commits on clean return; overridden in tests), `webhooks.py`
+    (`POST /webhooks/razorpay/{merchant_id}` — the §2.2 pipeline).
+  - `src/torque/__main__.py` — `python -m torque` → `uvicorn ... --factory`
+    (dev/preview convenience; `TORQUE_API_HOST` / `TORQUE_API_PORT` env).
+  - `pyproject.toml` — `fastapi>=0.110` + `uvicorn[standard]>=0.29` added to
+    `dependencies`; `httpx>=0.27` to the `dev` extra (TestClient transport); new
+    `[tool.ruff.lint.per-file-ignores]` → `"src/torque/api/*" = ["B008"]` (the
+    FastAPI `Depends()`-in-defaults idiom).
+  - `src/torque/config.py` — `Settings.razorpay_webhook_mode:
+    Literal["live","test"] = "test"` + `Settings.active_razorpay_webhook_secret()`
+    (returns the one secret for the deployment's mode, or `None` → fail closed).
+  - `src/torque/models/event.py` — `__table_args__` gains the composite `Index`
+    (mirrors migration `0013`).
+  - `tests/conftest.py` — `WEBHOOK_TEST_SECRET` / `WEBHOOK_LIVE_SECRET` module
+    constants; `make_api_client` factory fixture (`TestClient` over `create_app()`
+    with `get_db` → the joined-transaction test session and `get_settings` → a
+    `Settings` with known secrets; `mode` and `with_secrets` params) and a plain
+    `api_client` fixture.
+  - `tests/test_webhook_ingestion.py` — 21 tests (see below).
+  - `tests/test_schema_introspection.py` — +2 tests
+    (`test_m7a_event_ingestion_index_present_and_exact`,
+    `test_m7a_event_idempotency_uniqueness_unchanged`).
+- **Decisions:** D-051..D-056.
+- **Deviations from blueprint:** none. (FastAPI auto-docs `/docs` `/redoc`
+  `/openapi.json` are left enabled — a convenience for the demo surface, not a
+  blueprint conflict.)
+- **Deferred work removed from `DEFERRED.md` (Module 2):** the FastAPI app; the
+  Razorpay webhook HTTP endpoint; the verify-before-parse pipeline wrapping
+  `verify_razorpay_signature`; the `Event` write path + `X-Razorpay-Event-Id`
+  idempotency check.
+- **Deferred work still open (Module 2):** BullMQ/Redis; the 90s/30s
+  self-recovery buffer; cross-leg dedup / `superseded_by_case_id`; systemic
+  detection job; `CardRetryBudget`/`UPIRetryBudget` counter seeding; `B2BInvoice`
+  bundling; the `checkout.abandoned` path; dispatch to Module 3; flipping
+  `Event.processed`; per-merchant webhook-secret storage; the
+  `PLAYBOOK_ACTIVE → SYSTEMIC_HOLD` state-machine edge (still `UNRESOLVED.md`
+  U-01 item 3 — M7a did not need it; belongs to M7c).
+- **Deferred work introduced:** per-merchant webhook-secret storage (M7a uses the
+  two global `Settings` secrets — fine for the single-merchant demo).
+- **Unresolved introduced:** none.
+- **`state_machine.py` / `guards.py`:** **both byte-unchanged vs HEAD**
+  (`git diff HEAD` empty for each). M7a creates no cases and performs no status
+  transitions.
+- **Tests at completion:** **381** `def test_` functions; `pytest` collects and
+  passes **440** (was 358 / 417 at M6b `47cf6d7`). `ruff check .` clean.
+  `alembic upgrade head` → `0013`; up→down→up roundtrip green.
+  1 cosmetic warning: `StarletteDeprecationWarning: Using httpx with
+  starlette.testclient is deprecated; install httpx2 instead` (Starlette 1.6 /
+  FastAPI 0.141 resolved by `uv`; not an error, no `filterwarnings=error` in
+  pytest config).
+- **Verification status:** complete + verified against a live Postgres
+  (`docker compose` db, host 5442). All of `pytest`, `ruff`, `alembic upgrade
+  head`, the roundtrip test, and the `state_machine.py` / `guards.py` diff checks
+  pass. App boots (`create_app()` → `GET /health` → `{"status":"ok"}`; the
+  webhook route registers as a `_IncludedRouter` in `app.routes` under Starlette
+  1.6 but is live — the 21 endpoint tests exercise it).
+- **Recommended commit message:**
+  `Milestone 7a: FastAPI app + Razorpay webhook verify/ingest (Module 2 begins)`
+
+### M7a test file — `tests/test_webhook_ingestion.py` (21)
+
+Health (1): `/health` → 200 `{"status":"ok"}`.
+Happy path (3): new verified event persists with the right `type` /
+`idempotency_key` / `raw_payload` (== parsed body) / `processed=False` /
+`merchant_id` (from the path); a second merchant's scope is untouched.
+Signature fail-closed, zero side effects (6): wrong secret; missing
+`X-Razorpay-Signature`; one extra byte after signing; re-serialized (pretty)
+JSON of the same object; verified-but-non-JSON body; verified JSON array (not an
+object) — each → 200, no `Event`, no `CaseEvent`, no `RevenueLeakCase`.
+Idempotency (3): same `X-Razorpay-Event-Id` twice → one row; two distinct ids,
+identical body → two rows; missing id header → 200, no row.
+Event type (2): a verified unrecognized `event` string persists as-is; a body
+with no `event` field persists as `type="unknown"`.
+Merchant resolution (2): unknown `{merchant_id}` → 200, no row; no merchant
+segment (`POST /webhooks/razorpay`) → 404.
+Live/test secret selection (3): test-mode verifies only the test secret (live
+sig rejected); live-mode verifies only the live secret (test sig rejected);
+unset secret for the mode → every request dropped.
+No extra writes (1): a successful ingest writes no `RevenueLeakCase` / `CaseEvent`.
+
+---
+
+## Milestone 7b — Leg-1 signal ingestion completion (buffer + dedup + case creation)
+
+- **Commit:** *(uncommitted at time of writing — maintainer commits)*. Recommended
+  message below.
+- **Migrations:** **none.** M7b is pure ingestion logic — no table, column,
+  enum, or migration. `alembic head` stays `0013`.
+- **Objective:** Complete the first real `RevenueLeakCase` creation path, Leg 1
+  only: `verified payment.failed Event → Celery self-recovery buffer (§2.3) →
+  cross-leg dedup (§2.4) → PAYMENT_DEGRADATION case in DETECTED`. The case is
+  never dispatched past `DETECTED`.
+- **Scope delivered:**
+  - **`src/torque/ingestion/`** package:
+    - `celery_app.py` — `Celery("torque")`, Redis broker (`Settings.redis_url`,
+      host 6389), **no result backend**; eager flags from
+      `Settings.celery_task_always_eager`.
+    - `tasks.py` — `resolve_buffered_event_task(event_id)`: opens one
+      `session_scope()` (module seam `_session_scope` for tests), calls
+      `buffer.resolve_buffered_event`, returns the outcome name.
+    - `buffer.py` — `resolve_buffered_event(session, *, event_id)`:
+      `NOOP` (event gone / already `processed` / not `payment.failed` / case
+      already exists) · `SELF_RECOVERED` (a `payment.captured` for the same
+      `payment_id`/`order_id`, `received_at >= failure.received_at`) · else →
+      `create_or_attach_case`. `payment_failure_buffer_seconds()` = 90.
+    - `cases.py` — `create_or_attach_case(session, *, event)`: idempotency
+      guard on `source_event_id`; `resolve_counterparty`; `find_supersedable_case`;
+      insert `RevenueLeakCase(leg_type=PAYMENT_DEGRADATION, status=DETECTED,
+      source_event_id, counterparty_id, amount_at_risk, context)` via
+      `TenantScope`; `sync_control_group`; on a Merge set the abandonment case's
+      `superseded_by_case_id` (its status untouched) and copy its context into
+      `context["merged_abandonment_context"]`; `_seed_card_retry_budget` for
+      card payments; `event.processed = True`. Returns `CASE_CREATED` /
+      `CASE_MERGED` / `NOOP`.
+    - `dedup.py` — `find_supersedable_case(...)`: open, non-terminal
+      `CHECKOUT_ABANDONMENT` case, same `(merchant_id, counterparty_id)`,
+      `context.cart_id == order_id`, `opened_at` within
+      `PolicyConfig.cross_leg_dedup_window_hours` (2h). **Live direction only.**
+    - `identity.py` — `resolve_counterparty(...)`: exact phone → exact email →
+      create (safe consent defaults); find-or-create `Merchant_Counterparty`.
+    - `payloads.py` — pure Razorpay `payment.*` extractors (`payment_id`,
+      `order_id`, `contact_phone/email`, `card_instrument_ref` =
+      `COALESCE(token_id, card_id)` — the Razorpay tokenised card reference, no
+      PAN, `amount_rupees` paise→₹, `is_card_payment`,
+      `payment_degradation_context` — preserves raw `error_code` as
+      `decline_code`, does NOT read `error_reason`, does NOT set
+      `is_hard_decline`).
+    - `outcomes.py` — `BufferOutcome` enum.
+  - **`src/torque/api/webhooks.py`** — after a new verified `Event` flush:
+    `payment.failed` → `resolve_buffered_event_task.apply_async((str(id),),
+    countdown=90)`. All other types persisted, no enqueue. Still empty `200`.
+  - **`src/torque/contexts/payment_degradation.py`** — `is_hard_decline` type
+    changed `bool` → `bool | None`, default `None`. Ingestion **leaves it
+    unset**; the Diagnosis Engine (Module 3) owns hard/soft decline
+    classification — there is no ingestion-side heuristic (D-058). New optional
+    `merged_abandonment_context: dict | None`.
+  - **`src/torque/config.py`** — `Settings.redis_url`,
+    `Settings.celery_task_always_eager`.
+  - **`pyproject.toml`** — `celery>=5.4`, `redis>=5` → `dependencies`.
+  - **`docker-compose.yml`** — `redis` service gains a healthcheck (no new
+    service).
+  - **`tests/conftest.py`** — `razorpay_payment_body(...)` builder;
+    `make_api_client` gains `patch_enqueue` (default `True` → spies
+    `resolve_buffered_event_task.apply_async` as `client.buffer_enqueue`);
+    `celery_eager` fixture.
+- **Decisions:** D-057..D-063 (D-063 supersedes D-056).
+- **Deviations from blueprint:** D-057 (Celery for the Node-only "BullMQ" role —
+  documented in `celery_app.py` / `pyproject.toml`); D-058 (`is_hard_decline`
+  type `bool` → `bool | None`, ingestion leaves it unset; no schema/enum change,
+  Module 3 still owns classification); D-059 (new context field to represent the
+  §2.4 "appended into the surviving case" merge, given `extra="forbid"`); D-061
+  (`CardRetryBudget` is seeded at ingestion — the blueprint left this as "Module
+  2 §2.7"; the instrument key is the Razorpay tokenised reference stored in the
+  inherited `card_token_hash` column, no PAN, no hashing, no rename, no new
+  column). None weaken an existing invariant.
+- **Deferred work removed from `DEFERRED.md` (Module 2):** the self-recovery
+  buffer (payment/Leg-1 half); cross-leg dedup / `superseded_by_case_id` wiring
+  (live direction); the first `RevenueLeakCase` creation path; `CardRetryBudget`
+  seeding for card `payment.failed`; the BullMQ/Redis queue wiring (now
+  Celery/Redis).
+- **Deferred work introduced / still open (Module 2):** the **reverse Merge
+  direction** (`checkout.abandoned` arriving after a payment case) — deferred to
+  the Leg-2 ingestion milestone; the §2.3 buffer's **`subscription.charged.failed`
+  (30s)** half; **Leg 3** (`subscription.charged.failed`) and **Leg 4**
+  (`invoice.overdue` / `B2BInvoice` bundling) case creation; **Leg 2**
+  (`checkout.abandoned`) ingestion; **`UPIRetryBudget` seeding** (Leg-3);
+  per-decline retry-budget **increment** semantics (Module 5); **card token
+  hashing** / pepper subsystem; **systemic detection** (§2.5) and the
+  `PLAYBOOK_ACTIVE → SYSTEMIC_HOLD` edge (U-01 #3); a `docker-compose` Celery
+  worker service; dispatch to Module 3.
+- **Unresolved:** **U-07 RESOLVED** for the inbound half — Celery + Redis
+  (see D-057). Temporal / Postgres-polling for `PlaybookRun` execution (Module 5)
+  stays open (tracked in `UNRESOLVED.md` U-07's remaining note / Part E item 8).
+  U-01 #3 still open (M7c).
+- **`state_machine.py` / `guards.py`:** **both byte-unchanged vs HEAD**
+  (`git diff HEAD` empty for each). M7b creates cases at `DETECTED`, runs no
+  transitions, invents no edge. The Merge sets a self-FK column only.
+- **Transactional atomicity (confirmed 2026-09-02):** `resolve_buffered_event_task`
+  opens exactly one `torque.db.session.session_scope()` (commit-once-on-success /
+  rollback-on-exception / close). `resolve_buffered_event` → `create_or_attach_case`
+  use only `session.flush()` — **no intermediate `commit()`**. So the whole
+  case-creation write set — `RevenueLeakCase`, `Counterparty` (resolve/create),
+  `Merchant_Counterparty` (resolve/create), `abandonment.superseded_by_case_id`
+  on a Merge, `CardRetryBudget` seed, and the originating `Event.processed=True`
+  — commits or rolls back as **one transaction**. Verified by
+  `tests/test_ingestion_atomicity.py` (a failure at the card-seed step and at the
+  context-guard step each leaves zero cases / counterparties / budgets and
+  `Event.processed` still `False`). No transaction abstraction was added —
+  `session_scope` already suffices.
+- **Tests at completion:** **427** `def test_` functions; `pytest` collects and
+  passes **486** (was 381 / 440 at M7a). `ruff check .` clean. `alembic upgrade
+  head` → `0013` (no-op — no M7b migration); up→down→up roundtrip green.
+  1 cosmetic `StarletteDeprecationWarning` (unchanged from M7a).
+- **New test files:** `test_ingestion_buffer.py` (12), `test_ingestion_case_creation.py`
+  (8), `test_ingestion_counterparty.py` (5), `test_cross_leg_dedup.py` (8),
+  `test_ingestion_card_budget.py` (5), `test_webhook_dispatch.py` (6),
+  `test_ingestion_atomicity.py` (2). `test_schema_introspection.py` +2.
+- **Verification status:** complete + verified against a live Postgres
+  (docker-compose db, host 5442). `pytest` 486 green, `ruff` clean, roundtrip
+  green, `state_machine.py` / `guards.py` diffs empty, no migration added.
+- **Recommended commit message:**
+  `Milestone 7b: Leg-1 signal ingestion — self-recovery buffer, cross-leg dedup, case creation`
+
+---
+
+## Milestone 7c — systemic detection & suppression (§2.5, NETWORK_WIDE)
+
+- **Commit:** *(uncommitted — maintainer commits the whole Milestone 7 tree)*.
+  Recommended message below.
+- **Migrations:** **none.** M7c is pure ingestion logic + one approved
+  state-machine edge. `alembic head` stays `0013`.
+- **Objective:** the blueprint §2.5 systemic-detection job for the payment-failure
+  ledger that exists today. Celery beat every 60 s → per-merchant `NETWORK_WIDE`
+  threshold (trailing-10-min failures/min vs. a trailing-7-day baseline that
+  **excludes** the live window) via the existing `systemic_threshold_breached`
+  predicate → on breach create `SystemicEvent(NETWORK_WIDE)` and sweep that
+  merchant's open `DETECTED` cases into `SYSTEMIC_HOLD` → later runs re-check
+  each active event via `systemic_resolved` and, once quiet, write `resolved_at`
+  and batch-transition held cases `SYSTEMIC_HOLD → DIAGNOSING`. Plus the §2.7
+  ingestion hook (a case created by the M7b buffer during an active event is
+  born held).
+- **Scope delivered:**
+  - **`src/torque/state_machine.py`** — added `CaseStatus.SYSTEMIC_HOLD` to
+    `_TRANSITIONS[PLAYBOOK_ACTIVE]` (U-01 #3, approved — D-066); docstring's
+    "NOT YET ADDED" list updated. **Legal but dormant** — no M7c code drives it;
+    `transition_case` executes it with the existing guard architecture; no
+    `guards.py` change. This is the **only** load-bearing state-machine change
+    in all of Milestone 7.
+  - **`src/torque/ingestion/systemic.py`** (NEW): `run_systemic_detection(session,
+    *, now=None)` orchestrator (iterate merchants with failures in the detection
+    window ∪ merchants with an active `SystemicEvent`; detect then resolve, one
+    shared `now`); `_detect_and_hold` / `_check_and_resolve` / `_hold_case` /
+    `_active_network_wide_event` / `apply_active_hold_if_any` (the §2.7 hook);
+    rollup helpers `_failure_count` (half-open `[start, end)` over
+    `Event(type="payment.failed")`) and `_baseline_failure_rate` (excludes the
+    detection window). Constants `_HOLD_TRIGGER="systemic_network_wide"`,
+    `_RESUME_TRIGGER="systemic_resolved"`. DB-only, no `commit()`.
+  - **`src/torque/ingestion/tasks.py`** — `detect_systemic_task()` (one
+    `_session_scope()`, calls `run_systemic_detection` with `now=utcnow()`).
+  - **`src/torque/ingestion/celery_app.py`** — `conf.beat_schedule` entry
+    `"systemic-detection"` → `torque.ingestion.detect_systemic`, `schedule=60.0`.
+    Dev scheduler: `celery -A torque.ingestion.celery_app:celery_app beat`.
+  - **`src/torque/ingestion/cases.py`** — one additive call
+    `apply_active_hold_if_any(session, case)` before `event.processed = True`.
+    No-active-event path is byte-for-byte M7b. No new `BufferOutcome` member.
+  - **`src/torque/config.py`** — `PolicyConfig.systemic_detection_window_minutes
+    = 10` (§2.5 "trailing 10 minutes"), `systemic_baseline_days = 7` (§2.5
+    "trailing 7-day"). N (`systemic_baseline_floor_per_min`) and M
+    (`systemic_absolute_count_floor`) are **unchanged U-04 placeholders** —
+    M7c consumes them, does not validate or retune them.
+  - **`tests/conftest.py`** — `systemic_policy` fixture (binds
+    `systemic.get_policy` to a test `PolicyConfig` — the production N would need
+    ~10k baseline rows); `make_failure_events` helper.
+  - Tests: `tests/test_systemic_detection.py` (26), `tests/test_state_machine.py`
+    +7, `tests/test_schema_introspection.py` +2.
+- **Decisions:** D-064..D-069.
+- **Deviations from blueprint:** D-064 (Celery beat for the Node-only "BullMQ"
+  repeatable role — consistent with D-057); D-065 (`NETWORK_WIDE` only —
+  `ISSUER_SPECIFIC` deferred because issuer/BIN/acquirer extraction is not in the
+  canonical event/context model, U-08); D-067 (stateless aggregate resolution).
+  None weaken an existing invariant. `guards.py` unchanged.
+- **Deferred work removed from `DEFERRED.md` (Module 2):** the systemic detection
+  job (§2.5) for the `NETWORK_WIDE` tier; the `PLAYBOOK_ACTIVE → SYSTEMIC_HOLD`
+  edge (U-01 #3 — now added).
+- **Deferred / still open (Module 2):** `ISSUER_SPECIFIC` detection (blocked on
+  issuer extraction — U-08); driving `PLAYBOOK_ACTIVE → SYSTEMIC_HOLD` + mid-run
+  recovery semantics (Module 5); a `docker-compose` Celery worker/beat service;
+  Leg 3 (`subscription.charged.failed` + `SubscriptionFailureContext` + **30s
+  buffer** + **`UPIRetryBudget` seeding**, per-mandate, from that producer —
+  D-069); Leg 4 (`invoice.overdue` / `B2BInvoice` bundling); Leg 2
+  (`checkout.abandoned`) + the **reverse cross-leg Merge**; dispatch to Module 3.
+- **Unresolved:** **U-01 #3 RESOLVED** (edge added — D-066). **U-04 stays open** —
+  M7c uses the N/M/sustain placeholders as configured, does not empirically
+  validate or tune them. **U-07** `PlaybookRun`-execution half still open
+  (Module 5). **New U-08** — issuer/BIN/acquirer/route extraction (field, source,
+  owning model, owner).
+- **`state_machine.py`:** changed — **exactly** the approved
+  `PLAYBOOK_ACTIVE → SYSTEMIC_HOLD` addition + the docstring cleanup, nothing
+  else (diff shown in the verification report). **`guards.py`:** byte-unchanged
+  vs HEAD (`git diff HEAD` empty).
+- **Transactional atomicity:** `detect_systemic_task` opens one
+  `session_scope()`; `run_systemic_detection` / `_detect_and_hold` /
+  `_check_and_resolve` use only `session.flush()`. `SystemicEvent` creation, all
+  case FK sets + `transition_case` + `SYSTEMIC_HOLD_APPLIED` writes, and
+  `resolved_at` commit or roll back as one unit. Verified by
+  `test_failure_mid_sweep_rolls_everything_back`.
+- **Tests at completion:** **460** `def test_` functions; `pytest` collects and
+  passes **519** (was 427 / 486 at M7b). `ruff` clean. `alembic upgrade head` →
+  `0013` (no-op — no M7c migration); up→down→up roundtrip green. 1 cosmetic
+  `StarletteDeprecationWarning` (unchanged).
+- **Verification status:** complete + verified against a live Postgres
+  (docker-compose db, host 5442). `pytest` 519 green, `ruff` clean, roundtrip
+  green, `state_machine.py` diff == the approved edge only, `guards.py` diff
+  empty, no migration created.
+- **Recommended Milestone 7 commit message:**
+  `Milestone 7: Signal ingestion — webhook, recovery buffer, dedup, case creation, systemic hold`
+
+---
+
+## What comes next
+
+**Module 2 — Signal Ingestion, remaining sub-milestones.** M7a = verified
+`Event`; M7b = Leg-1 buffer + dedup + `PAYMENT_DEGRADATION` case; M7c = §2.5
+`NETWORK_WIDE` systemic detection + hold/resume + the U-01 #3 edge. Still open
+(see `DEFERRED.md` §Module 2):
+
+- **Leg 3 ingestion:** `subscription.charged.failed` — 30s self-recovery buffer,
+  `SubscriptionFailureContext` (Razorpay method → `mandate_type` mapping), and
+  **`UPIRetryBudget` seeding** (per-mandate, from this producer — D-069) /
+  `NACHRetryPolicy` seeding.
+- **Leg 4 ingestion:** `invoice.overdue` → `B2BInvoice` bundling per §3's locked
+  grouping logic.
+- **Leg 2 ingestion:** the `checkout.abandoned` synthetic-injection endpoint
+  (Part D item 1) — and with it, the **reverse cross-leg Merge direction**
+  (D-060).
+- **`ISSUER_SPECIFIC` systemic detection** — needs issuer extraction (U-08).
+
+Propose each as its own written scope; do not start without approval.

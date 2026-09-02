@@ -19,6 +19,7 @@ Connection settings (env, with sensible localhost defaults):
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -107,6 +108,185 @@ def db(engine):
         session.close()
         outer.rollback()
         connection.close()
+
+
+# --- Milestone 7a: Razorpay webhook HTTP harness -------------------------
+
+# Fixed secrets for the test deployment. The webhook endpoint verifies against
+# exactly one of these depending on the deployment's configured mode.
+WEBHOOK_TEST_SECRET = "whsec_torque_test_9f3a"
+WEBHOOK_LIVE_SECRET = "whsec_torque_live_1c74"
+
+
+def razorpay_payment_body(
+    *,
+    event: str = "payment.failed",
+    payment_id: str = "pay_M7B001",
+    order_id: str | None = "order_M7B001",
+    amount_paise: int = 49900,
+    method: str = "card",
+    email: str | None = "buyer@example.com",
+    contact: str | None = "+919810000001",
+    token_id: str | None = "token_M7B001",
+    card_id: str | None = None,
+    error_code: str | None = "BAD_REQUEST_ERROR",
+) -> bytes:
+    """A Razorpay `payment.failed` / `payment.captured` webhook body (the parts
+    M7b reads). Returns raw bytes ready to sign."""
+    entity: dict = {"id": payment_id, "amount": amount_paise, "currency": "INR"}
+    if order_id is not None:
+        entity["order_id"] = order_id
+    if method is not None:
+        entity["method"] = method
+    if email is not None:
+        entity["email"] = email
+    if contact is not None:
+        entity["contact"] = contact
+    if token_id is not None:
+        entity["token_id"] = token_id
+    if card_id is not None:
+        entity["card_id"] = card_id
+    if error_code is not None:
+        entity["error_code"] = error_code
+    body = {
+        "entity": "event",
+        "account_id": "acc_RZP",
+        "event": event,
+        "contains": ["payment"],
+        "payload": {"payment": {"entity": entity}},
+        "created_at": 1_760_000_000,
+    }
+    return json.dumps(body).encode()
+
+
+@pytest.fixture()
+def make_api_client(db, monkeypatch):
+    """Factory for a `TestClient` over the ingestion app, wired to the test
+    session (same rolled-back transaction the test asserts against) and a
+    `Settings` with known webhook secrets. `mode` picks which secret the
+    endpoint verifies against ("test" | "live").
+
+    By default the M7b buffer task's `apply_async` is replaced with a spy
+    (`client.buffer_enqueue`, a `MagicMock`) so tests never touch a real broker;
+    pass `patch_enqueue=False` to let a real (e.g. eager) enqueue happen.
+    """
+    from unittest.mock import MagicMock
+
+    from fastapi.testclient import TestClient
+
+    from torque.api.app import create_app
+    from torque.api.deps import get_db
+    from torque.config import Settings, get_settings
+
+    created: list[TestClient] = []
+
+    def _make(mode: str = "test", *, with_secrets: bool = True, patch_enqueue: bool = True):
+        spy = MagicMock(name="resolve_buffered_event_task.apply_async")
+        if patch_enqueue:
+            monkeypatch.setattr(
+                "torque.ingestion.tasks.resolve_buffered_event_task.apply_async", spy
+            )
+        settings = Settings(
+            razorpay_webhook_secret_test=WEBHOOK_TEST_SECRET if with_secrets else None,
+            razorpay_webhook_secret_live=WEBHOOK_LIVE_SECRET if with_secrets else None,
+            razorpay_webhook_mode=mode,
+        )
+        app = create_app()
+        app.dependency_overrides[get_db] = lambda: db
+        app.dependency_overrides[get_settings] = lambda: settings
+        client = TestClient(app)
+        client.buffer_enqueue = spy
+        created.append(client)
+        return client
+
+    yield _make
+    for client in created:
+        client.close()
+
+
+@pytest.fixture()
+def api_client(make_api_client):
+    """A `TestClient` in test-mode (verifies against `WEBHOOK_TEST_SECRET`)."""
+    return make_api_client()
+
+
+@pytest.fixture()
+def celery_eager():
+    """Run Celery tasks inline (no broker, no worker) for the duration of a
+    test. Restores the app config afterwards."""
+    from torque.ingestion.celery_app import celery_app
+
+    prev_eager = celery_app.conf.task_always_eager
+    prev_prop = celery_app.conf.task_eager_propagates
+    celery_app.conf.task_always_eager = True
+    celery_app.conf.task_eager_propagates = True
+    try:
+        yield celery_app
+    finally:
+        celery_app.conf.task_always_eager = prev_eager
+        celery_app.conf.task_eager_propagates = prev_prop
+
+
+# --- Milestone 7c: systemic-detection harness ---------------------------
+
+
+@pytest.fixture()
+def systemic_policy(monkeypatch):
+    """Bind `torque.ingestion.systemic.get_policy` to a `PolicyConfig` with
+    test-friendly systemic knobs (the production defaults would need ~10k
+    baseline rows to reach `systemic_baseline_floor_per_min`). Returns a setter
+    so each test dials only what it needs; unspecified knobs keep the defaults
+    below."""
+    from torque.config import PolicyConfig
+
+    def _set(**overrides):
+        cfg = dict(
+            systemic_detection_window_minutes=10,
+            systemic_baseline_days=1,
+            systemic_spike_multiplier=5.0,
+            systemic_baseline_floor_per_min=0.01,
+            systemic_absolute_count_floor=5,
+            systemic_sustain_window_minutes=10,
+        )
+        cfg.update(overrides)
+        policy = PolicyConfig(**cfg)
+        monkeypatch.setattr("torque.ingestion.systemic.get_policy", lambda: policy)
+        return policy
+
+    return _set
+
+
+@pytest.fixture()
+def make_failure_events(db):
+    """Insert `count` `payment.failed` `Event` rows for `merchant`, spread evenly
+    across `[now - start_minutes_ago, now - end_minutes_ago)`."""
+    from datetime import UTC, datetime, timedelta
+
+    from torque.models import Event
+
+    seq = {"n": 0}
+
+    def _make(merchant, *, count, start_minutes_ago, end_minutes_ago=0.0):
+        now = datetime.now(UTC)
+        span = start_minutes_ago - end_minutes_ago
+        rows = []
+        for i in range(count):
+            seq["n"] += 1
+            frac = (i + 0.5) / count if count else 0.0
+            offset = start_minutes_ago - frac * span
+            ev = Event(
+                merchant_id=merchant.merchant_id,
+                type="payment.failed",
+                idempotency_key=f"evt_sysfail_{seq['n']}",
+                raw_payload={"event": "payment.failed"},
+                received_at=now - timedelta(minutes=offset),
+            )
+            db.add(ev)
+            rows.append(ev)
+        db.flush()
+        return rows
+
+    return _make
 
 
 # --- lightweight factories -------------------------------------------------

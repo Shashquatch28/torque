@@ -117,8 +117,12 @@ if it produced a design decision, a `DECISIONS.md` entry. Do not delete it.
 ## U-05 — Blueprint Part D open decisions (not answered in the repo)
 
 - **D item 1 — checkout-abandonment ingestion:** real storefront SDK/pixel vs.
-  synthetic injection. Repo has neither. Proposed default = synthetic injection.
-  Blocks a real Leg-2 ingestion path; does not block Module 2's Razorpay paths.
+  synthetic injection. **RESOLVED (2026-09-03, Module 2 completion run):** the
+  confirmed default — a **signed synthetic injection endpoint**
+  (`POST /internal/checkout-abandoned/{merchant_id}`, `torque.api.checkout_injection`,
+  HMAC via `Settings.checkout_injection_secret`) — is now **built** (D-074).
+  Leg 2 ingestion is live. A real per-merchant storefront pixel remains a
+  separate future build item (🔮, `DEFERRED.md`), not a blocker for anything.
 - **D item 2 — backend language/framework:** never formally chosen in the
   blueprint. **In practice the repo is committed to Python** (SQLAlchemy,
   Pydantic, Alembic, pytest). Treat Python as decided-by-implementation; the
@@ -127,8 +131,8 @@ if it produced a design decision, a `DECISIONS.md` entry. Do not delete it.
 - **D item 3 — build-window length:** unknown. Module 12's roadmap has no
   calendar dates. Does not block milestone work.
 - **D item 4 — judging rubric:** unknown. Only matters for Module 13.
-- **Must implementation stop first?** Only D item 1 blocks a specific path
-  (real Leg-2 ingestion). The rest do not block schema/logic milestones.
+- **Must implementation stop first?** No. D item 1 is resolved (synthetic
+  injection built). The rest do not block schema/logic milestones.
 
 ## U-06 — `MacCodeRegistry` unseeded codes
 

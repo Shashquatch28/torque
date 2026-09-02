@@ -1,7 +1,8 @@
 # ARCHITECTURE SNAPSHOT
 
-State as of Milestone 7c (M6b commit `47cf6d7` + uncommitted M7a + M7b + M7c).
-Derived documentation — verify against code before relying on any single line.
+State as of Module 2 completion (Milestone 7 commit `2a35786` + uncommitted M8 +
+uncommitted Module-2 completion run). Derived documentation — verify against
+code before relying on any single line.
 
 **Every item is tagged:**
 
@@ -19,7 +20,7 @@ Do not describe `PLANNED` / `DEFERRED` behaviour as if it exists.
 | Module | Scope | Status |
 |---|---|---|
 | 1 — Core Data Model | shared case object, tenancy, PII/DPDP, event sourcing, retry-rail compliance entities | `IMPLEMENTED` (M1–M6b) |
-| 2 — Signal Ingestion | webhook intake, signature verify, idempotency, out-of-order buffer, cross-leg dedup, systemic detection job | **PARTIAL** — `IMPLEMENTED`: webhook verify/idempotency/`Event` write (M7a); Leg-1 self-recovery buffer + cross-leg dedup (live direction) + `PAYMENT_DEGRADATION` case creation + `CardRetryBudget` seeding (M7b); **§2.5 `NETWORK_WIDE` systemic detection + hold/resume + the §2.7 ingestion hook + the `PLAYBOOK_ACTIVE→SYSTEMIC_HOLD` edge (M7c)**. Celery/Redis broker-only + Celery beat. `PLANNED`: `ISSUER_SPECIFIC` detection (U-08); Leg 2/3/4 ingestion; reverse Merge; `UPIRetryBudget` seeding (Leg 3); dispatch to Module 3 |
+| 2 — Signal Ingestion | webhook intake, signature verify, idempotency, out-of-order buffer, cross-leg dedup, systemic detection job | **`IMPLEMENTED` (Module 2 complete)** — all four legs: Leg 1 `payment.failed` (90s buffer, `PAYMENT_DEGRADATION`), Leg 3 `subscription.charged.failed` (30s buffer, `SUBSCRIPTION_FAILURE`, UPI/NACH/Card rail seeding), Leg 2 `checkout.abandoned` (signed `/internal` injection endpoint, no buffer, `CHECKOUT_ABANDONMENT`), Leg 4 `invoice.overdue` (no buffer, `B2BInvoice` + §3 grouping, `B2B_RECEIVABLE`); **bidirectional** §2.4 cross-leg Merge; §2.5 `NETWORK_WIDE` systemic detection + hold/resume + §2.7 hold-on-ingest across all legs; `PLAYBOOK_ACTIVE→SYSTEMIC_HOLD` edge added (dormant). Celery/Redis broker-only + Celery beat. Remaining *refinements* (not blockers): `ISSUER_SPECIFIC` detection (U-08); systemic rollup over subscription failures (D-073); a real storefront pixel (Part D item 1); dispatch to Module 3 |
 | 3 — Diagnosis Engine | root-cause classification + confidence; owns `root_cause_code` enum | `PLANNED` |
 | 4 — Policy & Playbook Engine | root cause → bounded action graph; playbook authoring/validation (validation part `IMPLEMENTED` in M4) | `PLANNED` (runtime) |
 | 5 — Execution / Orchestration | channel adapters, retry-budget enforcement, atomic Action+CaseEvent write (primitive `IMPLEMENTED` in M5), Temporal workflow | `PLANNED` (runtime) |
@@ -384,13 +385,13 @@ Enum + coherence CHECK only. Webhook-driven transitions are Module 2/7.
 
 ---
 
-## 8A. HTTP surface — `IMPLEMENTED` (M7a), the first and only routes
+## 8A. HTTP surface — `IMPLEMENTED` — the Module 2 routes
 
-`src/torque/api/` (added M7a — the repo's first HTTP code):
+`src/torque/api/` (M7a + the Module-2 completion run):
 
 - **`app.py`** — `create_app() -> FastAPI`. Routes only, no startup work.
-  `GET /health` → `{"status": "ok"}`. Includes the webhook router. FastAPI
-  auto-docs (`/docs`, `/redoc`, `/openapi.json`) left enabled.
+  `GET /health` → `{"status": "ok"}`. Includes the webhook router **and the
+  checkout-injection router**. FastAPI auto-docs left enabled.
 - **`deps.py`** — `get_db()` request dependency: yields a `SessionLocal` session
   (guards wired), commits on clean return, rolls back on exception, always
   closes. Overridden in tests to yield the harness's joined-transaction session.
@@ -406,21 +407,35 @@ Enum + coherence CHECK only. Webhook-driven transitions are Module 2/7.
   "unknown", idempotency_key=<header>, raw_payload=<parsed>, processed=False))`,
   `flush()` (concurrent-insert `IntegrityError` ⇒ treated as duplicate, `200`).
   See INV-23.
+- **`checkout_injection.py`** — `POST /internal/checkout-abandoned/{merchant_id}`
+  (Module-2 completion run). The §2.6 signed synthetic injection endpoint —
+  identical verify-before-parse contract to `webhooks.py` (INV-23/INV-34) with a
+  **dedicated** `Settings.checkout_injection_secret` and `X-Torque-Signature` /
+  `X-Torque-Event-Id` headers; writes one `Event(type="checkout.abandoned")` +
+  enqueues `create_checkout_case_task`. D-074.
 - **`src/torque/__main__.py`** — `python -m torque` → `uvicorn` (`--factory`),
   dev/preview only.
-- Deps added: `fastapi`, `uvicorn[standard]` (runtime); `httpx` (dev, TestClient).
+- Deps: `fastapi`, `uvicorn[standard]` (runtime); `httpx` (dev, TestClient).
 
-**Not here:** any other route; auth on `/health`; per-merchant secrets.
+**Not here:** any other route; auth on `/health`; per-merchant secrets; a real
+storefront pixel (the injection endpoint is the demo-scope default — Part D
+item 1).
 
 ---
 
-## 8B. Signal ingestion logic — `torque.ingestion` — `IMPLEMENTED` (M7b Leg 1 + M7c systemic)
+## 8B. Signal ingestion logic — `torque.ingestion` — `IMPLEMENTED` (all four legs + systemic)
 
-`src/torque/ingestion/` (M7b + M7c). The post-`Event` half of Module 2, Leg 1
-only, plus the leg-agnostic §2.5 systemic layer. **Celery + Redis** (broker only,
-no result backend — D-057 / U-07 inbound half) + **Celery beat** for the 60s job
-(D-064). No migration — pure logic over existing tables + one approved
-state-machine edge.
+`src/torque/ingestion/` (M7b + M7c + M8 + the Module-2 completion run). The
+post-`Event` half of Module 2 for **all four legs**, plus the leg-agnostic §2.5
+systemic layer. **Celery + Redis** (broker only, no result backend — D-057 / U-07
+inbound half) + **Celery beat** for the 60s job (D-064). No migration — pure
+logic over existing tables + the one M7c state-machine edge.
+
+One task per ingestion path (`tasks.py`, each = one `session_scope()` via the
+`_session_scope` test seam): `resolve_buffered_event_task` (Leg 1, `countdown=90`),
+`resolve_subscription_buffered_event_task` (Leg 3, `countdown=30`),
+`create_checkout_case_task` (Leg 2, immediate), `ingest_invoice_task` (Leg 4,
+immediate), `detect_systemic_task` (beat, 60s).
 
 - **`celery_app.py`** — `Celery("torque")`, `broker = Settings.redis_url` (host
   6389), `task_ignore_result`, eager flags from
@@ -449,16 +464,57 @@ state-machine edge.
   hashing in M7b**, D-061); `Event.processed = True`. **All of the above +
   `Event.processed` commit/roll back as one transaction** — the Celery task's
   single `session_scope()`; `create_or_attach_case` only `flush()`es.
-- **`dedup.py`** — `find_supersedable_case`: open non-terminal
-  `CHECKOUT_ABANDONMENT`, same `(merchant_id, counterparty_id)`,
-  `context.cart_id == order_id`, within `PolicyConfig.cross_leg_dedup_window_hours`
-  (2h). **Live direction only** (reverse deferred with Leg 2 — D-060).
+- **`dedup.py`** — **bidirectional** §2.4 (D-075). `find_supersedable_case`
+  (forward: a `payment.failed` arriving second → open non-terminal
+  `CHECKOUT_ABANDONMENT` case, `context.cart_id == order_id`) and
+  `find_supersedable_payment_case` (reverse: a `checkout.abandoned` arriving
+  second → open non-terminal `PAYMENT_DEGRADATION` case whose
+  `source_event.raw_payload` `order_id == cart_id`). Both: same
+  `(merchant_id, counterparty_id)`, `superseded_by_case_id IS NULL`, within
+  `PolicyConfig.cross_leg_dedup_window_hours` (2h), Python id match, no JSONB
+  index.
 - **`identity.py`** — `resolve_counterparty`: exact phone → exact email →
   create (`Counterparty` global via raw session; `Merchant_Counterparty` via
   `TenantScope`; safe consent defaults). Known dup-identity limitation — D-062.
-- **`payloads.py`** — pure Razorpay `payment.*` extractors.
+- **`payloads.py`** — pure Razorpay `payment.*` / `subscription.*` / `invoice.*`
+  + synthetic `checkout.*` extractors. Subscription: `mandate_id` is
+  **`payment.entity.token_id` only** (D-072), `mandate_type_from_method` (D-070,
+  unknown → `NACH`). Checkout: `checkout_abandonment_context` (`cart_id` /
+  `cart_value` paise→₹ / `drop_stage` / `payment_method_attempted` from the §4
+  vocab, unknown → `NONE`). Invoice: `original`/`outstanding` (paise→₹,
+  outstanding clamped to `[0, original]`), `due_date` (`expire_by`|`date`),
+  `days_overdue`, `gst_inclusive`, `payment_terms`.
 - **`outcomes.py`** — `BufferOutcome` enum (`NOOP` / `SELF_RECOVERED` /
-  `CASE_CREATED` / `CASE_MERGED`).
+  `CASE_CREATED` / `CASE_MERGED` (either direction) / `CASE_ATTACHED` (Leg-4
+  bundle)) — shared by every ingestion path.
+- **`checkout.py`** (Module-2 completion) — Leg 2. `create_checkout_case`: no
+  buffer; idempotent on `source_event_id` + `event.processed`;
+  `resolve_counterparty`; typed `CheckoutAbandonmentContext`;
+  `find_supersedable_payment_case` → **reverse §2.4 Merge** (new abandonment
+  case `superseded_by_case_id` → a pre-existing canonical `PAYMENT_DEGRADATION`
+  case, context merged into the survivor, status unchanged — D-075/D-076);
+  `sync_control_group`; `apply_active_hold_if_any` on a canonical case only;
+  `Event.processed`.
+- **`b2b.py`** (Module-2 completion) — Leg 4. `ingest_invoice`: no buffer;
+  idempotent (`event.processed` + `source_event_id`); `resolve_counterparty`;
+  the **locked §3 grouping rule** — open non-terminal `B2B_RECEIVABLE` case for
+  `(merchant, counterparty)` → `B2BInvoice` attaches (`CASE_ATTACHED`), else new
+  case (`context = {}`) + first invoice (`CASE_CREATED`); **no time window**;
+  `case.amount_at_risk = Σ B2BInvoice.outstanding_amount`;
+  `apply_active_hold_if_any` on create. D-077.
+- **`subscription.py`** (M8) — Leg 3. `subscription_failure_buffer_seconds()`
+  (30); `resolve_subscription_buffered_event` (NOOP / `_has_interim_charge`
+  matched on `subscription.entity.id` → `SELF_RECOVERED` /
+  `create_subscription_case`); `create_subscription_case` (idempotent on
+  `source_event_id`; `resolve_counterparty`; insert
+  `RevenueLeakCase(SUBSCRIPTION_FAILURE, DETECTED)` via `TenantScope` with a
+  typed `SubscriptionFailureContext`; `sync_control_group`; `_seed_rail_budget`;
+  `apply_active_hold_if_any`; `Event.processed`); `_seed_rail_budget` dispatches
+  by `mandate_type` → `_seed_upi_retry_budget` (`attempts_used=1`) /
+  `_seed_nach_retry_policy` (`clearing_cycle_status=RETURNED`,
+  `dishonour_count_this_fy=1`) / `cases.seed_card_retry_budget` (reused). No
+  cross-leg dedup. `cases._seed_card_retry_budget` → `cases.seed_card_retry_budget`
+  (public, now shared).
 - **`systemic.py`** (M7c) — the §2.5 `NETWORK_WIDE` job.
   `run_systemic_detection(session, *, now=None)` iterates merchants with
   `payment.failed` in the detection window ∪ merchants with an active
@@ -475,16 +531,21 @@ state-machine edge.
   `cases.py` gained one additive call to `apply_active_hold_if_any` before
   `event.processed = True` — no-active-event path is byte-for-byte M7b.
 
-Invariants: INV-24 (buffer → no case on self-recovery), INV-25 (Merge:
-one-directional, lossless, idempotent), INV-26 (every ingestion case has a
-counterparty), **INV-27** (systemic detection idempotent), **INV-28** (held case
-carries `systemic_event_id`), **INV-29** (resolution touches only its own held
-cases). All `HELPER`-class (function-enforced + tested), not `ORM-GUARD`.
+Invariants: INV-24 (buffer → no case on self-recovery), INV-26 (every ingestion
+case has a counterparty), **INV-27** (systemic detection idempotent), **INV-28**
+(held case carries `systemic_event_id`), **INV-29** (resolution touches only its
+own held cases), **INV-30** (Leg-3 self-recovery → no case), **INV-31** (Leg-3
+case seeds exactly its rail's retry entity, once), **INV-32** (cross-leg Merge
+symmetric + lossless, both directions — supersedes INV-25), **INV-33** (B2B
+invoices bundle into one open case per merchant+counterparty), **INV-34** (every
+ingestion entry point verifies before it parses/persists). All `HELPER`-class,
+not `ORM-GUARD`.
 
-**Not here:** Leg 2/3/4 ingestion; the `subscription.charged.failed` 30s buffer;
-reverse Merge; `ISSUER_SPECIFIC` systemic detection (U-08); `UPIRetryBudget` seeding;
-per-decline budget increments; token hashing; dispatch to Module 3; a
-`docker-compose` worker service.
+**Not here:** `ISSUER_SPECIFIC` systemic detection (U-08); systemic rollup for
+`subscription.charged.failed` (D-073); per-decline budget increments /
+`mandate_cancelled_at` (Module 5); real NACH return code (Module 5); a real
+storefront pixel (Part D item 1); token hashing; dispatch to Module 3; a
+`docker-compose` worker/beat service.
 
 ---
 
@@ -593,21 +654,30 @@ state_machine.py  <-  models/guards.py (network_directive_writer, tier_rank)   #
 api/deps.py  <-  db/session.py (SessionLocal)                                  # M7a
 api/webhooks.py  <-  api/deps.py, config.py (Settings), db/scoped.py (TenantScope),
                      models (Event, Merchant), security/razorpay_signature,
-                     ingestion/buffer + ingestion/tasks (enqueue)               # M7a + M7b
-api/app.py  <-  api/webhooks.py ;  __main__.py  <-  api/app.py (uvicorn factory)
+                     ingestion/{buffer,subscription,b2b,tasks} (enqueue)        # M7a…Module 2
+api/checkout_injection.py  <-  api/deps, config, db/scoped, security/razorpay_signature,
+                     ingestion/{checkout,tasks}, models (Event, Merchant)       # Module 2 completion
+api/app.py  <-  api/{webhooks,checkout_injection} ;  __main__.py  <-  api/app.py (uvicorn factory)
 ingestion/celery_app.py  <-  config.py (redis_url) ; beat_schedule -> detect_systemic  # M7b + M7c
-ingestion/tasks.py  <-  celery_app, db/session ; detect_systemic_task -> ingestion/systemic  # M7c
+ingestion/tasks.py  <-  celery_app, db/session ; -> ingestion/{buffer,subscription,checkout,b2b,systemic}
 ingestion/buffer.py  <-  ingestion/cases, ingestion/payloads, ingestion/outcomes, config (policy)
 ingestion/cases.py  <-  ingestion/{payloads,identity,dedup,outcomes,systemic}, db/scoped,
                         state_machine (sync_control_group), models (Event, RevenueLeakCase, CardRetryBudget)
-ingestion/dedup.py  <-  state_machine (is_terminal), config (policy), models (RevenueLeakCase)
+ingestion/subscription.py  <-  ingestion/{payloads,identity,outcomes,systemic}, ingestion/cases  # M8
+                        (seed_card_retry_budget), db/scoped, state_machine, models (…, UPIRetryBudget, NACHRetryPolicy)
+ingestion/checkout.py  <-  ingestion/{payloads,identity,outcomes,systemic,dedup}, db/scoped,   # Module 2 completion
+                        state_machine (sync_control_group), models (Event, RevenueLeakCase)
+ingestion/b2b.py  <-  ingestion/{payloads,identity,outcomes,systemic}, db/scoped,               # Module 2 completion
+                        state_machine (is_terminal, sync_control_group), models (Event, RevenueLeakCase, B2BInvoice)
+ingestion/dedup.py  <-  state_machine (is_terminal), config (policy), ingestion/payloads, models (Event, RevenueLeakCase)
 ingestion/systemic.py  <-  compliance/systemic (predicates), state_machine (transition_case),   # M7c
                         events (append_case_event), db/scoped, config (policy),
                         models (Event, RevenueLeakCase, SystemicEvent)
 ```
-(`state_machine.py` is imported FROM by `ingestion/{cases,dedup,systemic}` — read-only.
-`state_machine.py` was byte-stable M1→M7b; **M7c added exactly one edge**
-`PLAYBOOK_ACTIVE → SYSTEMIC_HOLD` + a docstring cleanup, nothing else — D-066.)
+(`state_machine.py` is imported FROM by `ingestion/{cases,dedup,systemic,subscription,checkout,b2b}`
+— read-only. `state_machine.py` was byte-stable M1→M7b; **M7c added exactly one
+edge** `PLAYBOOK_ACTIVE → SYSTEMIC_HOLD` + a docstring cleanup — D-066. M8 and
+the Module-2 completion run touched neither `state_machine.py` nor `guards.py`.)
 
 Circular-import care points (already handled in code, do not "fix"):
 - `models/guards.py` imports `Action` / `ActionCase` / `PromiseToPay` **lazily
@@ -621,17 +691,19 @@ Circular-import care points (already handled in code, do not "fix"):
 
 ## 14. What is explicitly NOT here
 
-See `DEFERRED.md` for the full register. Highlights: the **only** HTTP routes are
-`GET /health` and `POST /webhooks/razorpay/{merchant_id}` (M7a) — no other
-endpoint, no auth layer. **Celery + Redis** (broker only) + **Celery beat** run
-the M7b inbound buffer and the M7c §2.5 job — but no Temporal, no `PlaybookRun`
+See `DEFERRED.md` for the full register. Highlights: the HTTP routes are
+`GET /health`, `POST /webhooks/razorpay/{merchant_id}`, and
+`POST /internal/checkout-abandoned/{merchant_id}` — no other endpoint, no auth
+layer. **Celery + Redis** (broker only) + **Celery beat** run the four inbound
+ingestion tasks and the M7c §2.5 job — but no Temporal, no `PlaybookRun`
 workflow engine, no Postgres-polling job table (U-07 remaining half), no
-`docker-compose` worker/beat service. No Leg 2/3/4 ingestion, no
-`subscription.charged.failed` buffer, no reverse cross-leg Merge, **no
-`ISSUER_SPECIFIC` systemic detection** (U-08; `NETWORK_WIDE` is done — M7c), no
-`UPIRetryBudget` seeding, no per-decline budget increments, no card-token
+`docker-compose` worker/beat service. Module 2 is complete for all four legs;
+what remains is **not Module 2's job**: no `ISSUER_SPECIFIC` systemic detection
+(U-08), no systemic rollup over `subscription.charged.failed` (D-073), no
+per-decline budget increments / `mandate_cancelled_at` (Module 5), no real NACH
+return code (Module 5), no real storefront pixel (Part D item 1), no card-token
 hashing, no `Event`→Diagnosis dispatch, no code that drives
-`PLAYBOOK_ACTIVE → SYSTEMIC_HOLD` (edge is legal but dormant). No diagnosis, no
+`PLAYBOOK_ACTIVE → SYSTEMIC_HOLD` (edge legal but dormant). No diagnosis, no
 playbook runtime traversal, no channel adapters, no
 `GuardrailEngine`, no Outreach Coordinator, no reconciliation, no scoring, no
 reporting, no UI, no `MacCodeRegistry` full seed, no `root_cause_code` enum.

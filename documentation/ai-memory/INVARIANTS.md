@@ -373,6 +373,84 @@ violation**.
 - **Tests:** `tests/test_systemic_detection.py`
   (`test_resolution_only_touches_its_own_held_cases`).
 
+## INV-30 — Leg-3 self-recovery: a self-recovered subscription failure yields no case (Milestone 8)
+- **Domain:** `torque.ingestion.subscription.resolve_subscription_buffered_event`.
+- **Invariant:** if a `subscription.charged` `Event` for the same merchant and
+  the same `subscription.entity.id`, with `received_at >= failure.received_at`,
+  exists when the 30 s buffer resolves, then the originating
+  `subscription.charged.failed` `Event` ends `processed = True` and **no
+  `RevenueLeakCase` is created**. Idempotent under Celery redelivery (a second
+  run is `NOOP`; a pre-existing case for the `Event` is also `NOOP`).
+- **Enforcement:** `HELPER` — the buffer function; idempotency also backed by the
+  `source_event_id` check in `create_subscription_case`.
+- **Tests:** `tests/test_subscription_buffer.py`.
+
+## INV-31 — Leg-3 case seeds exactly its rail's retry entity, once (Milestone 8)
+- **Domain:** `torque.ingestion.subscription._seed_rail_budget` and the three
+  seeders.
+- **Invariant:** a `SUBSCRIPTION_FAILURE` case seeds **exactly one** retry
+  entity, determined by `mandate_type`: `UPI_AUTOPAY → UPIRetryBudget`
+  (`attempts_used = 1`, `hard_cap = 3`), `NACH → NACHRetryPolicy`
+  (`clearing_cycle_status = RETURNED`, `dishonour_count_this_fy = 1`),
+  `CARD → CardRetryBudget` (`attempts_used_24h/30d = 1`). No cross-rail
+  contamination; no row when `mandate_id` is empty (UPI/NACH) or no card ref
+  (CARD). Each seeder is seed-if-absent (`UNIQUE(mandate_id, merchant_id)` /
+  `UNIQUE(card_token_hash, merchant_id)`) — idempotent under redelivery. All in
+  the case transaction.
+- **Enforcement:** `HELPER` (the seeders) + `DB-CONSTRAINT` (the UNIQUE
+  constraints; `CHECK (hard_cap = 3)`).
+- **Tests:** `tests/test_subscription_budget_seeding.py`.
+
+## INV-32 — Cross-leg Merge is symmetric and lossless in both directions (Module 2)
+- **Domain:** `torque.ingestion.cases.create_or_attach_case` (forward) /
+  `torque.ingestion.checkout.create_checkout_case` (reverse) /
+  `torque.ingestion.dedup`.
+- **Invariant:** whichever of a correlated `payment.failed` / `checkout.abandoned`
+  pair is processed second, the **`CHECKOUT_ABANDONMENT` case is always the one
+  superseded** (`superseded_by_case_id` → the `PAYMENT_DEGRADATION` case), the
+  `PAYMENT_DEGRADATION` case is always canonical (`superseded_by_case_id IS
+  NULL`) and carries the abandonment context in
+  `context["merged_abandonment_context"]`, and the superseded case's `status` is
+  **unchanged**. Correlation = same `(merchant_id, counterparty_id)` and
+  abandonment `cart_id` == the payment's `order_id`, within
+  `PolicyConfig.cross_leg_dedup_window_hours`. No new `CaseEventType` (Option A —
+  the merge is reconstructable from the FK + merged context + each case's
+  `source_event` / `STATUS_CHANGED` history). Idempotent under redelivery.
+- **Enforcement:** `HELPER` — the two finders (`find_supersedable_case`,
+  `find_supersedable_payment_case`) both filter `superseded_by_case_id IS NULL` +
+  non-terminal; the merge writers set the FK once.
+- **Tests:** `tests/test_cross_leg_dedup.py` (forward),
+  `tests/test_cross_leg_dedup_reverse.py` (reverse + symmetry),
+  `tests/test_module2_integrity.py`.
+
+## INV-33 — B2B invoices bundle into one open case per (merchant, counterparty) (Module 2)
+- **Domain:** `torque.ingestion.b2b.ingest_invoice`; `b2b_invoice.case_id`.
+- **Invariant:** on `invoice.overdue`, if an open (non-terminal, non-superseded)
+  `B2B_RECEIVABLE` case exists for `(merchant_id, counterparty_id)` the new
+  `B2BInvoice` attaches to it and **no new case is created**; otherwise a new
+  `B2B_RECEIVABLE` case is created (`context = {}`) and the invoice is its first
+  row. There is **no time window** — a case keeps accepting invoices until it is
+  terminal. `case.amount_at_risk == Σ B2BInvoice.outstanding_amount` for that
+  case. Idempotent under redelivery (`event.processed` + `source_event_id`).
+- **Enforcement:** `HELPER` (`ingest_invoice`) + `DB-CONSTRAINT`
+  (`b2b_invoice` amount CHECKs; `event.idempotency_key` UNIQUE).
+- **Tests:** `tests/test_b2b_ingestion.py`, `tests/test_module2_integrity.py`.
+
+## INV-34 — Every ingestion entry point verifies before it parses or persists (Module 2)
+- **Domain:** `POST /webhooks/razorpay/{merchant_id}` (INV-23) **and**
+  `POST /internal/checkout-abandoned/{merchant_id}`.
+- **Invariant:** the synthetic `checkout.abandoned` injection endpoint applies
+  the identical contract to INV-23 with a **dedicated** secret
+  (`Settings.checkout_injection_secret`) and `X-Torque-*` headers: HMAC-verify
+  the raw body before parsing; missing/unset secret, missing/blank signature,
+  mismatch, non-object body, missing `X-Torque-Event-Id`, unknown merchant, or a
+  duplicate id → empty HTTP 200 with **no `Event`, no side effect**; otherwise
+  exactly one `Event` via `TenantScope`. The idempotency key is header-sourced,
+  never payload-derived (§2.5).
+- **Enforcement:** `HELPER` — the endpoint handler; `verify_razorpay_signature`
+  (constant-time) + `UNIQUE(idempotency_key)` (INV-18).
+- **Tests:** `tests/test_checkout_injection.py`.
+
 ---
 
 ## Invariants that are PLANNED (not yet enforced anywhere)

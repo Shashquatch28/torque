@@ -393,3 +393,53 @@ def test_m7c_state_machine_has_exactly_the_approved_edge():
     # the withheld edges are still withheld
     assert CaseStatus.SYSTEMIC_HOLD not in _TRANSITIONS[CaseStatus.DIAGNOSING]
     assert CaseStatus.CANCELLED not in _TRANSITIONS[CaseStatus.DETECTED]
+
+
+# --- Milestone 8 structural invariants ---------------------------------
+
+
+def test_m8_leg3_is_logic_only_no_schema_change(engine):
+    # Leg-3 ingestion (subscription.charged.failed) is pure ingestion logic over
+    # tables built in Milestone 2. No new table, enum, CaseEventType, or migration.
+    tables = set(inspect(engine).get_table_names())
+    assert {"upi_retry_budget", "nach_retry_policy", "revenue_leak_case", "event"} <= tables
+    assert not {"subscription", "mandate", "billing_cycle"} & tables
+
+    from torque.enums import CaseEventType, MandateType
+
+    assert {m.value for m in MandateType} == {"UPI_AUTOPAY", "NACH", "CARD"}
+    assert len(list(CaseEventType)) == 10
+
+
+# --- Module 2 completion (Legs 2 & 4) --------------------------------
+
+
+def test_module2_legs_2_and_4_are_logic_only_no_schema_change(engine):
+    # checkout.abandoned (Leg 2) + invoice.overdue (Leg 4) ingestion is pure
+    # logic over tables built in Milestone 1/2. No new table, enum, or migration.
+    tables = set(inspect(engine).get_table_names())
+    assert {"b2b_invoice", "revenue_leak_case", "event", "counterparty"} <= tables
+    assert not {"checkout_session", "abandoned_cart", "invoice"} & tables
+
+    from torque.enums import CaseEventType, LegType, PaymentMethodAttempted
+
+    assert {m.value for m in LegType} == {
+        "PAYMENT_DEGRADATION",
+        "CHECKOUT_ABANDONMENT",
+        "SUBSCRIPTION_FAILURE",
+        "B2B_RECEIVABLE",
+    }
+    assert {m.value for m in PaymentMethodAttempted} == {
+        "UPI_COLLECT", "UPI_INTENT", "CARD", "NETBANKING", "BNPL", "NONE",
+    }
+    assert len(list(CaseEventType)) == 10  # merge introduces no new event type (Option A)
+
+
+def test_b2b_invoice_check_constraints_present(engine):
+    cks = {c["name"] for c in inspect(engine).get_check_constraints("b2b_invoice")}
+    assert {
+        "ck_b2b_invoice_original_amount_non_negative",
+        "ck_b2b_invoice_outstanding_amount_non_negative",
+        "ck_b2b_invoice_outstanding_not_above_original",
+        "ck_b2b_invoice_days_overdue_non_negative",
+    } <= cks

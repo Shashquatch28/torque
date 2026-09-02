@@ -1048,6 +1048,229 @@ BY D-0NN`.
   created by systemic processing or the ingestion hook. The existing UPI hard
   cap / execution-window rules (`compliance.retry_rails`) are unchanged and are
   not licence to build a UPI producer.
+- **Status:** IN FORCE — the Leg-3 `UPIRetryBudget`/`NACHRetryPolicy` seeding it
+  points to was delivered in **Milestone 8** (D-072).
+
+## D-070 — Razorpay `payment.method` → `MandateType` map; unknown → `NACH`
+- **Milestone:** M8 (Leg 3)
+- **Decision:** How does a `subscription.charged.failed` payload's payment
+  `method` become `SubscriptionFailureContext.mandate_type`? The blueprint names
+  the `MandateType` enum (`UPI_AUTOPAY | NACH | CARD`) but gives no Razorpay map.
+- **Chosen:** `upi → UPI_AUTOPAY`, `card → CARD`,
+  `emandate / nach / netbanking → NACH`; **anything else / missing → `NACH`**.
+  Implemented as `payloads.mandate_type_from_method` + `_METHOD_TO_MANDATE`.
+- **Alternatives:** raise / skip case creation on an unknown method (loses a
+  verified signal); default unknown to `CARD` or `UPI_AUTOPAY` (less
+  conservative — those rails have network-enforced caps and windows).
+- **Reasoning:** The three main mappings are unambiguous. `NACH` is the
+  conservative fallback: a bank-account debit posture that is clearing-cycle
+  aware with a **self-imposed** (not network-enforced) ceiling — the safest
+  place to land an unrecognised recurring instrument.
+- **Consequence:** A degenerate/thin verified payload still produces a case
+  (`mandate_type = NACH`), consistent with the M7b "sparse case, not a 500"
+  philosophy. Routine data-mapping decision; no blueprint conflict.
+- **Status:** IN FORCE
+
+## D-071 — Leg-3 self-recovery buffer mirrors Leg-1; interim match on `subscription_id`
+- **Milestone:** M8
+- **Decision:** Shape of the `subscription.charged.failed` self-recovery buffer.
+- **Chosen:** A parallel module `torque.ingestion.subscription` mirroring
+  `buffer.py` / `cases.py`: `resolve_subscription_buffered_event` runs after a
+  **30 s** delay (`PolicyConfig.subscription_failure_buffer_seconds`, already
+  declared), looks for an interim `subscription.charged` `Event` for the **same
+  merchant and same `subscription.entity.id`** with `received_at >= failure.received_at`;
+  found → `Event.processed = True`, no case, `SELF_RECOVERED`; else →
+  `create_subscription_case`. Same `BufferOutcome` enum, same `_session_scope`
+  seam, same idempotency guards (`source_event_id` check, `processed` check).
+- **Alternatives:** generalise `buffer.py`/`cases.py` to be leg-parameterised
+  (touches verified M7b code substantially — rejected per "do not redesign
+  verified architecture merely because another implementation would be cleaner");
+  match the interim charge on `payment_id` (Razorpay reissues a new `payment_id`
+  for the retry, so `subscription_id` is the stable key).
+- **Reasoning:** Blueprint §2.3 ("apply the same pattern … with a shorter
+  buffer"). A parallel ~150-line module keeps the verified Leg-1 path untouched.
+- **Consequence:** `webhooks.py` dispatch gains an `elif event.type ==
+  SUBSCRIPTION_FAILED` branch enqueuing `resolve_subscription_buffered_event_task`
+  with `countdown = 30`. `subscription.charged` (success) is persisted only, not
+  enqueued (like `payment.captured`). No cross-leg dedup for Leg 3 (§2.4 is
+  Leg 1 ↔ Leg 2).
+- **Status:** IN FORCE
+
+## D-072 — Leg-3 rail-specific retry-budget seeding (§2.7 / Part A §3)
+- **Milestone:** M8
+- **Decision:** Which retry entity does a `subscription.charged.failed` seed, and
+  with what initial state?
+- **Chosen:** Rail-specific, keyed off `mandate_type` (D-016: three entities, no
+  shared template), in the same transaction as the case:
+  - `UPI_AUTOPAY` → `UPIRetryBudget(mandate_id, merchant_id)` with
+    `attempts_used = 1` — "includes the original attempt" (Part A §3); `hard_cap`
+    stays the NPCI-locked default `3`; `mandate_cancelled_at` NULL.
+  - `NACH` → `NACHRetryPolicy(mandate_id, merchant_id)` with
+    `clearing_cycle_status = RETURNED` (a failed charge = a returned
+    presentment), `dishonour_count_this_fy = 1`, `return_reason_code = NULL`
+    (the real NPCI return code comes from the bank return file — Module 5 — not
+    this webhook's generic `error_code`, which also exceeds the 16-char column),
+    `retry_eligible_after = NULL` (next batch clearing window — Module 5).
+  - `CARD` → `CardRetryBudget` via the **reused** `cases.seed_card_retry_budget`
+    (Part A §3: `CardRetryBudget` applies to `mandate_type = CARD` too). That
+    helper was renamed from `_seed_card_retry_budget` to a public name since it
+    is now shared across `cases` and `subscription`.
+  - `mandate_id` is **`payment.entity.token_id` only** — Razorpay's canonical
+    handle for the authorised mandate (UPI mandate token / bank e-mandate token /
+    card-on-file token). A `subscription.id` is **never** substituted: the
+    blueprint keeps `mandate_id` and `subscription_id` as distinct
+    `SubscriptionFailureContext` fields and `UPIRetryBudget` is "scoped
+    per-mandate" (Part A §3). When the payload carries no token, `mandate_id` is
+    stored `""` and **no** `UPIRetryBudget` / `NACHRetryPolicy` row is written —
+    exactly as a card payment with no instrument reference seeds no
+    `CardRetryBudget` (D-069). Corrected in the M8 mandate-identity verification
+    pass (the initial cut had a `subscription.id` fallback — removed).
+  - Each seeder is **idempotent** — seed-if-absent, no-op if the
+    `UNIQUE(mandate_id, merchant_id)` row exists.
+- **Alternatives:** a generic seeding abstraction (contradicts D-016); defer all
+  Leg-3 seeding (breaks §2.7 "same transaction as case creation").
+- **Reasoning:** Blueprint §2.7 + Part A §3. Multi-decline increments,
+  `mandate_cancelled_at` on the 4th attempt, and the real NACH return code /
+  `retry_eligible_after` are all Module-5 concerns (post-`RETRY_PAYMENT`), not
+  ingestion.
+- **Consequence:** M8 tests assert exactly one rail entity per case and no
+  cross-rail contamination. `_METHOD_TO_MANDATE` (D-070) drives which seeder runs.
+- **Status:** IN FORCE
+
+## D-073 — The M7c systemic hook applies to Leg-3 cases; the systemic rollup does not yet count subscription failures
+- **Milestone:** M8
+- **Decision:** How does Leg 3 interact with M7c systemic detection?
+- **Chosen:** `create_subscription_case` calls the existing
+  `systemic.apply_active_hold_if_any` — a `SUBSCRIPTION_FAILURE` case created
+  during an active `NETWORK_WIDE` `SystemicEvent` is born `SYSTEMIC_HOLD` (§2.7),
+  same as Leg 1. **But** the systemic detection *rollup*
+  (`systemic._failure_count` / `_baseline_failure_rate`) still counts only
+  `Event(type == "payment.failed")` — it does **not** yet include
+  `subscription.charged.failed`. Extending the rollup to subscription failures is
+  deferred (see `DEFERRED.md`).
+- **Alternatives:** extend the rollup now (scope expansion into M7c's detection
+  logic; the blueprint §2.5 does not enumerate which event types feed the rate).
+- **Reasoning:** The §2.7 hold-on-ingest is a small reuse and is clearly required
+  ("check systemic hold — if active, set SYSTEMIC_HOLD" applies to every ingested
+  case). Whether an issuer/network outage should be *detected* from subscription
+  failures too is a separate, deferrable refinement — consistent with the
+  walking-skeleton approach and with M7c leaving `ISSUER_SPECIFIC` deferred.
+- **Status:** IN FORCE — the §2.7 hook is likewise applied to Legs 2 & 4 (D-078);
+  the rollup still counts `payment.failed` only.
+
+## D-074 — Leg 2 `checkout.abandoned` via a signed internal injection endpoint
+- **Milestone:** Module 2 completion run
+- **Decision:** How is `checkout.abandoned` ingested — there is no Razorpay
+  webhook for it (§2.6 / Part D item 1)?
+- **Chosen:** The confirmed demo-scope default: a **signed internal endpoint**
+  `POST /internal/checkout-abandoned/{merchant_id}` (`torque.api.checkout_injection`).
+  It mirrors the Razorpay webhook (INV-23) exactly — HMAC-SHA256 over the raw
+  body (constant-time, `verify_razorpay_signature` reused) against a **dedicated**
+  `Settings.checkout_injection_secret`; `X-Torque-Signature` header;
+  `X-Torque-Event-Id` header for idempotency (**header-sourced, never
+  payload-derived** — §2.5); unknown merchant / bad sig / unset secret / missing
+  id → empty HTTP 200, no `Event`; else one `Event(type="checkout.abandoned")`
+  via `TenantScope` + enqueue `create_checkout_case_task`. **No self-recovery
+  buffer** (§2.3) — immediate task. Torque-defined body shape:
+  `{"event": "checkout.abandoned", "payload": {"checkout": {"entity":
+  {"cart_id", "cart_value" (paise), "drop_stage", "payment_method_attempted",
+  "contact", "email"}}}}`. A real storefront SDK/pixel is a separate build item
+  (Part D item 1) and is **not** built.
+- **Alternatives:** a real storefront pixel now (Part D item 1 explicitly defers
+  it); reuse the Razorpay webhook path (it is a different signature scheme).
+- **Reasoning:** §2.6 spells out "a signed internal endpoint … HMAC keyed
+  per-merchant, same pattern as §2.2".
+- **Consequence:** `Settings.checkout_injection_secret` added. New router in
+  `create_app()`.
+- **Status:** IN FORCE
+
+## D-075 — §2.4 cross-leg correlation completed bidirectionally
+- **Milestone:** Module 2 completion run
+- **Decision:** Implement the reverse §2.4 direction (a `checkout.abandoned`
+  arriving after an open `PAYMENT_DEGRADATION` case).
+- **Chosen:** `dedup.find_supersedable_payment_case` — the abandonment's
+  `cart_id` is matched against an open, non-terminal, non-superseded
+  `PAYMENT_DEGRADATION` case's **`source_event.raw_payload` `order_id`** (the
+  payment leg's typed context has no `cart_id`/`order_id` field), same
+  `(merchant_id, counterparty_id)`, within
+  `PolicyConfig.cross_leg_dedup_window_hours`. On a hit,
+  `checkout.create_checkout_case` creates the `CHECKOUT_ABANDONMENT` case then
+  immediately sets its `superseded_by_case_id` to the pre-existing payment case
+  (which stays canonical) and merges its context into the survivor's
+  `context["merged_abandonment_context"]`. **Symmetric end-state** with the
+  forward direction (M7b `cases.create_or_attach_case`): the abandonment is
+  always the superseded/narrower case; the payment case is always canonical with
+  the merged context; the superseded case's `status` is **unchanged**. Same
+  candidate-narrowing strategy (`merchant_id` + `counterparty_id` + `leg_type` +
+  `opened_at`, id match in Python) — **no JSONB expression index**.
+- **Alternatives:** store `order_id` on `PaymentDegradationContext` at Leg-1
+  creation time (touches verified M7b context/code); a JSONB index (rejected —
+  demo scale, and the instruction forbids it).
+- **Reasoning:** §2.4 last paragraph — "runs symmetrically regardless of which
+  event type arrives first".
+- **Consequence:** `dedup.py` gains the second finder; `checkout.py` owns the
+  reverse-merge write. `cases.create_or_attach_case` (forward) is unchanged.
+- **Status:** IN FORCE
+
+## D-076 — Merge audit trail: no new `CaseEventType` (Option A)
+- **Milestone:** Module 2 completion run
+- **Decision:** How is a supersession audited?
+- **Chosen:** The blueprint's existing mechanism only:
+  `superseded_case.superseded_by_case_id = surviving_case.id` (the canonicality
+  relationship) + the survivor's `merged_abandonment_context` + each case's
+  preserved `source_event` and `STATUS_CHANGED` history. "Which case was
+  superseded / which is canonical / which leg produced the survivor / why" are
+  all reconstructable from these. **No `CASE_SUPERSEDED`, no new `CaseEventType`,
+  no new payload schema, no `ALTER TYPE` migration** — the blueprint §4 CaseEvent
+  vocabulary stays closed at 10 (D-007), reaffirming D-059 and D-068.
+- **Alternatives:** add a `CASE_SUPERSEDED` `CaseEventType` (Option B) — this was
+  raised as an "authoritative" requirement in a Module 2 instruction but that
+  framing was erroneous: no such type exists in the blueprint §4 table and
+  D-007/D-041/D-059/D-068 govern the locked vocabulary; the maintainer confirmed
+  Option A.
+- **Consequence:** Consumers of "currently actionable" cases must filter
+  `superseded_by_case_id IS NULL` (unchanged from M7b).
+- **Status:** IN FORCE
+
+## D-077 — Leg 4 `invoice.overdue` → `B2BInvoice` + §3 case grouping
+- **Milestone:** Module 2 completion run
+- **Decision:** The `invoice.overdue` ingestion path and its grouping.
+- **Chosen:** Razorpay-webhook dispatch → **no buffer** (§2.3) → immediate
+  `ingest_invoice_task` → in one `session_scope`: resolve counterparty; apply the
+  **locked §3 grouping rule** — if an open (non-terminal, non-superseded)
+  `B2B_RECEIVABLE` case exists for `(merchant_id, counterparty_id)` the new
+  `B2BInvoice` attaches to it (**no new case**, `CASE_ATTACHED`), else a new
+  `B2B_RECEIVABLE` case is created with `context = {}` (`CASE_CREATED`) — **no
+  time window**. `case.amount_at_risk` is maintained as Σ `outstanding_amount`
+  across the thread. Razorpay `payload.invoice.entity` mapping:
+  `original_amount = amount` (paise→₹); `outstanding_amount = amount_due`
+  (clamped to `[0, original]` to satisfy the CHECKs; falls back to
+  `amount − amount_paid`); `due_date` from `expire_by` else `date` (unix→date;
+  today if absent); `days_overdue = max(0, today − due_date)`; `gst_inclusive`
+  from `gst`/`tax_amount` presence; `payment_terms = terms[:64]`. Idempotency:
+  `Event.idempotency_key` UNIQUE + the `event.processed` guard + a
+  `source_event_id` check on the CREATE path. **No `razorpay_invoice_id`
+  column** — Razorpay fires `invoice.overdue` once per invoice; a redelivered
+  event is caught by the existing mechanism. New `BufferOutcome.CASE_ATTACHED`.
+- **Alternatives:** a bundling time window (§3 explicitly says "none"); a schema
+  column for the Razorpay invoice id (not needed, and the instruction forbids
+  speculative schema).
+- **Reasoning:** §3 "Grouping logic (locked, no ambiguity left for Module 2)".
+- **Status:** IN FORCE
+
+## D-078 — §2.7 systemic hook applied to Legs 2 & 4; rollup unchanged
+- **Milestone:** Module 2 completion run
+- **Decision:** How do Legs 2 & 4 interact with M7c systemic detection?
+- **Chosen:** `checkout.create_checkout_case` and `b2b.ingest_invoice` call
+  `systemic.apply_active_hold_if_any` on the **canonical** case they create (not
+  on a case being immediately superseded; not on a Leg-4 attach where no case is
+  created) — a case born during an active `NETWORK_WIDE` `SystemicEvent` is
+  `SYSTEMIC_HOLD` (§2.7), same as Legs 1 & 3. The systemic detection **rollup**
+  is unchanged — it counts `Event(type="payment.failed")` only (D-073);
+  `checkout.abandoned` and `invoice.overdue` are not failure-rate signals and do
+  not feed it.
+- **Reasoning:** §2.7 "check systemic hold — if active, set SYSTEMIC_HOLD"
+  applies to every ingested case. §2.5 is a payment-rail outage detector.
 - **Status:** IN FORCE
 
 ---

@@ -28,12 +28,33 @@ Legend: 🔧 build (planned) · 📋 design-only for demo · 🔮 roadmap / out 
   `PAYMENT_DEGRADATION` in `DETECTED`, counterparty resolution,
   `Merchant_Counterparty`); **`CardRetryBudget` seeding** to 1 for card
   `payment.failed` (§2.7). See `MILESTONES.md` Milestone 7b.
-- 🔧 **Self-recovery buffer — `subscription.charged.failed` half** (30s;
-  `PolicyConfig.subscription_failure_buffer_seconds` exists). Needs Leg-3
-  ingestion.
-- 🔧 **Cross-leg dedup — reverse direction** (`checkout.abandoned` arriving after
-  a `PAYMENT_DEGRADATION` case). Deferred with **Leg-2 ingestion** — there is no
-  `checkout.abandoned` producer until then (D-060).
+- ✅ **DONE in M8 (Leg 3):** the **30 s self-recovery buffer** for
+  `subscription.charged.failed` (`torque.ingestion.subscription`, §2.3); the
+  **`SUBSCRIPTION_FAILURE` case creation path** (typed `SubscriptionFailureContext`
+  — `mandate_id` / `mandate_type` (D-070 method map) / `billing_cycle` /
+  `subscription_id`; counterparty + `Merchant_Counterparty` resolution;
+  `DETECTED`); **rail-specific retry-budget seeding** in the case transaction
+  (D-072) — `UPI_AUTOPAY → UPIRetryBudget(attempts_used=1)`,
+  `NACH → NACHRetryPolicy(RETURNED, dishonour_count=1)`,
+  `CARD → CardRetryBudget` (reused seeder). The M7c systemic hold hook applies.
+  See `MILESTONES.md` Milestone 8. **Residuals below.**
+- ✅ **DONE in the Module 2 completion run (Legs 2 & 4 + bidirectional Merge):**
+  the §2.6 **signed synthetic `checkout.abandoned` injection endpoint**
+  (`POST /internal/checkout-abandoned/{merchant_id}`, `torque.api.checkout_injection`,
+  dedicated `Settings.checkout_injection_secret`, D-074); **Leg 2
+  `CHECKOUT_ABANDONMENT` case creation** (`torque.ingestion.checkout`, typed
+  `CheckoutAbandonmentContext`, no buffer); the **reverse §2.4 cross-leg Merge**
+  (`checkout.abandoned` after an open `PAYMENT_DEGRADATION` case — symmetric with
+  the forward direction; abandonment superseded into the canonical payment case;
+  no new `CaseEventType`, D-075/D-076); **Leg 4 `invoice.overdue` ingestion**
+  (`torque.ingestion.b2b`, `B2BInvoice` + the locked §3 grouping rule, no buffer,
+  `case.amount_at_risk` = Σ outstanding, D-077); the §2.7 systemic hold hook on
+  canonical Leg-2 / Leg-4 cases (D-078). **Module 2 is now complete.** See
+  `MILESTONES.md` "Module 2 — Signal Ingestion — COMPLETE".
+- 🔧 **Systemic detection rollup does not count `subscription.charged.failed`** —
+  M7c/M8's `NETWORK_WIDE` rate counts only `Event(type="payment.failed")`
+  (D-073). Extending it to subscription failures is a future refinement (the
+  blueprint §2.5 does not enumerate which event types feed the rate).
 - ✅ **DONE in M7c (`NETWORK_WIDE` tier only):** the 60s Celery-beat systemic
   detection job (`torque.ingestion.systemic`) — per-merchant trailing-10-min
   failures/min vs. a trailing-7-day baseline that excludes the live window,
@@ -50,26 +71,26 @@ Legend: 🔧 build (planned) · 📋 design-only for demo · 🔮 roadmap / out 
 - 🔧 **Systemic detection tuning** — N (`systemic_baseline_floor_per_min`) and M
   (`systemic_absolute_count_floor`) remain **U-04 placeholders**. M7c consumes
   them as configured; it does not empirically validate or retune them.
-- 🔧 **`UPIRetryBudget` counter seeding** + **per-decline retry-budget increment
-  semantics** (M7b seeds `CardRetryBudget` to 1 and no-ops if the row exists;
-  incrementing on each decline / each `RETRY_PAYMENT` is Module 5). UPI seeding
-  is a **Leg-3 definition-of-done requirement** — mandate-scoped, from the
-  `subscription.charged.failed` (`mandate_type = UPI_AUTOPAY`) producer + its
-  `SubscriptionFailureContext` (D-069). M7c implements none of it.
+- 🔧 **Per-decline retry-budget increment semantics** (all rails seed to 1 and
+  no-op if the row exists; incrementing on each decline / each `RETRY_PAYMENT`,
+  plus `UPIRetryBudget.mandate_cancelled_at` on the 4th attempt, is Module 5).
+- 🔧 **Real NPCI NACH `return_reason_code` + `retry_eligible_after`** — M8 seeds
+  `NACHRetryPolicy` with `return_reason_code = None` / `retry_eligible_after =
+  None`; the real return code arrives via the bank return file and the next
+  batch-clearing date is computed by Module 5 (D-072).
 - 🔧 **Instrument-key hardening (keyed-HMAC / pepper)** — M7b stores the Razorpay
   tokenised card reference `COALESCE(token_id, card_id)` in the inherited
   `CardRetryBudget.card_token_hash` column (no PAN received or stored; column not
   renamed; no hashing performed — D-061). A keyed-HMAC/pepper representation of
   the instrument key is a future security-hardening item, not started.
-- 🔧 **Leg 3 ingestion** — `subscription.charged.failed` → `SUBSCRIPTION_FAILURE`
-  case (all four `SubscriptionFailureContext` fields, Razorpay method →
-  `mandate_type` mapping, 30s buffer).
-- 🔧 **`B2BInvoice` bundling trigger** (Leg 4) — on `invoice.overdue`, attach to
-  an open non-terminal B2B case for the same `(merchant_id, counterparty_id)` or
-  open a new one (§3 locked grouping logic).
-- 📋 **Checkout-abandonment ingestion mechanism** (Leg 2) — no Razorpay webhook
-  exists; proposed default is synthetic injection via a signed internal endpoint
-  (Part D item 1). A real storefront SDK/pixel with its own HMAC scheme is 🔮.
+- 🔮 **Real storefront SDK/pixel for Leg 2** — the Module 2 completion run built
+  the demo-scope **signed synthetic injection** endpoint (Part D item 1's
+  confirmed default). A real per-merchant storefront integration with its own
+  HMAC scheme is a separate future build item.
+- 🔧 **`B2BInvoice` partial-payment / `outstanding_amount` decrement, dunning,
+  case closure** — Leg-4 ingestion (done) creates the invoice + case and
+  maintains `amount_at_risk` = Σ outstanding; decrementing `outstanding_amount`
+  on payment and closing the case are Modules 4–7.
 - ✅ **DONE in M7c:** `PLAYBOOK_ACTIVE → SYSTEMIC_HOLD` added to
   `state_machine.py` (U-01 #3, D-066) as a **legal but dormant** edge. **Driving
   it** (a sweep that includes active playbook runs) + mid-run recovery semantics

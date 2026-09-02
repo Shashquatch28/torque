@@ -45,7 +45,7 @@ def test_failure_during_card_seed_rolls_everything_back(db, make_merchant, make_
     def _boom(*a, **k):
         raise RuntimeError("card seed failed")
 
-    monkeypatch.setattr(cases_mod, "_seed_card_retry_budget", _boom)
+    monkeypatch.setattr(cases_mod, "seed_card_retry_budget", _boom)
 
     savepoint = db.begin_nested()
     with pytest.raises(RuntimeError):

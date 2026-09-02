@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     # demo the mode is a per-deployment setting, not a per-request signal.
     razorpay_webhook_mode: Literal["live", "test"] = "test"
 
+    # Blueprint §2.6 / Part D item 1 — checkout abandonment has no Razorpay
+    # webhook. The demo-scope default (confirmed) is a signed internal injection
+    # endpoint: HMAC-SHA256 over the raw body against this secret, the same
+    # pattern as §2.2. Unset → the endpoint fails closed.
+    checkout_injection_secret: str | None = None
+
     # Celery + Redis for the Module 2 inbound self-recovery buffer (Milestone
     # 7b). Broker only — no result backend. Host port 6389 matches the
     # docker-compose redis service. Consumed by `torque.ingestion.celery_app`.

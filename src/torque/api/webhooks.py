@@ -33,8 +33,17 @@ from sqlalchemy.orm import Session
 from torque.api.deps import get_db
 from torque.config import Settings, get_settings
 from torque.db.scoped import TenantScope
+from torque.ingestion.b2b import INVOICE_OVERDUE
 from torque.ingestion.buffer import PAYMENT_FAILED, payment_failure_buffer_seconds
-from torque.ingestion.tasks import resolve_buffered_event_task
+from torque.ingestion.subscription import (
+    SUBSCRIPTION_FAILED,
+    subscription_failure_buffer_seconds,
+)
+from torque.ingestion.tasks import (
+    ingest_invoice_task,
+    resolve_buffered_event_task,
+    resolve_subscription_buffered_event_task,
+)
 from torque.models import Event, Merchant
 from torque.security.razorpay_signature import verify_razorpay_signature
 
@@ -115,15 +124,23 @@ async def razorpay_webhook(
         session.rollback()
         return _ok()
 
-    # Blueprint §2.3: a `payment.failed` case is NOT created synchronously — the
-    # verified Event is handed to the 90 s self-recovery buffer (a Celery
-    # delayed job on Redis). Every other event type is persisted and done for
-    # M7b (`payment.captured` is read later by the buffer; the rest await a
-    # future sub-milestone).
+    # Blueprint §2.3: a failure case is NOT created synchronously — the verified
+    # Event is handed to a Celery self-recovery buffer (90 s for `payment.failed`,
+    # 30 s for `subscription.charged.failed`). Success events (`payment.captured`,
+    # `subscription.charged`) are persisted and read later by the buffers; other
+    # types are persisted and await a future leg's milestone.
     if event.type == PAYMENT_FAILED:
         resolve_buffered_event_task.apply_async(
             (str(event.event_id),),
             countdown=payment_failure_buffer_seconds(),
         )
+    elif event.type == SUBSCRIPTION_FAILED:
+        resolve_subscription_buffered_event_task.apply_async(
+            (str(event.event_id),),
+            countdown=subscription_failure_buffer_seconds(),
+        )
+    elif event.type == INVOICE_OVERDUE:
+        # §2.3: `invoice.overdue` needs no buffer — dispatch immediately.
+        ingest_invoice_task.apply_async((str(event.event_id),))
 
     return _ok()

@@ -116,6 +116,8 @@ def db(engine):
 # exactly one of these depending on the deployment's configured mode.
 WEBHOOK_TEST_SECRET = "whsec_torque_test_9f3a"
 WEBHOOK_LIVE_SECRET = "whsec_torque_live_1c74"
+# Dedicated secret for the §2.6 signed synthetic `checkout.abandoned` endpoint.
+CHECKOUT_INJECTION_SECRET = "chsec_torque_inject_5b2e"
 
 
 def razorpay_payment_body(
@@ -159,6 +161,118 @@ def razorpay_payment_body(
     return json.dumps(body).encode()
 
 
+def razorpay_subscription_body(
+    *,
+    event: str = "subscription.charged.failed",
+    subscription_id: str = "sub_M8001",
+    payment_id: str = "pay_M8001",
+    amount_paise: int = 49900,
+    method: str = "upi",
+    token_id: str | None = "token_M8001",
+    paid_count: int = 4,
+    email: str | None = "subscriber@example.com",
+    contact: str | None = "+919810000900",
+    error_code: str | None = "BAD_REQUEST_ERROR",
+) -> bytes:
+    """A Razorpay `subscription.charged.failed` / `subscription.charged` webhook
+    body — carries both a `payment` entity and a `subscription` entity."""
+    pay: dict = {"id": payment_id, "amount": amount_paise, "currency": "INR"}
+    if method is not None:
+        pay["method"] = method
+    if token_id is not None:
+        pay["token_id"] = token_id
+    if email is not None:
+        pay["email"] = email
+    if contact is not None:
+        pay["contact"] = contact
+    if error_code is not None:
+        pay["error_code"] = error_code
+    sub: dict = {"id": subscription_id, "paid_count": paid_count, "status": "active"}
+    body = {
+        "entity": "event",
+        "account_id": "acc_RZP",
+        "event": event,
+        "contains": ["payment", "subscription"],
+        "payload": {"payment": {"entity": pay}, "subscription": {"entity": sub}},
+        "created_at": 1_760_000_000,
+    }
+    return json.dumps(body).encode()
+
+
+def checkout_abandoned_body(
+    *,
+    cart_id: str = "cart_M2001",
+    cart_value_paise: int = 49900,
+    drop_stage: str = "vpa_entry",
+    payment_method_attempted: str = "UPI_COLLECT",
+    contact: str | None = "+919810002001",
+    email: str | None = "shopper@example.com",
+) -> bytes:
+    """A synthetic `checkout.abandoned` injection body (Leg 2, §2.6)."""
+    entity: dict = {
+        "cart_id": cart_id,
+        "cart_value": cart_value_paise,
+        "drop_stage": drop_stage,
+        "payment_method_attempted": payment_method_attempted,
+    }
+    if contact is not None:
+        entity["contact"] = contact
+    if email is not None:
+        entity["email"] = email
+    body = {
+        "event": "checkout.abandoned",
+        "payload": {"checkout": {"entity": entity}},
+        "created_at": 1_760_000_000,
+    }
+    return json.dumps(body).encode()
+
+
+def razorpay_invoice_body(
+    *,
+    invoice_id: str = "inv_M2001",
+    amount_paise: int = 100_000,
+    amount_paid_paise: int = 0,
+    amount_due_paise: int | None = None,
+    expire_by: int | None = 1_760_000_000,
+    contact: str | None = "+919810004001",
+    email: str | None = "ap@acme-corp.test",
+    terms: str | None = "NET30",
+    gst: bool = True,
+) -> bytes:
+    """A Razorpay `invoice.overdue` webhook body (Leg 4)."""
+    entity: dict = {
+        "id": invoice_id,
+        "amount": amount_paise,
+        "amount_paid": amount_paid_paise,
+        "currency": "INR",
+        "status": "issued",
+    }
+    if amount_due_paise is not None:
+        entity["amount_due"] = amount_due_paise
+    if expire_by is not None:
+        entity["expire_by"] = expire_by
+    if terms is not None:
+        entity["terms"] = terms
+    if gst:
+        entity["gst"] = {"gstin": "27AAAAA0000A1Z5"}
+    cd: dict = {}
+    if contact is not None:
+        cd["contact"] = contact
+    if email is not None:
+        cd["email"] = email
+    if cd:
+        entity["customer_details"] = cd
+    body = {
+        "entity": "event",
+        "account_id": "acc_RZP",
+        "event": "invoice.overdue",
+        "contains": ["invoice"],
+        "payload": {"invoice": {"entity": entity}},
+        "created_at": 1_760_000_000,
+    }
+    return json.dumps(body).encode()
+
+
 @pytest.fixture()
 def make_api_client(db, monkeypatch):
     """Factory for a `TestClient` over the ingestion app, wired to the test
@@ -166,9 +280,11 @@ def make_api_client(db, monkeypatch):
     `Settings` with known webhook secrets. `mode` picks which secret the
     endpoint verifies against ("test" | "live").
 
-    By default the M7b buffer task's `apply_async` is replaced with a spy
-    (`client.buffer_enqueue`, a `MagicMock`) so tests never touch a real broker;
-    pass `patch_enqueue=False` to let a real (e.g. eager) enqueue happen.
+    By default both ingestion buffer tasks' `apply_async` are replaced with spies
+    (`client.buffer_enqueue` for `payment.failed`, `client.subscription_enqueue`
+    for `subscription.charged.failed`, both `MagicMock`s) so tests never touch a
+    real broker; pass `patch_enqueue=False` to let a real (e.g. eager) enqueue
+    happen.
     """
     from unittest.mock import MagicMock
 
@@ -182,20 +298,37 @@ def make_api_client(db, monkeypatch):
 
     def _make(mode: str = "test", *, with_secrets: bool = True, patch_enqueue: bool = True):
         spy = MagicMock(name="resolve_buffered_event_task.apply_async")
+        sub_spy = MagicMock(name="resolve_subscription_buffered_event_task.apply_async")
+        checkout_spy = MagicMock(name="create_checkout_case_task.apply_async")
+        invoice_spy = MagicMock(name="ingest_invoice_task.apply_async")
         if patch_enqueue:
             monkeypatch.setattr(
                 "torque.ingestion.tasks.resolve_buffered_event_task.apply_async", spy
+            )
+            monkeypatch.setattr(
+                "torque.ingestion.tasks.resolve_subscription_buffered_event_task.apply_async",
+                sub_spy,
+            )
+            monkeypatch.setattr(
+                "torque.ingestion.tasks.create_checkout_case_task.apply_async", checkout_spy
+            )
+            monkeypatch.setattr(
+                "torque.ingestion.tasks.ingest_invoice_task.apply_async", invoice_spy
             )
         settings = Settings(
             razorpay_webhook_secret_test=WEBHOOK_TEST_SECRET if with_secrets else None,
             razorpay_webhook_secret_live=WEBHOOK_LIVE_SECRET if with_secrets else None,
             razorpay_webhook_mode=mode,
+            checkout_injection_secret=CHECKOUT_INJECTION_SECRET if with_secrets else None,
         )
         app = create_app()
         app.dependency_overrides[get_db] = lambda: db
         app.dependency_overrides[get_settings] = lambda: settings
         client = TestClient(app)
         client.buffer_enqueue = spy
+        client.subscription_enqueue = sub_spy
+        client.checkout_enqueue = checkout_spy
+        client.invoice_enqueue = invoice_spy
         created.append(client)
         return client
 

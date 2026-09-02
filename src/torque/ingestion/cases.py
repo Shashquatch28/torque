@@ -88,7 +88,7 @@ def create_or_attach_case(session: Session, *, event: Event) -> BufferOutcome:
         abandonment.superseded_by_case_id = case.case_id
 
     if payloads.is_card_payment(payload):
-        _seed_card_retry_budget(session, merchant_id=event.merchant_id, payload=payload)
+        seed_card_retry_budget(session, merchant_id=event.merchant_id, payload=payload)
 
     # §2.7: if a NETWORK_WIDE SystemicEvent is active for this merchant, the new
     # case is born SYSTEMIC_HOLD rather than DETECTED (Milestone 7c). No-op
@@ -100,7 +100,7 @@ def create_or_attach_case(session: Session, *, event: Event) -> BufferOutcome:
     return BufferOutcome.CASE_MERGED if merged else BufferOutcome.CASE_CREATED
 
 
-def _seed_card_retry_budget(session: Session, *, merchant_id: str, payload: dict) -> None:
+def seed_card_retry_budget(session: Session, *, merchant_id: str, payload: dict) -> None:
     """Upsert the `CardRetryBudget` for this card to attempt-count 1 (§2.7 /
     Part A §3). Idempotent: the originating decline seeds the row once; every
     subsequent increment is a Module 5 `RETRY_PAYMENT` concern. Multi-decline

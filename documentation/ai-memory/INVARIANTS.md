@@ -544,14 +544,17 @@ violation**.
 - **Invariant:** a `PlaybookRun` has at most one pending `scheduled_job`
   (`UNIQUE(run_id)`). The poller claims due rows `FOR UPDATE SKIP LOCKED`, so two
   workers never process the same job; each execution tick (action + budget +
-  `active_step_id` + `CaseEvent`s + the job row) commits or rolls back as ONE
-  transaction. A crash rolls the tick back leaving the timer for the next poll
-  (at-least-once delivery, exactly-once effect) — no double action, no double
-  attempt consumption, no double advancement.
-- **Enforcement:** `DB` (`UNIQUE(run_id)` + `SKIP LOCKED`) + `HELPER`
-  (single-transaction `execute_due_job`).
+  `active_step_id` + `CaseEvent`s + the job row) is all-or-nothing — it runs inside
+  its own `begin_nested()` SAVEPOINT within the poll pass (D-095), so it commits or
+  rolls back as one unit AND one job's failure (`StepResult.ERROR`) cannot roll back
+  a sibling's committed work or stall the stratum. A crash rolls the tick back
+  leaving the timer for the next poll (at-least-once delivery, exactly-once effect)
+  — no double action, no double attempt consumption, no double advancement.
+- **Enforcement:** `DB` (`UNIQUE(run_id)` + `SKIP LOCKED`) + `HELPER` (per-job
+  SAVEPOINT in `execute_due_jobs` around the atomic `execute_due_job`).
 - **Tests:** `tests/test_module5_idempotency.py` (incl. two-connection concurrency),
-  `tests/test_module5_scheduler.py`.
+  `tests/test_module5_scheduler.py`, `tests/test_module5_corrections.py` (poison-pill
+  isolation + per-job atomicity).
 
 ## INV-44 — A run executes only on its pinned playbook version (Module 5)
 - **Domain:** `torque.execution.runner`.

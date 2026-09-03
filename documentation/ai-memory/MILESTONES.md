@@ -1024,6 +1024,34 @@ D-090.)*
 - **Recommended commit message:**
   `Module 5: execution & orchestration — Postgres-polling driver, runtime traversal, guardrails, timing`
 
+### Module 5 — Corrective pass (post-audit)
+
+The Module 5 adversarial audit returned two MAJOR findings; this corrective run
+fixed both (no new migration, `state_machine.py`/`guards.py` still untouched):
+
+- **F-1 (timing):** `max_duration_days` now measures the run's **active span from
+  the first executed action** (`min(Action.executed_at)`), not `run.created_at`, and
+  the **payday substitution applies to the entry step only** (D-094). The flagship
+  NSF-payday retry — previously exhausted before it fired when the payday target sat
+  beyond `max_duration` — now reaches execution; `max_duration` still bounds the
+  active span for every playbook. Surfaced and fixed a coupled over-application bug
+  (payday was applied to every advancing step, pushing each rung to the next
+  month-end).
+- **F-2 (isolation):** the poll pass now executes **each job in its own
+  `begin_nested()` SAVEPOINT** (D-095, `StepResult.ERROR`) — a poison job rolls back
+  only itself and is re-tried later; committed sibling work and the `SKIP LOCKED`
+  concurrency guarantee are preserved.
+- **F-6:** added a defensive superseded-case guard in the tick (NOOP + drop timer).
+- **F-3 / F-4 / F-5:** documentation clarifications — `run.status = COMPLETED` means
+  execution terminated, not recovered (D-096); the systemic-hold-drains-an-active-run
+  limitation is recorded (blueprint gap); timing inputs are documented as tz-aware
+  (IST is DST-free). No behavioural change for these three.
+- **Tests:** +9 in `tests/test_module5_corrections.py` (F-1 payday-executes /
+  entry-only / active-span-bound / non-payday-unaffected; F-2 poison-isolation /
+  retryable / per-job atomicity; F-6). Suite **817** collected/passed, 0 fail / 0
+  skip; `ruff` clean; roundtrip green; head `0015` (no migration).
+- **Decisions:** D-094, D-095, D-096.
+
 ---
 
 ## What comes next

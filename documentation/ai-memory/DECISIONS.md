@@ -1593,6 +1593,76 @@ BY D-0NN`.
   deferral pattern; none invents domain behaviour or touches `state_machine.py`.
 - **Status:** IN FORCE
 
+## D-094 — `max_duration` runs from the first executed action; payday adjusts only the entry step
+- **Milestone:** Module 5 corrective pass (audit finding F-1).
+- **Decision:** How does `stopping_rules.max_duration_days` interact with a
+  deliberately-scheduled first-action delay (a long `timing_offset`, or a §4.3
+  payday-cycle target that can sit ~a month out), and to which node does the payday
+  substitution apply?
+- **Chosen:**
+  - **`max_duration_days` bounds the run's *active execution span*, measured from
+    its FIRST executed action** (`min(Action.executed_at)`), NOT from
+    `PlaybookRun.created_at`. Before any action executes, the duration bound is not
+    in effect — a run waiting on its scheduled first fire cannot exhaust. `executed_at`
+    is stamped with the execution clock, so it reads consistently in tests and prod.
+  - **The §4.3 payday substitution applies only to the entry step** (armed by
+    `schedule_run`); advancing steps (`runner._next_fire_time`) use their static
+    graph offsets from the previous step's completion. §4.3 says payday adjusts "the
+    next node" — the first action after diagnosis — not every rung; applying it to
+    all steps pushed each to the next month-end (a 3-step run would take ~3 months).
+- **Alternatives:** measure `max_duration` from `created_at` (the pre-fix behaviour
+  — silently exhausted the flagship NSF-payday retry before it fired, for failures
+  in ~the first half of each month); simply enlarge `PLAYBOOK_NSF_RETRY.max_duration_days`
+  (masks the semantic error and still mis-bounds); apply payday to every node.
+- **Reasoning:** §4.2/§4.3 — `max_duration` bounds *repetition* of the active
+  sequence; a scheduled pre-action wait is a timing delay, not duration spent. Keeps
+  `max_duration` meaningful for every playbook (the active span is still bounded)
+  while letting policy legitimately time the first action to payday.
+- **Consequence:** no schema change (uses existing `Action.executed_at`); no change
+  to `state_machine.py`/`guards.py`. Regressions in `tests/test_module5_corrections.py`.
+- **Status:** IN FORCE
+
+## D-095 — Poll-batch jobs execute in isolated SAVEPOINTs (per-job atomicity)
+- **Milestone:** Module 5 corrective pass (audit finding F-2).
+- **Decision:** What is the transaction boundary when one poll pass executes several
+  claimed jobs?
+- **Chosen:** The batch is still claimed once under `FOR UPDATE SKIP LOCKED` (the
+  concurrency guarantee — the row locks are held by the caller's transaction for the
+  whole pass), but **each `execute_due_job` runs inside its own
+  `session.begin_nested()` SAVEPOINT**. On success the savepoint releases (its writes
+  join the caller's transaction and commit with it); on failure only that job's
+  savepoint rolls back — it returns `StepResult.ERROR`, its `scheduled_job` row stays
+  claimed-but-unmodified and is re-tried on a later poll, and committed sibling work
+  is untouched. Each job's own tick (Action + `ActionCase` + `CaseEvent`s +
+  retry-budget + `active_step_id` + job row) remains all-or-nothing.
+- **Alternatives:** one transaction for the whole batch (the pre-fix behaviour — one
+  poison job rolled back and stalled unrelated jobs, a liveness defect); a fully
+  independent session/transaction per job (more transactions; awkward with the
+  existing `execute_due_jobs(session, …)` signature and the savepoint-joined test
+  harness).
+- **Reasoning:** the polling driver must isolate one run's failure from others; the
+  SAVEPOINT strategy is the simplest that preserves both the `SKIP LOCKED`
+  concurrency guarantee and per-job atomicity within the existing architecture.
+- **Consequence:** `StepResult.ERROR` added; a persistently-failing job no longer
+  blocks its stratum (a dead-letter / failure-count policy remains future work). No
+  schema change.
+- **Status:** IN FORCE
+
+## D-096 — `PlaybookRun.status = COMPLETED` means execution terminated, not recovered
+- **Milestone:** Module 5 corrective pass (audit clarification F-3).
+- **Decision:** Clarify the semantics of the terminal run status used for an
+  exhausted run (`run COMPLETED` + `case EXHAUSTED`, D-093).
+- **Chosen:** `PlaybookRun.status = COMPLETED` means the run's execution has
+  terminated — it does **not** by itself mean the case recovered. The authoritative
+  recovery signal is the **case**: `RECOVERED` / `EXHAUSTED` and Module 7's
+  `recovery_type` / `recovered_amount`. `PlaybookRunStatus` has no `EXHAUSTED` member,
+  so `COMPLETED` is the neutral "ran to the end" terminal (D-093); the exhausted-vs-
+  recovered distinction lives on the case, not the run. No new enum is added merely
+  for naming.
+- **Reasoning:** avoids conflating "automation finished" with "money came back";
+  keeps recovery a single-source-of-truth case concept.
+- **Status:** IN FORCE
+
 ---
 
 ## Notes not recorded as decisions

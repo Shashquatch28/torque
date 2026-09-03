@@ -1,9 +1,9 @@
 # CURRENT STATE — read this first
 
-**Last updated:** 2026-09-03, after the **Module 5 — Execution & Orchestration**
-run (uncommitted).
-**Reconstructed from:** the committed Module 4 (HEAD `c17dd82`) + the uncommitted
-Module-5 run + `Torque_Blueprint_v7_FullSystem.md`.
+**Last updated:** 2026-09-03, after the **Module 5 corrective pass** (post-audit
+F-1/F-2/F-6 fixes; uncommitted, on top of the committed Module 5 `47622f0`).
+**Reconstructed from:** committed Module 5 (HEAD `47622f0`) + the uncommitted
+corrective pass + `Torque_Blueprint_v7_FullSystem.md`.
 **This file is derived documentation, not authoritative.** The repo and blueprint win.
 
 ---
@@ -32,7 +32,7 @@ version-pinned `PlaybookRun` at their entry step.
 | Driver (§5.6) | `scheduled_job` table (0015) + 10 s/60 s Celery-beat pollers; due rows claimed `FOR UPDATE SKIP LOCKED` |
 | Runtime tick | `execute_due_job`: §5.1 loop — guardrails → executor stub → atomic Action+CaseEvent → `STEP_TRANSITIONED` → advance `active_step_id` → reschedule / finalize (all one transaction) |
 | Guardrails (§5.2, D-092) | network hard-stop, Card/UPI/NACH budgets, UPI hard-cap + peak-window defer, pre-debit gap w/ auto-insert self-heal, systemic-hold block; quiet-hours/UPI-window are defers |
-| Timing (D-025) | offset-from-completion; IST `allowed_hours` deferral (+ overnight); payday `next_month_end_working_day` substitution; never fires early |
+| Timing (D-025) | offset-from-completion; IST `allowed_hours` deferral (+ overnight); payday `next_month_end_working_day` substitution on the **entry step only** (D-094); never fires early. `max_duration` bounds the active span **from the first executed action** (D-094) |
 | Budgets | Card (`attempts_used_24h/_30d`) + UPI (`attempts_used`) consumed once per fired retry, row-locked; NACH counters are external |
 | Executor (§5.4) | internal **stub**, no external I/O — the seam real channel adapters attach to |
 | Terminal (D-093) | ESCALATE_HUMAN node → case `ESCALATED_TO_HUMAN`/run `ESCALATED`; else case `EXHAUSTED`/run `COMPLETED` |
@@ -44,15 +44,15 @@ version-pinned `PlaybookRun` at their entry step.
 
 | Fact | Value |
 |---|---|
-| Git HEAD (`main`) | **`c17dd82`** (committed Module 4). Module 5 sits uncommitted on top. |
-| Working tree | uncommitted Module-5 run. New: `src/torque/execution/` (`__init__`, `scheduler`, `runner`, `guardrails`, `timing`, `executor`, `rendering`, `tasks`), `src/torque/models/scheduled_job.py`, `migrations/versions/0015_scheduled_job.py`, `tests/test_module5_{timing,execution,guardrails,scheduler,idempotency,multicase,tenancy}.py` (7 files). Modified: `models/__init__.py`, `events/payloads.py` (STEP_TRANSITIONED settled), `ingestion/celery_app.py` (task+beat wiring), `tests/conftest.py` (M5 fixtures). |
-| Alembic head / current | **`0015_scheduled_job`** (M5 added it; additive table). |
-| Test suite | **808 passed** (`uv run pytest -q`), 0 fail / 0 skip. 1 cosmetic `StarletteDeprecationWarning`. |
-| `def test_` functions | **680** |
+| Git HEAD (`main`) | **`47622f0`** (committed Module 5). The **corrective pass** (F-1/F-2/F-6) sits uncommitted on top. |
+| Working tree | uncommitted Module-5 corrective pass. Modified: `src/torque/execution/runner.py` (F-1 max_duration-from-first-action + payday entry-only + F-6 guard), `src/torque/execution/scheduler.py` (F-2 per-job SAVEPOINT). New: `tests/test_module5_corrections.py`. Committed Module 5: `src/torque/execution/` (8 files), `src/torque/models/scheduled_job.py`, `migrations/0015`, 7 `test_module5_*`, `events/payloads.py`, `ingestion/celery_app.py`, `models/__init__.py`, `conftest.py`. |
+| Alembic head / current | **`0015_scheduled_job`** (M5 added it; the corrective pass added **no** migration). |
+| Test suite | **817 passed** (`uv run pytest -q`), 0 fail / 0 skip. 1 cosmetic `StarletteDeprecationWarning`. |
+| `def test_` functions | **689** |
 | Lint | `uv run ruff check .` → clean |
 | Migration roundtrip | green (up→down→up incl. 0015) |
-| `src/torque/state_machine.py` | **byte-unchanged vs HEAD**. M5 uses the existing `PLAYBOOK_ACTIVE → {ESCALATED_TO_HUMAN, EXHAUSTED}` edges. |
-| `src/torque/models/guards.py` | **byte-unchanged vs HEAD**. |
+| `src/torque/state_machine.py` | **byte-unchanged vs the Module-4 baseline `c17dd82`** (M5 + corrective pass touch neither). Uses the existing `PLAYBOOK_ACTIVE → {ESCALATED_TO_HUMAN, EXHAUSTED}` edges. |
+| `src/torque/models/guards.py` | **byte-unchanged vs `c17dd82`**. |
 | Stack | Python 3.11, SQLAlchemy 2.0, Alembic, Pydantic v2, FastAPI, **Celery + Redis + beat** (now also the execution pollers), PostgreSQL 16, `uv`, pytest, ruff |
 | DB / infra | Postgres host **5442**; Redis host **6389**. Tests run eager/mocked. **24 tables** (M5 added `scheduled_job`). |
 
@@ -107,8 +107,20 @@ approved scope.
 ## Known contradictions / caveats
 
 - **`README.md` is stale.** Trust `CURRENT_STATE.md` / the code.
-- **The Module-5 run is uncommitted.** Every "verified fact" above (808 tests, the
-  `torque.execution` package, migration 0015) reflects the working tree.
+- **The corrective pass is uncommitted** on top of committed Module 5 (`47622f0`).
+  Every "verified fact" above (817 tests, the F-1/F-2/F-6 fixes) reflects the working
+  tree.
+- **Payday times the entry step only** (D-094); advancing steps use static offsets.
+  `max_duration` is measured from the first executed action, so a run waiting on a
+  scheduled first fire (payday, long offset) no longer exhausts before it acts.
+- **`run.status = COMPLETED` ≠ recovered** (D-096) — it means execution terminated;
+  the case status (`EXHAUSTED` vs `RECOVERED`, + Module 7's `recovery_type`) is the
+  recovery signal.
+- **A poll batch isolates each job in a SAVEPOINT** (D-095): one poison job errors
+  and is retried later without rolling back siblings; `SKIP LOCKED` concurrency intact.
+- **Systemic hold drains an active run** (block → `on_blocked`), it does not pause it
+  — a blueprint gap (pause/resume needs the deferred `PLAYBOOK_ACTIVE → SYSTEMIC_HOLD`
+  sweep). Known limitation (F-4).
 - **Execution is not auto-triggered.** No auto-dispatch anywhere: Module 2→3
   (D-080), 3→4 (D-088), **4→5** (D-093). Each engine + task is ready and invocable;
   the demo/tests wire them explicitly (`activate_case` → `schedule_run` → pollers).

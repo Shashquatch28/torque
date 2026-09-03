@@ -113,10 +113,25 @@ def execute_due_jobs(
     now: datetime | None = None,
     limit: int = 100,
 ) -> list[StepResult]:
-    """One poll pass: claim due jobs for `leg_types` and execute each. Returns the
-    per-job results. The caller owns the transaction."""
+    """One poll pass: claim due jobs for `leg_types` and execute **each in its own
+    SAVEPOINT** so one poison job cannot roll back or stall its siblings (F-2).
+
+    The batch is claimed once under `FOR UPDATE SKIP LOCKED` (concurrency guarantee
+    preserved — the row locks are held by the caller's transaction for the whole
+    pass), but every `execute_due_job` runs inside `session.begin_nested()`: on
+    success its savepoint is released (its Action + CaseEvents + retry-budget +
+    `active_step_id` + job-row writes join the caller's transaction and commit with
+    it); on failure only that job's savepoint rolls back — its row stays claimed-
+    but-unmodified and is re-tried on a later poll, while committed sibling work is
+    untouched. Each job's own writes remain all-or-nothing (`StepResult.ERROR` on a
+    raise). The caller owns the outer transaction/commit."""
     now = now or datetime.now(UTC)
     results: list[StepResult] = []
     for job in claim_due_jobs(session, leg_types=leg_types, now=now, limit=limit):
-        results.append(execute_due_job(session, job, now=now))
+        try:
+            with session.begin_nested():
+                result = execute_due_job(session, job, now=now)
+            results.append(result)
+        except Exception:  # noqa: BLE001 — one job's failure must not abort the pass
+            results.append(StepResult.ERROR)
     return results

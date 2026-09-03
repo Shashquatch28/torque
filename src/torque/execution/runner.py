@@ -49,7 +49,6 @@ from torque.execution.executor import ActionContext, channel_for, run_action
 from torque.models import (
     Action,
     CardRetryBudget,
-    Merchant,
     Playbook,
     PlaybookRun,
     PreDebitNotification,
@@ -60,7 +59,6 @@ from torque.models import (
 from torque.playbooks.stopping_rules import StoppingRules
 from torque.policy import traversal
 from torque.policy.engine import resolve_effective_stopping_rules
-from torque.policy.payday import effective_timing_adjustment
 
 _CONTACT_ACTIONS = frozenset(
     {
@@ -87,6 +85,7 @@ class StepResult(Enum):
     AUTO_INSERTED_PREDEBIT = auto()  # §5.2.3 self-heal; retry re-armed 24h out
     ESCALATED = auto()  # reached a human-escalation terminal
     EXHAUSTED = auto()  # ran out of attempts/duration or hit a non-escalate terminal
+    ERROR = auto()  # the tick raised; its per-job SAVEPOINT was rolled back (F-2)
 
 
 def execute_due_job(
@@ -102,6 +101,16 @@ def execute_due_job(
         return StepResult.NOOP
 
     case = session.get(RevenueLeakCase, run.case_id)
+    # Defence-in-depth (F-6): a run only ever exists for a canonical case (Module 4
+    # activates non-superseded PLAYBOOK_ACTIVE cases, and §2.4 supersession is an
+    # ingestion-time merge that precedes diagnosis/activation), so this is
+    # unreachable in normal flow — but never execute a merged-away case. Drop the
+    # timer and stop; no invented state transition.
+    if case is None or case.superseded_by_case_id is not None:
+        session.delete(job)
+        session.flush()
+        return StepResult.NOOP
+
     pinned = session.get(Playbook, (run.playbook_id, run.playbook_version))
     graph = pinned.steps_graph
     rules = resolve_effective_stopping_rules(session, run)
@@ -110,7 +119,7 @@ def execute_due_job(
     action_type = ActionType(node["action_template"]["type"])
 
     # Stopping rules (safety bounds; acyclic graphs usually terminate first).
-    if _stopping_rule_hit(session, run, case, rules, now=now):
+    if _stopping_rule_hit(session, run, rules, now=now):
         return _finalize_exhausted(session, case, run, job)
 
     # allowed_hours re-check — a *when* constraint (§5.2.5): defer, never fire early.
@@ -296,34 +305,50 @@ def _defer_target(action_type: ActionType, rules: StoppingRules, *, now: datetim
 def _next_fire_time(
     session: Session, case: RevenueLeakCase, run: PlaybookRun, next_node: dict, *, now: datetime
 ) -> datetime:
-    merchant = session.get(Merchant, run.merchant_id)
-    payday = effective_timing_adjustment(case, merchant) if merchant is not None else None
+    # The §4.3 payday substitution applies to "the next node" — the FIRST action
+    # scheduled after diagnosis (the entry step, armed by `schedule_run`), NOT to
+    # every subsequent step (that would push each rung a further month out — the
+    # nudge/escalate would each jump to the next month-end). Advancing steps use
+    # their static graph offsets from the previous step's completion (D-094).
     rules = resolve_effective_stopping_rules(session, run)
     return timing.compute_fire_time(
         previous_completion=now,
         timing_offset_hours=float(next_node.get("timing_offset_hours", 0)),
         allowed_start=rules.allowed_hours.start,
         allowed_end=rules.allowed_hours.end,
-        payday_adjustment=payday,
+        payday_adjustment=None,
     )
 
 
 def _stopping_rule_hit(
     session: Session,
     run: PlaybookRun,
-    case: RevenueLeakCase,
     rules: StoppingRules,
     *,
     now: datetime,
 ) -> bool:
-    if run.created_at is not None:
-        created = run.created_at if run.created_at.tzinfo else run.created_at.replace(tzinfo=UTC)
-        if now - created > timedelta(days=rules.max_duration_days):
+    """`max_duration_days` bounds the run's *active execution span* — measured from
+    its FIRST executed action, not from `PlaybookRun.created_at` (D-094). A
+    deliberately-scheduled wait before the first action (a long `timing_offset`, or
+    a §4.3 payday-cycle target that can sit ~a month out) is a timing delay, not
+    duration spent (§4.2/§4.3, D-025): a run must not exhaust merely because policy
+    scheduled its first action on the next payday. `Action.executed_at` is stamped
+    with the execution clock, so this reads consistently in tests and production.
+    `max_attempts` counts executed (non-blocked) actions."""
+    scope = TenantScope(session, run.merchant_id)
+    first_executed = session.scalar(
+        scope.select(Action)
+        .where(Action.run_id == run.run_id)
+        .where(Action.executed_at.is_not(None))
+        .with_only_columns(func.min(Action.executed_at))
+    )
+    if first_executed is not None:
+        started = first_executed if first_executed.tzinfo else first_executed.replace(tzinfo=UTC)
+        if now - started > timedelta(days=rules.max_duration_days):
             return True
     executed = int(
         session.scalar(
-            TenantScope(session, run.merchant_id)
-            .select(Action)
+            scope.select(Action)
             .where(Action.run_id == run.run_id)
             .where(Action.outcome != ActionOutcome.BLOCKED_BY_GUARDRAIL)
             .with_only_columns(func.count())

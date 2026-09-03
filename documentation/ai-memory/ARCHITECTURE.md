@@ -653,26 +653,34 @@ Executes a version-pinned `PlaybookRun`'s graph at runtime, driven by the §5.6
 - **`scheduled_job` model + migration 0015** — the durable timer, one pending row
   per run (`UNIQUE(run_id)`, INV-43), `leg_type` denormalised for poller
   stratification. Tenant-scoped.
-- **`scheduler.py`** — `schedule_run` (arm the entry timer, idempotent),
-  `claim_due_jobs` (`fire_at <= now`, leg-filtered, `ORDER BY fire_at … FOR UPDATE
-  SKIP LOCKED`), `execute_due_jobs` (one poll pass). Strata `PAYMENT_LEGS` (10 s) /
-  `OTHER_LEGS` (60 s).
-- **`runner.py`** — `execute_due_job`, the §5.1 tick in ONE transaction: load the
-  pinned run/graph (INV-44) → stopping-rule check (`max_attempts` / `max_duration`
-  → EXHAUSTED, D-093) → `allowed_hours` re-check (defer) → guardrails → execute →
-  `write_action_and_event` (atomic Action+ActionCase+CaseEvent) → budget
-  consumption → `STEP_TRANSITIONED` → advance `active_step_id` (Module 4's
-  `traversal`) + reschedule, or finalize (ESCALATE_HUMAN terminal → case
-  `ESCALATED_TO_HUMAN` / run `ESCALATED`; else case `EXHAUSTED` / run `COMPLETED`).
+- **`scheduler.py`** — `schedule_run` (arm the entry timer, idempotent; applies the
+  §4.3 payday substitution to the **entry** step only, D-094), `claim_due_jobs`
+  (`fire_at <= now`, leg-filtered, `ORDER BY fire_at … FOR UPDATE SKIP LOCKED`),
+  `execute_due_jobs` (one poll pass; runs **each job in its own `begin_nested()`
+  SAVEPOINT**, D-095 — one poison job cannot roll back or stall siblings, returns
+  `StepResult.ERROR`). Strata `PAYMENT_LEGS` (10 s) / `OTHER_LEGS` (60 s).
+- **`runner.py`** — `execute_due_job`, the §5.1 tick (all-or-nothing per job): load
+  the pinned run/graph (INV-44) → superseded-case guard (F-6) → stopping-rule check
+  (`max_attempts`; `max_duration` measured from the **first executed action**, D-094
+  → EXHAUSTED) → `allowed_hours` re-check (defer) → guardrails → execute →
+  `write_action_and_event` (atomic Action+ActionCase+CaseEvent) → budget consumption
+  → `STEP_TRANSITIONED` → advance `active_step_id` (Module 4's `traversal`, static
+  offset, no re-payday) + reschedule, or finalize (ESCALATE_HUMAN terminal → case
+  `ESCALATED_TO_HUMAN` / run `ESCALATED`; else case `EXHAUSTED` / run `COMPLETED` —
+  D-096: `COMPLETED` ≠ recovered, the case status is the recovery signal).
   `StepResult` enum. Tenant-scoped throughout (INV-45).
 - **`guardrails.py`** (§5.2, Module-5 half per D-092) — `check_retry_guardrails`
   (network hard-stop → rail budget → pre-debit gap w/ AUTO_INSERT self-heal →
   systemic hold) and `check_contact_guardrails` (systemic hold). `GuardKind`
-  ALLOW/BLOCK/DEFER/AUTO_INSERT_PREDEBIT. UPI hard cap enforced (INV-46).
+  ALLOW/BLOCK/DEFER/AUTO_INSERT_PREDEBIT. UPI hard cap enforced (INV-46). Systemic
+  hold is a §5.2 BLOCK following `on_blocked` — a transient outage drains an active
+  run rather than pausing it (a blueprint gap; pause/resume needs the deferred
+  `PLAYBOOK_ACTIVE → SYSTEMIC_HOLD` sweep — F-4, documented limitation).
 - **`timing.py`** (D-025) — `compute_fire_time` (offset from previous completion,
-  payday substitution `next_month_end_working_day`, IST `allowed_hours` deferral
-  incl. overnight), `within_allowed_hours`, `next_window_opening`,
-  `next_upi_execution_time`.
+  payday substitution `next_month_end_working_day` — entry step only, IST
+  `allowed_hours` deferral incl. overnight), `within_allowed_hours`,
+  `next_window_opening`, `next_upi_execution_time`. Inputs are timezone-aware; IST
+  is a fixed offset (India has no DST).
 - **`executor.py`** (§5.4) — `run_action` internal stub (no external I/O,
   monkeypatchable); `channel_for`. The seam real adapters attach to.
 - **`rendering.py`** (§4.4) — `resolve_template` (single vs `multi_case_template`),

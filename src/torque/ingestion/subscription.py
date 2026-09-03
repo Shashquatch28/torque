@@ -114,6 +114,11 @@ def create_subscription_case(session: Session, *, event: Event) -> BufferOutcome
     )
     apply_active_hold_if_any(session, case)
 
+    # Module 8 §8.5 item 1 — score the case on creation.
+    from torque.scoring.score import score_case
+
+    score_case(session, case)
+
     event.processed = True
     session.flush()
     return BufferOutcome.CASE_CREATED

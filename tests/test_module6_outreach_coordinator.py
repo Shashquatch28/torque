@@ -15,13 +15,21 @@ from torque.execution import execute_due_jobs
 from torque.execution.runner import StepResult
 from torque.models import Action, CaseEvent
 
-# --- priority (Module 8 seam — Q-B) --------------------------------------
+# --- priority (Module 8 seam — Q-B / D-098 / D-113) ---------------------
 
 
-def test_priority_is_amount_at_risk_placeholder(db, make_case):
+def test_priority_seam_delegates_to_module8_recovery_score(db, make_case):
+    """The seam is now the real Module 8 score, delegated to
+    `torque.scoring.compute_recovery_score` — one implementation of the formula,
+    no re-derivation here (D-113). Signature is `(session, case)`."""
+    from torque.scoring import compute_recovery_score
+
     case = make_case(leg=LegType.PAYMENT_DEGRADATION, context={"gateway": "razorpay"},
                      amount_at_risk=Decimal("12345.67"))
-    assert priority(case) == Decimal("12345.67")
+    assert priority(db, case) == compute_recovery_score(db, case).score
+    # PAYMENT_DEGRADATION cold-start 0.55, no playbook yet → cost floors to ₹0.01:
+    # 0.55 × 12345.67 ÷ 0.01 = 679_011.85
+    assert priority(db, case) == Decimal("679011.8500")
 
 
 # --- quiet-hours: defer only, never a block, never EXHAUSTED ------------

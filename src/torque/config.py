@@ -92,6 +92,12 @@ class PolicyConfig(BaseSettings):
     # Module 8 Section 8.1 — warm-start multiplier bounds (Part E item 12).
     warm_start_cap_low: float = 0.5
     warm_start_cap_high: float = 1.3
+    # Module 8 Section 8.2 — the divisor floor for `(probability × amount) ÷ cost`
+    # when the forward intervention cost is zero / unpriced / not yet known
+    # (D-111). One paisa: keeps the score finite and comparable, and a genuinely
+    # free next step still ranks highest — just finitely. Not a blueprint figure
+    # (the blueprint is silent on zero cost); the conservative default.
+    recovery_score_cost_floor: float = 0.01
     # SystemicEvent threshold + resolution (Blueprint Section 3 / Decision J).
     # `systemic_sustain_window_minutes` gates `resolved_at`; the other three feed
     # `torque.compliance.systemic.systemic_threshold_breached`. N and M are

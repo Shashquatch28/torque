@@ -66,7 +66,8 @@ def enqueue(
     the caller owns the transaction.
 
     `priority` defaults to the Module 8 seam
-    (`outreach_coordinator.priority(case)` — currently `amount_at_risk`).
+    (`outreach_coordinator.priority(session, case)` — the authoritative
+    `(probability × amount_at_risk) ÷ cost` recovery score, D-113).
     """
     now = now or datetime.now(UTC)
     scope = TenantScope(session, case.merchant_id)
@@ -78,7 +79,7 @@ def enqueue(
     entry = HumanQueueEntry(
         case_id=case.case_id,
         reason=str(reason),
-        priority=priority if priority is not None else _priority(case),
+        priority=priority if priority is not None else _priority(session, case),
         enqueued_at=now,
     )
     scope.add(entry)

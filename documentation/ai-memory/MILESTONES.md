@@ -1272,7 +1272,146 @@ reported before it was made.)*
 
 ---
 
+## Module 8 — Recovery Scoring Model — COMPLETE
+
+*(One module = one run = one audit. Built on committed Module 7 `dd995d2`.
+Implemented directly from the blueprint per the continuation rules — no separate
+proposal/approval cycle. `state_machine.py` / `guards.py` untouched.)*
+
+- **Commit:** *(uncommitted — maintainer commits after review)*. HEAD at
+  implementation time: **`dd995d2`** (committed Module 7).
+- **Migration:** **`0017_recovery_score`** — three nullable columns on
+  `revenue_leak_case` (`recovery_score NUMERIC(18,4)`,
+  `recovery_score_breakdown JSONB`, `recovery_score_updated_at TIMESTAMPTZ`), a
+  **derived cache** (D-109). No table, no enum, no `CaseEventType` (the closed §4
+  vocabulary of 10 is untouched). `alembic head` → `0017`; roundtrip green.
+- **Load-bearing files:** `models/guards.py` **byte-unchanged**
+  (`git diff HEAD` empty); `state_machine.py` **byte-unchanged** (Module 8 adds
+  no transition). The new `recovery_score*` columns have no guard — a derived
+  cache any recompute path may refresh.
+- **New package `torque.scoring`** (D-109):
+  - **`benchmarks.py`** — `cold_start_probability(leg_type, days_since_failure,
+    *, amount_at_risk=None)` implementing Decision F's exact table as a live
+    function (Subscription 0–48h → 0.65 / ≤7d → 0.45 / >7d → 0.25; Payment
+    degradation → 0.55; Checkout → 0.40; B2B ≤30d → 0.35 / ≤90d → 0.20 / >90d →
+    0.12). Bucket boundaries are explicit (`hours <= 48`, `days <= 7`, `<= 30`,
+    `<= 90`); the 48h–72h label gap resolves into the aging bucket. Plus
+    `warm_start_multiplier` (§8.2 / D-110 — linear map
+    `0.5 + rate × 0.8`, clamped `[0.5, 1.3]`, `None` → 1.0) and
+    `adjusted_probability` (clamped `[0, 1]`, quantised). `amount_bucket` is a
+    label only — Decision F seeds no amount-tier variation (D-110).
+  - **`cost.py`** — `compute_cost(session, case) → CostBreakdown` (§8.2 /
+    D-111): the forward intervention cost = Σ `ChannelRateCard.rate_per_unit`
+    for the **next likely step**'s channel(s). Next step = the node at a live
+    `PlaybookRun.active_step_id`, else the candidate playbook's entry node
+    (`select_playbook_id`), else none. Zero / unpriced / absent cost floors the
+    divisor at `PolicyConfig.recovery_score_cost_floor` (₹0.01); `cost_basis`
+    (`PRICED` / `FLOOR_NO_CHANNEL` / `FLOOR_UNPRICED_CHANNEL` / `FLOOR_NO_PLAYBOOK`)
+    and `NextStepSource` (`LIVE_RUN` / `CANDIDATE_PLAYBOOK` / `NONE`) record the
+    provenance. No division by zero is structurally possible.
+  - **`score.py`** — `RecoveryScore` (frozen dataclass exposing every input:
+    `probability`, `base_probability`, `warm_start_multiplier`,
+    `promise_keeping_rate`, `amount_at_risk`, `raw_cost`, `effective_cost`,
+    `cost_basis`, `bucket_label`, `next_step_*`, …), `compute_recovery_score(
+    session, case, *, now=None)` — the **one** implementation of
+    `(probability × amount_at_risk) ÷ cost`, exact `Decimal`, quantised 4 dp —
+    plus `.explain()` (the §8.7 "Why:" shape) and `.to_dict()` (the JSONB
+    breakdown). `score_case(session, case)` persists the three columns (no
+    `CaseEvent`, no status change; no-op for a terminal case);
+    `recompute_open_cases(session, *, merchant_id=None)` is the daily sweep
+    (re-scores every open non-superseded case and refreshes any `human_queue`
+    entry's `priority`).
+  - **`tasks.py`** — `recompute_recovery_score_task(case_id)` (single case) and
+    `recompute_open_case_scores_task()` (daily sweep), on the existing Celery
+    app.
+- **Recompute triggers (§8.5 / D-112):**
+  - **case creation** — `score_case(...)` inline at the end of every leg's
+    ingestion path (`ingestion.cases` / `checkout` / `subscription` / `b2b`), in
+    the same transaction;
+  - **diagnosis completion** — `score_case(...)` inline at the end of
+    `diagnosis.engine._apply_result`, once `root_cause_code` (hence the
+    candidate playbook / forward cost) is known;
+  - **daily** — one `beat_schedule` entry
+    (`recovery-score-daily-recompute`, `crontab(hour=2, minute=0)`) in
+    `ingestion.celery_app`, plus `torque.scoring` added to autodiscover.
+- **Module 6 integration (§8.6 / D-113):**
+  `torque.coordination.outreach_coordinator.priority()` — the D-098 seam — now
+  takes `(session, case)` and returns
+  `compute_recovery_score(session, case).score`. Callers updated:
+  `human_queue.enqueue` → `_priority(session, case)`;
+  `merge._ordered(session, items)`. The same authoritative score drives merge
+  primary-selection and the human queue's stored/ordered `priority`. A
+  structural test asserts `human_queue` / `merge` never import the formula
+  modules directly. All accepted Module 6 behaviour preserved.
+- **`PolicyConfig`:** `recovery_score_cost_floor: float = 0.01` added (the D-111
+  conservative default; `warm_start_cap_low/high` 0.5 / 1.3 already existed).
+- **`exceptions.py`:** `RecoveryScoreError` added (raised only for a corrupt
+  negative `amount_at_risk`; missing/zero cost is NOT an error — it floors).
+- **Decisions:** D-109 (package + persisted columns + migration 0017), D-110
+  (warm-start linear-map normalisation; `amount_bucket` inert), D-111 (forward
+  cost + zero-cost floor), D-112 (recompute triggers — inline + one beat entry),
+  D-113 (`priority()` seam signature + real score; Module 6 placeholder tests
+  updated).
+- **Deviations from blueprint:** none in behaviour. Where §8 is silent —
+  the warm-start *normalisation formula* (D-110), the *zero-cost* behaviour
+  (D-111, floored), and the *amount_bucket* effect (D-110, inert) — the
+  conservative reading is chosen and documented; the eight Decision F benchmark
+  probabilities are used verbatim, no alternatives invented. `amount_bucket`
+  thresholds (SMALL <₹1k / MEDIUM ≤₹25k / LARGE) are a local grouping label with
+  zero effect on any score.
+- **Deferred introduced / still deferred:** the 🔮 learned-model upgrade (XGBoost
+  + SHAP + T/X-learner uplift, needs 500+ resolved cases — Decision F / §8.4) is
+  **not** built (correctly out of scope). Module 9 reporting, the dashboard
+  top-at-risk view, and the Agent Console queue re-sort on score drift all
+  *consume* `recovery_score` but are their own later modules.
+- **Tests at completion:** **834** `def test_` functions (was 772); `pytest`
+  collects and passes **1007** (was 900), 0 fail / 0 skip. Module 8 adds 6 test
+  files (59 functions, heavily parametrised): `probability` (Decision F table +
+  every bucket boundary + warm-start caps + exact-Decimal), `cost` (live-run /
+  candidate / no-playbook next step, missing / zero / unpriced rate, policy
+  floor), `score` (exact arithmetic, explainability, ranking / amount-vs-
+  probability / cost-sensitive tradeoffs), `recompute` (creation / diagnosis /
+  daily aging, human-queue priority refresh, terminal & superseded exclusion),
+  `integration` (Outreach Coordinator + Human Queue consume the same seam; no
+  duplicated formula), `correctness` (tenant isolation, terminal exclusion,
+  negative/None amount, no division by zero, determinism). Three Module 6 tests
+  updated to assert the real score instead of the `amount_at_risk` placeholder
+  (D-113); `test_schema_introspection` gains 3 Module 8 assertions. `ruff` clean.
+  `alembic head` `0017`; roundtrip green. 1 cosmetic
+  `StarletteDeprecationWarning` (pre-existing).
+- **Verification status:** complete + verified against a live Postgres. `pytest`
+  1007 green, `ruff` clean, roundtrip green (`0017`), `alembic head` `0017`,
+  `git diff HEAD -- src/torque/models/guards.py src/torque/state_machine.py`
+  both empty.
+- **Recommended commit message:**
+  `Module 8: recovery scoring model — (probability × amount_at_risk) ÷ cost; cold-start + warm-start; recompute on create/diagnose/daily; priority() seam`
+
+---
+
 ## What comes next
+
+**Module 8 — Recovery Scoring Model — COMPLETE.** Every open case now carries a
+recovery priority score `(probability × amount_at_risk) ÷ cost` (Decision F
+cold-start benchmark → `promise_keeping_rate` warm-start, capped 0.5×–1.3× →
+forward `ChannelRateCard` cost), persisted on `revenue_leak_case`, recomputed on
+creation / diagnosis / daily, and driving both the Outreach Coordinator and the
+human queue through the one `priority()` seam. Next is **Module 9 — Reporting &
+Measurement**: ₹ recovered by leg, recovery rate, incrementality lift with a
+Wilson score CI, the SUTVA-adjusted lift, the exception list, cost efficiency,
+and the mechanical explainability panel over the `CaseEvent` stream. The
+`recovery_score` / `recovery_score_breakdown` columns are ready for Module 9's
+"top at-risk cases" view. Do not start without an approved scope.
+
+Deferred items that do **not** block Module 9: the 🔮 learned recovery model
+(XGBoost / SHAP / uplift); `LOG_PROMISE` execution; real channel adapters; the
+earlier inter-module dispatch triggers (D-080 / D-088 / D-093); the §5.3
+first-touch MAC lookup (D-083, U-08); a real Temporal engine (D-090);
+cross-stratum merge; Module 10 (Agent Console, `WRITTEN_OFF`,
+`escalation_resolution`, `HUMAN_RESOLVED`, queue re-sort on score drift).
+
+---
+
+## (historical) What came next after Module 7
 
 **Module 7 — Payment Reconciliation & Attribution — COMPLETE.** Verified success
 signals now close cases correctly: direct `PaymentLink` attribution, indirect

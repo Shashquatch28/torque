@@ -712,6 +712,41 @@ violation**.
 
 ---
 
+## INV-56 — One authoritative recovery-score formula; every consumer reads it through the `priority()` seam (Module 8)
+- **Domain:** `torque.scoring.compute_recovery_score` /
+  `torque.coordination.outreach_coordinator.priority`.
+- **Invariant:** `(probability × amount_at_risk) ÷ cost` is computed in exactly
+  one place (`compute_recovery_score`). The Outreach Coordinator merge
+  primary-selection (`merge._ordered`) and the human queue
+  (`human_queue.enqueue` default / `recompute_open_cases` refresh) both obtain
+  the number via `outreach_coordinator.priority(session, case)`, which delegates
+  to `compute_recovery_score(...).score`. No consumer re-derives probability,
+  cost, or the ratio; `human_queue` / `merge` never import
+  `torque.scoring.benchmarks` / `torque.scoring.cost` / `compute_recovery_score`.
+- **Enforcement:** `HELPER` (single implementation + one delegating seam) +
+  `TEST` (a source-inspection test in
+  `tests/test_module8_integration.py::test_consumers_route_through_the_seam_not_the_formula`).
+- **Tests:** `tests/test_module8_integration.py`, `tests/test_module8_score.py`.
+
+## INV-57 — The recovery score is deterministic, bounded, and never divides by zero (Module 8)
+- **Domain:** `torque.scoring` — `RecoveryScore`.
+- **Invariant:** for a fixed `(case state, related rows, now)` the score and its
+  full breakdown are byte-identical on every call (exact `Decimal`, no float,
+  quantised 4 dp). `probability ∈ [0, 1]` (cold-start benchmark × warm-start
+  multiplier clamped to `[cap_low, cap_high]`, result clamped `[0, 1]`).
+  `effective_cost ≥ PolicyConfig.recovery_score_cost_floor > 0` always — a zero /
+  unpriced / absent forward cost floors, so `(p × amount) ÷ cost` can never raise
+  `ZeroDivisionError`. A negative `amount_at_risk` raises `RecoveryScoreError`
+  (structurally impossible via the `amount_at_risk >= 0` CHECK); `None` → score 0.
+  Terminal / superseded cases are never scored.
+- **Enforcement:** `HELPER` (clamps + floor + quantisation in
+  `benchmarks` / `cost` / `score`) + `DB-CONSTRAINT`
+  (`amount_at_risk >= 0`, `rate_per_unit >= 0`).
+- **Tests:** `tests/test_module8_correctness.py`, `tests/test_module8_probability.py`,
+  `tests/test_module8_cost.py`.
+
+---
+
 ## Invariants that are PLANNED (not yet enforced anywhere)
 
 - Pre-debit ≥24h gap actually blocking a retry: **IMPLEMENTED in Module 5**
@@ -728,5 +763,5 @@ violation**.
   legal since M7c) + mid-run recovery is a Module 5 blueprint gap (F-4).
 - `PlaybookRun.status` transition legality (still enum + assignment only).
 - `recovery_type` derivation rules: **IMPLEMENTED in Module 7** (INV-52/53/54).
-- The Module 8 `(probability × amount_at_risk) ÷ cost` score — Module 6's
-  `priority()` is the seam (D-098); Module 7 consumes no score.
+- The Module 8 `(probability × amount_at_risk) ÷ cost` score: **IMPLEMENTED in
+  Module 8** (INV-56/57) — through the `priority()` seam (D-098 / D-113).

@@ -119,3 +119,13 @@ class PromiseTransitionError(TorqueError):
     """A `PromiseToPay.status` change is not a legal transition. Only
     `PENDING -> KEPT` and `PENDING -> BROKEN` are permitted; `KEPT` and
     `BROKEN` are terminal, and a `PromiseToPay` is created `PENDING`."""
+
+
+# --- Recovery Scoring (Blueprint Module 8) --------------------------------
+
+
+class RecoveryScoreError(TorqueError):
+    """A `RevenueLeakCase` could not be scored because an input is invalid —
+    e.g. a negative `amount_at_risk` (structurally impossible via the
+    `amount_at_risk >= 0` CHECK, so this signals a corrupted row or a bad
+    direct write). Missing/zero cost is NOT an error — it floors (D-111)."""

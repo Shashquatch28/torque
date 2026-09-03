@@ -860,3 +860,224 @@ model, it's the foundation for reporting *incremental* lift in the next module.
 it does not decide *write-offs* (that's a human decision in a later module), and
 it does not yet report lift — it produces the clean, attributed, per-case data
 that the reporting module will aggregate.
+
+---
+
+## 14. Module 8 Additions — Recovery Scoring
+
+*(New product knowledge from this module. Pitch language, not implementation.)*
+
+### What recovery scoring is
+
+Every open Revenue Leak Case now carries a single number — a **recovery priority
+score** — that answers one question: *if we can only chase some of these losses
+right now, which ones are worth chasing first?*
+
+The score is deliberately simple to say out loud:
+
+> **(how likely we are to recover it) × (how much is at stake) ÷ (what the next
+> nudge will cost us)**
+
+A high score means "likely, large, and cheap to pursue." A low score means
+"unlikely, small, or expensive to pursue." Torque works the queue in score
+order.
+
+### Why it matters — not every at-risk rupee deserves equal attention
+
+A recovery agent has finite resources: message-sending budget, the free window
+on a WhatsApp conversation, and — above all — human agents' time. Treating a
+₹300 abandoned cart the same as a ₹60,000 failed annual subscription wastes all
+three. Worse, a naive "biggest amount first" rule lets a large but nearly
+un-recoverable debt (a 200-day-overdue invoice from a counterparty who never
+pays) crowd out a smaller, fresh, highly recoverable one.
+
+Recovery scoring makes the trade-off explicit and economic. It's the concrete
+mechanism behind Torque's "resource-aware prioritisation" claim — the same
+number orders both the automated outreach queue and the human escalation queue,
+so the whole system pulls in one direction.
+
+### The three inputs
+
+**Probability — how likely is recovery?**
+A benchmark percentage drawn from published industry recovery rates, chosen by
+the *kind* of loss and *how old it is*:
+
+| Situation | Benchmark recovery probability |
+|---|---|
+| Subscription/mandate failure, 0–48h old | 65% |
+| Subscription/mandate failure, ~3–7 days old | 45% |
+| Subscription/mandate failure, over a week old | 25% |
+| Payment degradation, same session | 55% |
+| Checkout abandonment, same session | 40% |
+| B2B invoice, 0–30 days overdue | 35% |
+| B2B invoice, 30–90 days overdue | 20% |
+| B2B invoice, 90+ days overdue | 12% |
+
+The pattern is intuitive: **fresh losses recover far better than stale ones**,
+and the type of failure already tells you a lot (a mandate that failed an hour
+ago is very different from a three-month-old receivable). These numbers are not
+guesses Torque invented — they're the industry-benchmark starting point, applied
+consistently.
+
+**Amount at risk — how much is at stake?**
+The rupee value the case would lose if nothing is recovered. For a bundled B2B
+dunning thread it's the sum still outstanding across the invoices.
+
+**Intervention cost — what will the next nudge cost?**
+The expected cost of the *next* step Torque would take on this case — for
+example, one WhatsApp message at its real per-message rate. This is
+**forward-looking**: it's what the next action costs, not a tally of what's
+already been spent. A case whose next step is a free payment retry is cheaper to
+pursue than one whose next step is a paid message, and the score reflects that.
+When the next step has no messaging cost, or the cost isn't known yet, Torque
+uses a tiny floor value so a free-but-valuable case still ranks at the top —
+without ever dividing by zero.
+
+### The formula
+
+> **score = probability × amount at risk ÷ expected next-step cost**
+
+All of it in exact money arithmetic. The score is stored on the case and exposed
+as a full breakdown, so any screen can show *why* a case ranks where it does —
+not just the final number.
+
+### Cold-start vs warm-start scoring
+
+**Cold-start** is the benchmark-table lookup above: it works from day one, for a
+brand-new merchant with zero history, because it only needs the loss type and
+its age. This is the same "rule-based now, data collected from day one, learned
+model later" philosophy Torque already uses for diagnosis — applied consistently
+rather than pretending scoring is a different kind of problem.
+
+**Warm-start** kicks in when Torque *does* have relationship history with that
+customer for that merchant — specifically their **promise-keeping rate** (how
+often, historically, they actually paid after saying they would). A strong
+track record nudges the probability up; a poor one nudges it down.
+
+### Promise-keeping history and why the adjustment is bounded
+
+The warm-start adjustment is a **multiplier on the benchmark, capped between
+0.5× and 1.3×**. A customer who always keeps promises can lift a case's
+probability by at most 30%; one who never does can cut it in half — but no
+further.
+
+The cap matters. Without it, one case with rich history and its neighbour
+without any would swing wildly apart on the strength of history alone, and the
+queue order would lurch around for reasons that have nothing to do with the
+actual opportunity. Capping keeps cold-start and warm-start cases on a
+comparable scale, so the ranking stays stable and explainable. History
+*informs* the score; it doesn't get to *dominate* it.
+
+### How the score changes outreach priority
+
+When two cases for the same customer are both due for a nudge, the
+higher-scoring one leads — it owns the merged message, and its framing wins. The
+message-sending order across the whole book follows the score. A large, fresh,
+cheap-to-pursue loss gets contacted before a small, stale, expensive one, every
+time, automatically.
+
+### How the score changes human-escalation priority
+
+The human queue is sorted by the **same** score. When an agent opens their
+queue, the case at the top is the one where their time buys the most expected
+recovery — not just the biggest number, and not first-in-first-out. As cases
+age and their odds decay, the daily re-score quietly re-orders the queue so it
+stays honest.
+
+### A concrete example
+
+> **Recovery Priority**
+>
+> | | |
+> |---|---|
+> | Probability | 0.65 |
+> | Amount at risk | ₹12,400 |
+> | Expected next-step cost | ₹0.885 (one WhatsApp message) |
+> | **Priority score** | **≈ ₹9,107** |
+>
+> **Why:** Subscription failure · 0–48h old · 65% benchmark recovery
+> probability · adjusted by relationship history · next intervention: WhatsApp
+
+Read it as: *"a fresh subscription failure, ₹12,400 at stake, ~65% likely to
+recover, and the next touch costs under a rupee — chase this now."* A
+200-day-overdue ₹12,400 invoice with the same amount would score a fraction of
+this, because its recovery probability is 12%, and it would sit far lower in
+both queues.
+
+### Business value
+
+- **More recovered revenue per rupee spent and per agent-hour** — effort flows
+  to where it pays off.
+- **A defensible prioritisation story** — "why did you contact this customer
+  before that one?" has a one-line, numeric, auditable answer.
+- **Graceful cold start** — a new merchant gets sensible prioritisation on day
+  one, with no historical data required.
+- **It compounds with attribution** — Module 7 tells you which recoveries Torque
+  caused; Module 8 makes sure Torque spends its effort where causing a recovery
+  is most valuable.
+
+### How this contributes to Torque's AI / decisioning story
+
+Torque today uses **explainable recovery scoring** to prioritise economic
+opportunities: a transparent formula over a benchmark probability, a bounded
+relationship-history adjustment, and a forward-looking cost. Every number on the
+screen can be traced to an input.
+
+The **upgrade path** is deliberate and already designed for: once enough
+resolved cases have accumulated (on the order of 500+), the benchmark lookup can
+be replaced by a **learned recovery-prediction model**, and the average-effect
+thinking by **individual uplift modelling** — predicting the recovery lift *for
+this specific case* rather than for its category. The data those models need has
+been collected since day one; no schema change is required to make the switch,
+only a new consumer of existing data.
+
+The pitch line: *"Torque currently uses explainable recovery scoring to
+prioritise economic opportunities, with a clear path toward learned recovery
+prediction as historical outcome data accumulates."*
+
+### What is implemented today vs what future learned models would add
+
+| Today (implemented) | Future (roadmap) |
+|---|---|
+| Benchmark recovery probability by loss type and age | Recovery probability predicted per case from its full feature set |
+| One bounded multiplier from promise-keeping history | Individualised uplift — the recovery lift attributable to *acting* on this specific case |
+| A transparent, hand-checkable formula | A model with per-feature explanations (which factors drove this score) |
+| Recomputed on case creation, on diagnosis, and daily | Continuous / event-driven re-scoring |
+
+The current model is intentionally not a black box — for a hackathon and an
+early customer, "here is exactly why" beats "trust the model."
+
+### Likely investor / customer questions — and concise answers
+
+- **"Where do the probability numbers come from?"** Published industry recovery
+  benchmarks, keyed by failure type and age. They're the starting point every
+  serious recovery operation uses; we apply them consistently and collect the
+  outcome data to calibrate them.
+- **"Isn't a fixed table crude?"** For prioritisation at this stage, a
+  transparent table that everyone can sanity-check beats an uncalibrated model.
+  The table is a floor, not a ceiling — the learned model is a data-threshold
+  away, and the pipeline for it already exists.
+- **"Why cap the history adjustment?"** So relationship history informs the
+  ranking without destabilising it. A customer's track record can move a case by
+  at most +30% / −50%; it can't let a data-rich case leapfrog a data-poor one
+  purely because it has more history.
+- **"What if the cost is zero or unknown?"** The score uses a tiny floor so it
+  stays finite and comparable. A genuinely free next step (a payment retry) then
+  ranks at the very top — which is the correct call: free, likely, and valuable
+  is exactly what you want to chase first.
+- **"Does bigger amount always win?"** No. Amount is one of three factors. A
+  huge but near-hopeless or expensive-to-pursue case will lose to a smaller,
+  fresh, cheap one — which is the entire point.
+- **"How often does the score update?"** On case creation, again when diagnosis
+  finishes (the odds and the likely next step firm up), and once a day for every
+  open case so aging is reflected.
+- **"Is the same score used everywhere?"** Yes — one number, one definition,
+  driving both the automated outreach order and the human queue. There is no
+  competing ad-hoc ranking anywhere in the system.
+
+### What Module 8 did NOT do (be precise in a pitch)
+
+It does not send anything, it does not build the merchant dashboard or the agent
+console, and it does not add a learned model. It computes and exposes the
+priority number, keeps it fresh, and wires it into the two places that already
+needed it.

@@ -26,7 +26,7 @@ Do not describe `PLANNED` / `DEFERRED` behaviour as if it exists.
 | 5 — Execution / Orchestration | runtime graph execution, retry-budget enforcement, atomic Action+CaseEvent write, timing/allowed-hours/payday, durable driver | **`IMPLEMENTED` (Module 5 complete)** — `torque.execution`: the §5.6 **Postgres-polling** driver (`scheduled_job` + 10 s/60 s beat pollers, `FOR UPDATE SKIP LOCKED`) chosen over Temporal (D-090); `execute_due_job` runs the §5.1 loop (guardrails §5.2 → executor stub §5.4 → atomic Action+CaseEvent → `STEP_TRANSITIONED` → advance `active_step_id`); timing D-025; Card/UPI/NACH consumption; U-02 settled (D-091). Real channel adapters + Outreach Coordinator + WhatsApp gate are Module 6 (D-092). See §8E |
 | 6 — Compliance & Cross-Leg Guardrail Engine | `GuardrailEngine.check()`, Outreach Coordinator, escalation ceiling, human queue | **`IMPLEMENTED` (Module 6 complete)** — `torque.coordination` package: the `GuardrailEngine` facade (§6.2, returns the four-way `GuardDecision` — D-097); the Outreach Coordinator (4h cross-leg quiet period, live merge in the poll batch, defer, open-conversation — Part A §5); the full WhatsApp gate (opt-in + approved UTILITY template + open-conversation suspend); §6.3 escalation-ceiling → `ESCALATED_TO_HUMAN` in the runner tick; the persistent `human_queue` table (migration 0016) + three feeders. `priority()` is the Module 8 seam (D-098). See §8F |
 | 7 — Reconciliation & Attribution | match payments → cases, `AGENT_ASSISTED` vs `SELF_RECOVERED`, write `credit_weight` | **`IMPLEMENTED` (Module 7 complete)** — `torque.reconciliation`: `reconcile_event()` matches a verified success `Event` (§7.1: direct `PaymentLink` → indirect `(merchant, cp, amount)` → merged-set re-split / `AMBIGUOUS` → `DETECTED/DIAGNOSING → CANCELLED` self-pay); closes cases (§7.2: `RECOVERED` / B2B `PARTIALLY_RECOVERED` with invoice waterfall) + `PAYMENT_RECONCILED`; `recovery_type` / `recovered_amount` via `module7_writer`. Wired into `webhooks.py` (D-104). **`state_machine.py` gained the two U-01 edges** (D-103); no migration. See §8G |
-| 8 — Recovery Scoring | `(probability × amount) ÷ cost`, cold-start lookup | `PLANNED` |
+| 8 — Recovery Scoring | `(probability × amount) ÷ cost`, cold-start lookup | **`IMPLEMENTED` (Module 8 complete)** — `torque.scoring` package: `cold_start_probability` (Decision F's exact 8-value table as a live function), `warm_start_multiplier` (§8.2 linear map, clamped 0.5×–1.3×, D-110), `compute_cost` (forward `ChannelRateCard` sum for the next playbook step, zero-cost floors — D-111), `compute_recovery_score` / `RecoveryScore` (the one formula + §8.7 explainability). Persisted on `revenue_leak_case.recovery_score` / `_breakdown` / `_updated_at` (migration **0017**, D-109). Recompute on creation / diagnosis / daily (D-112). `priority()` seam now returns it (D-113). See §8H |
 | 9 — Reporting & Measurement | ₹ recovered, incrementality lift + CI, exception list | `PLANNED` |
 | 10 — UI/UX | merchant dashboard, agent console, demo surface | `PLANNED` |
 | 11 — Tech Stack & Infra | Temporal / BullMQ / polling fallback | `PLANNED` |
@@ -152,8 +152,11 @@ shared `Base` with `NAMING_CONVENTION`.
   are Module 2 (`DEFERRED`). `IMPLEMENTED` (schema + predicates).
 - **`channel_rate_card`** (`ChannelRateCard`) — PK `channel` (**freeform String,
   no channel enum**). **Global scope.** `rate_per_unit` `Numeric(14,4)` (CHECK
-  `>= 0`). Migration `0008` seeds `whatsapp`, `email`, `sms`. Consumption
-  (`Action.cost`, Module 8 cost term) is `PLANNED`. `IMPLEMENTED` (schema + seed).
+  `>= 0`). Migration `0008` seeds `whatsapp` 0.8850, `email` 0.0100, `sms`
+  0.2000. **Module 8's cost term (`torque.scoring.cost`) reads it** — Σ
+  `rate_per_unit` for the next playbook step's channel(s); `"payment_link"` and
+  no-channel steps have no row and floor (D-111). `Action.cost` population by
+  Module 5 is still `PLANNED`. `IMPLEMENTED` (schema + seed + Module 8 use).
 
 ### 2.7 Playbooks
 - **`playbook_identity`** (`PlaybookIdentity`) — PK `playbook_id` (human-readable
@@ -597,8 +600,10 @@ both the fresh `DETECTED` entry and the §2.5-resumed `DIAGNOSING` entry (skips 
 task are ready, no leg enqueues them); the §5.3 first-touch MAC-code lookup at
 diagnosis time (D-083, blocked on U-08 — Module 3 *consumes* an existing
 `network_directive_tier` but extracts no MAC code); playbook selection /
-instantiation (Module 4, now §8D); any retry/outreach/Temporal (Module 5); scoring
-(Module 8). No new `CaseEventType`, no state-machine edge, no `guards.py` change.
+instantiation (Module 4, now §8D); any retry/outreach/Temporal (Module 5). No new
+`CaseEventType`, no state-machine edge, no `guards.py` change. *(Module 8 update:
+`_apply_result` now also calls `torque.scoring.score_case(session, case)` inline
+after routing — a derived-column refresh only, D-112 / §8H.)*
 
 ---
 
@@ -704,8 +709,8 @@ jobs and folds 2+ via `coordination.merge` before the solo loop (D-102).
 `defer_until` / `human_queue_reason`.
 
 **Still deferred:** the Module 4 → 5 auto-dispatch trigger (D-093); real channel
-adapters (§5.4); Module 8 scoring (the `priority()` seam awaits it); a real
-Temporal engine (D-090 — a driver swap); cross-stratum merge (D-102 residual).
+adapters (§5.4); a real Temporal engine (D-090 — a driver swap); cross-stratum
+merge (D-102 residual). *(Module 8 scoring is now `IMPLEMENTED` — §8H.)*
 
 ---
 
@@ -725,7 +730,9 @@ acyclic.
   params-validation subsystem (deferred). Returns the four-way `GuardDecision`
   (D-097).
 - **`outreach_coordinator.py`** — pure helpers, all tenant-scoped:
-  `priority(case)` (**Module 8 seam** — `amount_at_risk`, D-098);
+  `priority(session, case)` (**the Module 8 seam** — delegates to
+  `torque.scoring.compute_recovery_score(session, case).score`, D-098 / D-113;
+  was the `amount_at_risk` placeholder taking only `case`);
   `cross_leg_quiet_period_defer(...)` (a customer-contact Action from a *different*
   leg for the same counterparty within `PolicyConfig.cross_leg_quiet_period_hours`
   (4h) → defer to `quiet_period_end + timing_offset`, pushed into `allowed_hours`);
@@ -752,7 +759,9 @@ acyclic.
 
 **New entity:** `human_queue` (`HumanQueueEntry`, `TenantScoped`, migration
 **0016**) — `UNIQUE(case_id)`, `reason` (`String(32)`), `priority` (`Numeric(14,2)`),
-`enqueued_at` (indexed). No enum, no new `CaseEventType`.
+`enqueued_at` (indexed). No enum, no new `CaseEventType`. *(Module 8: `priority`
+now stores the recovery score at enqueue time; the daily sweep refreshes it in
+place — D-113. Queue column shape unchanged.)*
 
 **State machine:** the §6.3 escalation uses the existing legal
 `PLAYBOOK_ACTIVE → ESCALATED_TO_HUMAN` edge — `state_machine.py` / `guards.py`
@@ -818,6 +827,79 @@ path of its own; wired into `webhooks.py` dispatch, D-104).
 
 ---
 
+## 8H. Recovery Scoring Model — `torque.scoring` — `IMPLEMENTED` (Module 8)
+
+The single economic number `(probability × amount_at_risk) ÷ cost` for every open
+case. The operative model is **benchmark probability → warm-start adjustment →
+cost-aware score** — explainable, deterministic, no learned model (the XGBoost /
+SHAP / uplift upgrade is 🔮 roadmap, §8.4 / Decision F).
+
+- **`benchmarks.py`**
+  - `cold_start_probability(leg_type, days_since_failure, *, amount_at_risk=None)`
+    → the Decision F benchmark as an exact `Decimal`. Buckets:
+    SUBSCRIPTION `hours ≤ 48` → 0.65 / `days ≤ 7` → 0.45 / else 0.25; PAYMENT
+    DEGRADATION → 0.55; CHECKOUT → 0.40; B2B `days ≤ 30` → 0.35 / `≤ 90` → 0.20
+    / else 0.12. `amount_at_risk` is accepted (Decision F names the dimension)
+    but **inert** — no amount-tier variation is seeded (D-110).
+  - `warm_start_multiplier(promise_keeping_rate | None)` — §8.2 linear map
+    `cap_low + rate·(cap_high − cap_low)` = `0.5 + rate·0.8`, clamped
+    `[0.5, 1.3]` (`PolicyConfig.warm_start_cap_low/high`). `None` (no history) →
+    `1.0`. `adjusted_probability(base, rate)` = `clamp₀₁(base × multiplier)`,
+    quantised 5 dp (D-110).
+  - `bucket_label` / `amount_bucket` — display labels for the breakdown; the
+    amount thresholds (SMALL <₹1k / MEDIUM ≤₹25k / LARGE) are a local grouping
+    choice, no score effect.
+- **`cost.py`** — `compute_cost(session, case) → CostBreakdown` (§8.2 / D-111).
+  Next likely step = the node at a live `PlaybookRun.active_step_id` (`RUNNING`),
+  else the candidate playbook's entry node (`select_playbook_id` +
+  `entry_step_id`), else none. Channels via
+  `execution.executor.channel_for`; Σ `ChannelRateCard.rate_per_unit`. Zero /
+  unpriced (`payment_link`, missing row) / absent → `effective_cost` floors at
+  `PolicyConfig.recovery_score_cost_floor` (₹0.01). `cost_basis` ∈ {`PRICED`,
+  `FLOOR_NO_CHANNEL`, `FLOOR_UNPRICED_CHANNEL`, `FLOOR_NO_PLAYBOOK`};
+  `next_step_source` ∈ {`LIVE_RUN`, `CANDIDATE_PLAYBOOK`, `NONE`}. No division by
+  zero is structurally possible.
+- **`score.py`**
+  - `RecoveryScore` — frozen dataclass exposing every input so the calculation
+    renders (§8.7): `score`, `probability`, `base_probability`,
+    `warm_start_multiplier`, `promise_keeping_rate`, `amount_at_risk`,
+    `raw_cost`, `effective_cost`, `cost_floor_applied`, `cost_basis`,
+    `cost_channels`, `leg_type`, `amount_bucket`, `days_since_failure`,
+    `bucket_label`, `next_step_action_type`, `next_step_source`, `computed_at`.
+    `.explain()` → the "Why:" shape; `.to_dict()` → the JSONB breakdown.
+  - `compute_recovery_score(session, case, *, now=None)` — **the one formula**,
+    exact `Decimal`, quantised 4 dp. `days_since_failure` = live days overdue for
+    B2B (`now − due_date` across the case's invoices, floored at the ingested
+    `days_overdue`), else `now − opened_at`. `promise_keeping_rate` from the
+    case-merchant's `Merchant_Counterparty` (tenant-scoped). A negative
+    `amount_at_risk` → `RecoveryScoreError`; `None` → score 0.
+  - `score_case(session, case, *, now=None)` — computes + writes
+    `recovery_score` / `recovery_score_breakdown` / `recovery_score_updated_at`
+    (no `CaseEvent`, no status change; no-op for a terminal case). Does not
+    commit.
+  - `recompute_open_cases(session, *, merchant_id=None, now=None)` — the §8.5
+    daily sweep: re-score every open (`is_terminal` false) non-superseded case
+    and refresh any `human_queue` entry's stored `priority`.
+- **`tasks.py`** — `recompute_recovery_score_task(case_id)` and
+  `recompute_open_case_scores_task()` on the existing Celery app.
+- **Recompute wiring (§8.5 / D-112):** `score_case(...)` called inline at the end
+  of `ingestion.{cases,checkout,subscription,b2b}` and
+  `diagnosis.engine._apply_result`; one `beat_schedule` entry
+  (`recovery-score-daily-recompute`, `crontab(hour=2, minute=0)`) +
+  `torque.scoring` autodiscover in `ingestion.celery_app`.
+- **Consumers:** `outreach_coordinator.priority(session, case)` returns
+  `compute_recovery_score(...).score`; `human_queue` and `merge` route through
+  that seam only — no consumer re-derives the formula (D-113).
+- **New columns:** `revenue_leak_case.recovery_score` (`Numeric(18,4)`),
+  `recovery_score_breakdown` (`JSONB`), `recovery_score_updated_at`
+  (`TIMESTAMPTZ`) — migration **0017**, all nullable, no guard, no CHECK/FK
+  (a derived cache, D-109). `PolicyConfig.recovery_score_cost_floor` (0.01) and
+  `RecoveryScoreError` added.
+- **State machine / guards:** **byte-unchanged** (Module 8 adds no transition and
+  no guarded field).
+
+---
+
 ## 10. Compliance model — pure predicates `IMPLEMENTED`, enforcement `PLANNED`
 
 `src/torque/compliance/` — all side-effect-free:
@@ -844,9 +926,11 @@ path of its own; wired into `webhooks.py` dispatch, D-104).
   quiet-hours defer on contact, the Outreach Coordinator (`priority()` seam, 4h
   cross-leg quiet period, live merge, defer, open-conversation), escalation-ceiling
   → `ESCALATED_TO_HUMAN`, and the persistent `human_queue`.
-- **`PLANNED` / `DEFERRED`**: the real Module 8 `(probability × amount) ÷ cost`
-  score (the `priority()` seam awaits it); a per-node WhatsApp template category
-  (the gate checks UTILITY).
+- **`IMPLEMENTED` (Module 8, §8H):** the real `(probability × amount) ÷ cost`
+  recovery score now flows through the `priority()` seam into both the merge
+  primary-selection and the human-queue ordering.
+- **`PLANNED` / `DEFERRED`**: a per-node WhatsApp template category (the gate
+  checks UTILITY).
 
 ---
 
@@ -975,8 +1059,15 @@ time (D-083, blocked on U-08). **Module 4 policy & playbook engine is now
 graph traversal advancing `active_step_id`, timing/payday/`allowed_hours` (D-025),
 the §5.2 retry/systemic guardrails + Card/UPI/NACH consumption, and the atomic
 Action+CaseEvent write — but with no automatic Module 4→5 dispatch (D-093) and
-**no real channel adapters** (`executor.run_action` is a stub, §5.4). Still absent
-(Module 6+): the `GuardrailEngine` facade, the Outreach Coordinator, the WhatsApp
-consent/template gate, escalation-ceiling escalation, the human queue (D-092); and
-no reconciliation, scoring, reporting, UI, `MacCodeRegistry` full seed, or code
-that drives `PLAYBOOK_ACTIVE → SYSTEMIC_HOLD` (edge legal but dormant).
+**no real channel adapters** (`executor.run_action` is a stub, §5.4).
+**Module 6 compliance & cross-leg guardrail engine is now `IMPLEMENTED`** (§8F) —
+the `GuardrailEngine` facade, the Outreach Coordinator, the WhatsApp gate,
+escalation-ceiling escalation, the persistent `human_queue` (migration 0016).
+**Module 7 reconciliation & attribution is now `IMPLEMENTED`** (§8G) — payment →
+case matching, `AGENT_ASSISTED` vs `SELF_RECOVERED`, case closure, the two U-01
+`→ CANCELLED` edges. **Module 8 recovery scoring is now `IMPLEMENTED`** (§8H) —
+`(probability × amount_at_risk) ÷ cost` persisted on `revenue_leak_case`
+(migration 0017), recomputed on creation / diagnosis / daily, driving the
+`priority()` seam. Still absent: **reporting** (Module 9), **UI** (Module 10),
+the `MacCodeRegistry` full seed, real channel adapters, a real Temporal engine,
+and code that drives `PLAYBOOK_ACTIVE → SYSTEMIC_HOLD` (edge legal but dormant).

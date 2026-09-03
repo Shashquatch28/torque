@@ -35,10 +35,16 @@ def test_enqueue_is_idempotent_on_case_id(db, make_case):
     assert len(rows) == 1
 
 
-def test_enqueue_defaults_priority_to_amount_at_risk(db, make_case):
+def test_enqueue_defaults_priority_to_module8_recovery_score(db, make_case):
+    # D-113: `priority` now defaults to the authoritative Module 8 score
+    # (`(probability × amount_at_risk) ÷ cost`), not the `amount_at_risk`
+    # placeholder. The queue still orders by "higher score = higher priority".
+    from torque.scoring import compute_recovery_score
+
     case = _escalated_case(make_case, amount=Decimal("4200.00"))
     entry = HQ.enqueue(db, case=case, reason=HQ.HumanQueueReason.PROMISE_BROKEN)
-    assert entry.priority == Decimal("4200.00")
+    assert entry.priority == compute_recovery_score(db, case).score
+    assert entry.priority > Decimal("4200.00")  # a real economic score, not the raw amount
 
 
 def test_sweep_enqueues_all_escalated_cases_and_is_idempotent(db, make_case, make_merchant):
@@ -112,7 +118,10 @@ def test_broken_promise_routes_to_the_queue(db, make_case, make_promise):
     assert entry is not None
     assert entry.case_id == case.case_id
     assert entry.reason == str(HQ.HumanQueueReason.PROMISE_BROKEN)
-    assert entry.priority == Decimal("777.00")
+    # D-113: priority is the Module 8 recovery score, not raw amount_at_risk.
+    from torque.scoring import compute_recovery_score
+
+    assert entry.priority == compute_recovery_score(db, case).score
 
 
 def test_pending_promise_does_not_route(db, make_case, make_promise):

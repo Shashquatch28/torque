@@ -12,6 +12,9 @@ Every module reads and writes this row. Notable invariants (enforced in
   guard rejects any write not wrapped in `guards.module7_writer(session)`.
 * `status` transitions are constrained to the locked state machine
   (`torque.state_machine`).
+* `recovery_score` / `recovery_score_breakdown` / `recovery_score_updated_at`
+  are a DERIVED cache written by Module 8 (`torque.scoring`) — no guard, no
+  `CaseEvent`, no status change; safe for any recompute path to refresh.
 """
 
 from __future__ import annotations
@@ -138,3 +141,17 @@ class RevenueLeakCase(Base, TenantScoped, TimestampMixin):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # --- Module 8: Recovery Scoring Model (Blueprint §8) -------------------
+    # `(probability × amount_at_risk) ÷ cost` — the economic priority number,
+    # recomputed on case creation / diagnosis completion / daily (§8.5). A
+    # DERIVED column: written by `torque.scoring.score.score_case`, no guard
+    # (any code may refresh it), no `CaseEvent`, no status change. Nullable
+    # until first scored. `recovery_score_breakdown` carries the full §8.7
+    # explainable structure (probability × amount ÷ cost, the "Why:" lines) so
+    # the dashboard / Module 9 render without recomputing.
+    recovery_score: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    recovery_score_breakdown: Mapped[dict | None] = mapped_column(JSONB)
+    recovery_score_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )

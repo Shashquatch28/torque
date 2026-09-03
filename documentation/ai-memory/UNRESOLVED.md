@@ -234,6 +234,41 @@ if it produced a design decision, a `DECISIONS.md` entry. Do not delete it.
 
 ---
 
+## U-09 — Module 8 recovery-scoring calibration values are stated defaults, not derived
+
+- **Question:** Several Module 8 numbers are engineering choices, not values
+  Torque has data to back:
+  1. the **warm-start normalisation** — Module 8 §8.2 says
+     "`base × normalized promise_keeping_rate`, capped 0.5×–1.3×" without giving
+     the normalisation. Module 8 uses a linear map
+     `multiplier = 0.5 + rate·0.8` (so `rate 0→×0.5`, `1→×1.3`, `≈0.625→×1.0`),
+     clamped (D-110);
+  2. the **cap band itself** — `0.5×`–`1.3×` (blueprint Part E item 12 already
+     flags this as a stated default);
+  3. the **cost floor** — `PolicyConfig.recovery_score_cost_floor = ₹0.01` for a
+     zero / unpriced / absent forward cost (D-111; the blueprint is silent);
+  4. the **`amount_bucket` thresholds** — SMALL <₹1k / MEDIUM ≤₹25k / LARGE
+     (a display label only; **no** score effect, since Decision F seeds no
+     amount-tier probability variation — D-110).
+- **Current state:** all four are `PolicyConfig` fields or module constants with
+  the defaults above; every Module 8 test pins them explicitly so a change is a
+  one-line, visible edit. The eight Decision F **benchmark probabilities**
+  themselves are used **verbatim** — they are not part of this question.
+- **Why unresolved:** normalisation shape (1) and the floor (3) have no blueprint
+  figure; the cap (2) is blueprint-acknowledged as uncalibrated; (4) is a
+  presentation choice. Torque has no resolved-outcome history to calibrate any of
+  them, and won't until the 🔮 learned model's data threshold (500+ cases) is
+  near.
+- **Depends on:** accumulated resolved-case outcome data (the same trigger as the
+  §8.4 XGBoost upgrade).
+- **What would unblock it:** the maintainer confirming the chosen defaults, or a
+  later calibration pass once outcome data exists.
+- **Must implementation stop first?** No. The scoring is deterministic and
+  explainable with the stated defaults; recalibration is a value change, not a
+  redesign.
+
+---
+
 ## Resolved (kept for history)
 
 ### U-01 #3 (`PLAYBOOK_ACTIVE → SYSTEMIC_HOLD`) — RESOLVED 2026-09-02 (M7c)

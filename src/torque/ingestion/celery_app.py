@@ -17,6 +17,7 @@ run inline with no broker or worker.
 from __future__ import annotations
 
 from celery import Celery
+from celery.schedules import crontab
 
 from torque.config import get_settings
 
@@ -38,12 +39,14 @@ celery_app.autodiscover_tasks(
         "torque.policy",
         "torque.execution",
         "torque.reconciliation",
+        "torque.scoring",
     ]
 )
 
 # Repeatable beat jobs. §2.5 systemic detection (60s), plus the Module 5 §5.6
 # stratified execution pollers: 10s for PAYMENT_DEGRADATION's live-session window,
-# 60s for the other three legs' multi-day timelines.
+# 60s for the other three legs' multi-day timelines, plus the Module 8 §8.5
+# item-3 daily recovery-score recompute for every open case.
 # Run the scheduler in dev with:
 #   uv run celery -A torque.ingestion.celery_app:celery_app beat
 celery_app.conf.beat_schedule = {
@@ -59,6 +62,10 @@ celery_app.conf.beat_schedule = {
         "task": "torque.execution.poll_other_jobs",
         "schedule": 60.0,
     },
+    "recovery-score-daily-recompute": {
+        "task": "torque.scoring.recompute_open_case_scores",
+        "schedule": crontab(hour=2, minute=0),
+    },
 }
 
 # Import the task modules so the tasks register even without autodiscovery
@@ -69,3 +76,4 @@ from torque.execution import tasks as _execution_tasks  # noqa: E402,F401
 from torque.ingestion import tasks as _tasks  # noqa: E402,F401
 from torque.policy import tasks as _policy_tasks  # noqa: E402,F401
 from torque.reconciliation import tasks as _reconciliation_tasks  # noqa: E402,F401
+from torque.scoring import tasks as _scoring_tasks  # noqa: E402,F401

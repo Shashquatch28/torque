@@ -50,20 +50,26 @@ OUTREACH_ACTIONS: frozenset[ActionType] = frozenset(
 _OUTREACH_TEMPLATE_CATEGORY = WhatsAppTemplateCategory.UTILITY
 
 
-# --- priority (Module 8 seam — Q-B) ----------------------------------------
+# --- priority (Module 8 seam — Q-B / D-098 / D-113) -----------------------
 
 
-def priority(case: RevenueLeakCase) -> Decimal:
+def priority(session: Session, case: RevenueLeakCase) -> Decimal:
     """The economic score the Outreach Coordinator and the human queue order by.
 
-    **Module 8 seam.** The real score is Module 8's
-    `(probability × amount_at_risk) ÷ cost` (Blueprint Part A §5 / §8). Module 8
-    is not built; until it is, this returns the approved placeholder —
-    `amount_at_risk`, so "higher amount at risk = higher priority" — via this one
-    function. When Module 8 lands, only this body changes; every caller
-    (`merge`, `human_queue`) already routes through it (D-098).
+    **Module 8 seam.** This is Module 8's authoritative
+    `(probability × amount_at_risk) ÷ cost` (Blueprint Part A §5 / §8),
+    delegated to `torque.scoring.compute_recovery_score` — the single
+    implementation of the formula. Every caller (`merge`, `human_queue`) routes
+    through here; none re-derives the score (D-098 / D-113).
+
+    Signature note: Module 8 needs the DB session (promise-keeping history,
+    rate card, the case's next playbook step), so this takes `(session, case)`
+    where the Module 6 placeholder took `(case)` — the placeholder returned
+    `amount_at_risk` and needed no session.
     """
-    return Decimal(str(case.amount_at_risk or 0))
+    from torque.scoring.score import compute_recovery_score
+
+    return compute_recovery_score(session, case).score
 
 
 # --- cross-leg quiet period (Part A §5) ----------------------------------

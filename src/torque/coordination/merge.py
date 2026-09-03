@@ -15,8 +15,8 @@ current step is a non-terminal customer-outreach action and whose timers are bot
 due (`fire_at <= now`).
 
 **Primary.** The higher-`priority` case owns the merged `Action` (priority is the
-Module 8 seam — `amount_at_risk` today, D-098). Ties break by `case_id` for
-determinism.
+Module 8 seam — the authoritative `(probability × amount_at_risk) ÷ cost`
+recovery score, D-098 / D-113). Ties break by `case_id` for determinism.
 
 **With a `multi_case_template`** — one `Action` (attributed to the primary run)
 with one `ActionCase` per participating case, `credit_weight` proportional to
@@ -121,10 +121,13 @@ def merge_groups(
     return {k: v for k, v in by_key.items() if len(v) >= 2}
 
 
-def _ordered(items: list[_Item]) -> list[_Item]:
-    """Primary first: highest `priority`, ties broken by `case_id` string."""
+def _ordered(session: Session, items: list[_Item]) -> list[_Item]:
+    """Primary first: highest `priority` (the Module 8 recovery score), ties
+    broken by `case_id` string."""
     return sorted(
-        items, key=lambda it: (OC.priority(it.case), str(it.case.case_id)), reverse=True
+        items,
+        key=lambda it: (OC.priority(session, it.case), str(it.case.case_id)),
+        reverse=True,
     )
 
 
@@ -146,7 +149,7 @@ def _weights(cases: list[RevenueLeakCase]) -> list[Decimal]:
 def execute_merged(session: Session, items: list[_Item], *, now) -> list[R.StepResult]:
     """Execute one merge group (>= 2 items, same merchant + counterparty). Runs
     inside the caller's per-group SAVEPOINT."""
-    ordered = _ordered(items)
+    ordered = _ordered(session, items)
     primary, secondaries = ordered[0], ordered[1:]
     action_type = ActionType(primary.node["action_template"]["type"])
     template, defer_secondary = resolve_template(primary.node, case_count=len(ordered))

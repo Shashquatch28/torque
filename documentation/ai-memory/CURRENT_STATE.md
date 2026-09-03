@@ -1,9 +1,9 @@
 # CURRENT STATE — read this first
 
-**Last updated:** 2026-09-04, after the **Module 7 — Payment Reconciliation &
-Attribution** run (uncommitted, on top of committed Module 6 `9345ce9`).
-**Reconstructed from:** committed Modules 1–6 (HEAD `9345ce9`) + the uncommitted
-Module 7 changes + `Torque_Blueprint_v7_FullSystem.md`.
+**Last updated:** 2026-09-04, after the **Module 8 — Recovery Scoring Model** run
+(uncommitted, on top of committed Module 7 `dd995d2`).
+**Reconstructed from:** committed Modules 1–7 (HEAD `dd995d2`) + the uncommitted
+Module 8 changes + `Torque_Blueprint_v7_FullSystem.md`.
 **This file is derived documentation, not authoritative.** The repo and blueprint win.
 
 ---
@@ -14,72 +14,77 @@ A revenue-leakage recovery agent closing the loop across four funnel legs —
 **payment degradation, checkout abandonment, subscription/mandate failure, B2B
 receivables** — with **one shared case object and one shared event ledger**. It
 diagnoses root cause, runs a bounded recovery playbook, executes it under hard
-compliance guardrails, **reconciles incoming payments back to the case that was
-leaking**, and measures incremental recovery against a held-out control. Full
-vision: `PROJECT_CONTEXT.md` §1. Spec: `Torque_Blueprint_v7_FullSystem.md`.
-Product-pitch knowledge base: `learning_log.md` (root).
+compliance guardrails, reconciles incoming payments back to the case that was
+leaking, and — new in Module 8 — **scores every open case by its economic
+recovery opportunity** so scarce outreach and human attention chase
+`(probability × amount_at_risk) ÷ cost`, not every case equally. Full vision:
+`PROJECT_CONTEXT.md` §1. Spec: `Torque_Blueprint_v7_FullSystem.md`. Product-pitch
+knowledge base: `learning_log.md` (root).
 
 ## Where we are
 
-**Modules 1–6 — COMPLETE & committed** (`9345ce9`). Signal ingestion → diagnosis
-→ policy/playbook → execution → compliance/guardrail engine + Outreach Coordinator
-+ human queue all live.
+**Modules 1–7 — COMPLETE & committed** (`dd995d2`). Signal ingestion → diagnosis
+→ policy/playbook → execution → compliance/guardrail engine + Outreach
+Coordinator + human queue → payment reconciliation & attribution all live.
 
-**Module 7 (Payment Reconciliation & Attribution) — §7 — COMPLETE** (this run,
-**uncommitted**). New package `torque.reconciliation`.
+**Module 8 (Recovery Scoring Model) — §8 — COMPLETE** (this run, **uncommitted**).
+New package `torque.scoring`; migration `0017_recovery_score`.
 
-| Module 7 capability | Behaviour |
+| Module 8 capability | Behaviour |
 |---|---|
-| Entry point | `reconcile_event(session, *, event_id, now=None)` → `ReconcileOutcome`. Consumes a verified success `Event`; one transaction; idempotent on `Event.processed`; matched case rows `SELECT … FOR UPDATE`; tenant-scoped. |
-| §7.1.1 direct | `payment_link.*` updates the `PaymentLink` row (`status`/`amount_paid`/`paid_at`). `paid`/`partially_paid` for a Torque link → its `case_id`, `AGENT_ASSISTED`. Unknown link + `notes.torque_case_id` → row created; otherwise → indirect. `expired`/`cancelled` → row status only (`LINK_UPDATED`). |
-| §7.1.2 indirect | `payment.captured` / `subscription.charged`, one open case (`PLAYBOOK_ACTIVE` / `ESCALATED_TO_HUMAN`, or B2B `PARTIALLY_RECOVERED`) matching `(merchant_id, counterparty_id, amount)`. `AGENT_ASSISTED` iff a non-blocked `Action` (any `ActionCase`) executed within `PolicyConfig.attribution_window_hours` (24h), else `SELF_RECOVERED` (D-105). |
-| §7.1.3 multi | Cases sharing one merged `Action`, or a set whose combined `amount_at_risk` a lump payment settles → re-split that `Action`'s `ActionCase.credit_weight` ∝ `amount_at_risk`, recover all (`AGENT_ASSISTED`, `MULTI_RECOVERED`). Non-merged multi-match → `AMBIGUOUS`, attribute to the latest-actioned case, leave the rest open (D-105). |
-| §7.1.4 no-match | A `DETECTED` / `DIAGNOSING` case for `(merchant, cp, amount)` → customer self-paid before Torque acted → `CANCELLED` / `SELF_RECOVERED` (needs D-103). Else `NO_MATCH`. |
-| §7.2 closure | Full → `RECOVERED`, `recovered_amount = amount_at_risk`, `closed_at`. B2B partial → invoices waterfalled oldest-`due_date`-first, `PARTIALLY_RECOVERED` (open), `amount_at_risk` ← `Σ outstanding` (INV-55). Final B2B settlement two-hops `PARTIALLY_RECOVERED → PLAYBOOK_ACTIVE → RECOVERED` (D-106). Every close: `PAYMENT_RECONCILED` `CaseEvent` + `human_queue.remove_for_case` (D-107). |
-| Wiring | `torque.api.webhooks` dispatches `reconcile_event_task` for `payment.captured` / `subscription.charged` / `payment_link.*` after the `Event` write — no buffer (D-104). `celery_app` autodiscovers `torque.reconciliation`. |
-| State machine | Module 7 added `DETECTED → CANCELLED` + `DIAGNOSING → CANCELLED` (D-103 — U-01 fully resolved). `guards.py` byte-unchanged. |
+| Cold-start probability (§8.1) | `torque.scoring.benchmarks.cold_start_probability(leg_type, days_since_failure, *, amount_at_risk=None)` — Decision F's exact 8-value table as a live function. SUBSCRIPTION `hours ≤ 48` → 0.65 / `days ≤ 7` → 0.45 / else 0.25; PAYMENT DEGRADATION → 0.55; CHECKOUT → 0.40; B2B `days ≤ 30` → 0.35 / `≤ 90` → 0.20 / else 0.12. Bucket boundaries explicit + tested; the 48h–72h label gap folds into the aging bucket. `amount_bucket` is in the signature but **inert** (Decision F seeds no amount tiers — D-110). |
+| Warm-start (§8.2) | `warm_start_multiplier(rate)` = `0.5 + rate·0.8`, clamped to `[warm_start_cap_low, warm_start_cap_high]` (0.5 / 1.3). `None` history → ×1.0; `rate 0.0` → ×0.5 (lower cap); `rate 1.0` → ×1.3 (upper cap); `≈0.625` → ×1.0. `adjusted_probability` clamps the product to `[0, 1]` (D-110). |
+| Cost (§8.2) | `torque.scoring.cost.compute_cost(session, case)` — Σ `ChannelRateCard.rate_per_unit` for the **next likely step**'s channel(s): the node at a live `PlaybookRun.active_step_id`, else the candidate playbook's entry node (`select_playbook_id`), else none. Zero / `payment_link` / missing-row / no-step → `effective_cost` floors at `PolicyConfig.recovery_score_cost_floor` (₹0.01); `cost_basis` + `next_step_source` record why (D-111). No division by zero possible. |
+| Score (§8.4 / §8.7) | `compute_recovery_score(session, case, *, now=None)` → `RecoveryScore` — the **one** implementation of `(probability × amount_at_risk) ÷ cost`, exact `Decimal`, 4 dp. `.explain()` = the "Why:" shape; `.to_dict()` = the JSONB breakdown. Negative `amount_at_risk` → `RecoveryScoreError`; `None` → 0. |
+| Persistence (D-109) | Migration **0017** — `revenue_leak_case.recovery_score` `NUMERIC(18,4)`, `recovery_score_breakdown` `JSONB`, `recovery_score_updated_at` `TIMESTAMPTZ`. A **derived cache** — no guard, no `CaseEvent`, no status change. |
+| Recompute (§8.5) | `score_case(session, case)` called inline at the end of every leg's ingestion path (`ingestion.{cases,checkout,subscription,b2b}`) and `diagnosis.engine._apply_result`; `recompute_open_cases` (daily) re-scores every open non-superseded case and refreshes any `human_queue` entry's `priority`. Daily via one `beat_schedule` entry (`crontab(hour=2, minute=0)`). Terminal / superseded cases never scored (D-112). |
+| Module 6 integration (§8.6) | `outreach_coordinator.priority(session, case)` — the D-098 seam — now returns `compute_recovery_score(...).score`. `merge._ordered(session, items)` and `human_queue.enqueue` consume it through that seam only; no consumer re-derives the formula (INV-56 / D-113). Three Module 6 tests updated off the `amount_at_risk` placeholder. |
+| State machine / guards | **byte-unchanged.** Module 8 adds no transition and no guarded field. |
 
-**Modules 8–13 not started.** The Module 7 run is **uncommitted**.
+**Modules 9–13 not started.** The Module 8 run is **uncommitted**.
 
 ## Verified facts (checked this session against the repo)
 
 | Fact | Value |
 |---|---|
-| Git HEAD (`main`) | **`9345ce9`** (committed Module 6). Module 7 changes sit uncommitted on top. |
-| Working tree | Module 7. Modified: `src/torque/state_machine.py` (**the two U-01 `→ CANCELLED` edges + docstring — D-103, reported before the edit**), `src/torque/api/webhooks.py` (reconcile dispatch), `src/torque/ingestion/celery_app.py` (autodiscover), `src/torque/ingestion/identity.py` (`find_counterparty`), `src/torque/coordination/human_queue.py` (`remove_for_case`), `tests/conftest.py` (`razorpay_payment_link_body` + reconcile spy), `tests/test_schema_introspection.py` / `tests/test_state_machine.py` (Module 7 assertions; 3 pre-existing state-machine tests inverted). New: `src/torque/reconciliation/` (4 files), 7 `tests/test_module7_*.py`. |
-| Alembic head / current | **`0016_human_queue`** — **Module 7 added no migration** (all columns/enums/event types already existed). |
-| Test suite | **900 passed** (`uv run pytest -q`), 0 fail / 0 skip. 1 cosmetic `StarletteDeprecationWarning` (pre-existing). |
-| `def test_` functions | **772** (was 737) |
+| Git HEAD (`main`) | **`dd995d2`** (committed Module 7). Module 8 changes sit uncommitted on top. |
+| Working tree | Module 8. Modified: `src/torque/config.py` (`recovery_score_cost_floor`), `src/torque/exceptions.py` (`RecoveryScoreError`), `src/torque/models/revenue_leak_case.py` (+3 derived columns), `src/torque/coordination/{outreach_coordinator,human_queue,merge}.py` (the `priority()` seam → real score, `(session, case)`), `src/torque/diagnosis/engine.py` + `src/torque/ingestion/{cases,checkout,subscription,b2b,celery_app}.py` (inline `score_case` + the daily beat entry), `tests/test_module6_human_queue.py` / `tests/test_module6_outreach_coordinator.py` (3 assertions off the placeholder), `tests/test_schema_introspection.py` (+3 Module 8 assertions). New: `src/torque/scoring/` (5 files), `migrations/versions/0017_recovery_score.py`, 6 `tests/test_module8_*.py`. |
+| Alembic head / current | **`0017_recovery_score`** — Module 8 added one migration (3 nullable columns, no enum). |
+| Test suite | **1007 passed** (`uv run pytest -q`), 0 fail / 0 skip. 1 cosmetic `StarletteDeprecationWarning` (pre-existing). |
+| `def test_` functions | **834** (was 772) |
 | Lint | `uv run ruff check .` → clean |
-| Migration roundtrip | green (up→down→up incl. 0016) |
+| Migration roundtrip | green (up→down→up incl. 0017) |
 | `src/torque/models/guards.py` | **`git diff HEAD --` empty** — byte-unchanged. |
-| `src/torque/state_machine.py` | **CHANGED** — `git diff HEAD --` = exactly `CANCELLED` added to `_TRANSITIONS[DETECTED]` + `_TRANSITIONS[DIAGNOSING]` and the docstring's "NOT YET ADDED" block replaced (D-103). Nothing else. |
+| `src/torque/state_machine.py` | **`git diff HEAD --` empty** — byte-unchanged. |
 | Stack | Python 3.11, SQLAlchemy 2.0, Alembic, Pydantic v2, FastAPI, Celery + Redis + beat, PostgreSQL 16, `uv`, pytest, ruff |
-| DB / infra | Postgres host **5442**; Redis host **6389**. Tests run eager/mocked. **25 tables** (unchanged — Module 7 added none). |
+| DB / infra | Postgres host **5442**; Redis host **6389**. Tests run eager/mocked. **25 tables** (unchanged — Module 8 added columns, not a table). |
 
-## What is implemented (new in Module 7)
+## What is implemented (new in Module 8)
 
-- **`torque.reconciliation`** package: `reconcile.py` (`reconcile_event`,
-  `ReconcileOutcome`, `RECONCILE_EVENT_TYPES`, the §7.1 matcher + §7.2 closure),
-  `payloads.py` (`payment_link.*` extractors), `tasks.py` (`reconcile_event_task`).
-- **`state_machine.py`**: the two U-01 `→ CANCELLED` edges (D-103).
-- **Helpers**: `ingestion.identity.find_counterparty` (match-only, no create);
-  `coordination.human_queue.remove_for_case`.
-- **Wiring**: `webhooks.py` reconcile dispatch (D-104).
+- **`torque.scoring`** package: `benchmarks.py` (Decision F cold-start lookup +
+  §8.2 warm-start multiplier), `cost.py` (`compute_cost` / `CostBreakdown` — the
+  forward `ChannelRateCard` cost), `score.py` (`RecoveryScore`,
+  `compute_recovery_score`, `score_case`, `recompute_open_cases`), `tasks.py`
+  (`recompute_recovery_score_task`, `recompute_open_case_scores_task`),
+  `__init__.py`.
+- **Migration 0017** — the three `recovery_score*` columns on `revenue_leak_case`.
+- **`PolicyConfig.recovery_score_cost_floor`** (0.01); **`RecoveryScoreError`**.
+- **Seam:** `outreach_coordinator.priority(session, case)` → the real score;
+  `human_queue` / `merge` updated to pass the session.
+- **Recompute wiring:** inline `score_case` in the 4 ingestion paths + the
+  diagnosis engine; one Celery-beat entry + `torque.scoring` autodiscover.
 
-Full breakdown: `ARCHITECTURE.md` §8G.
+Full breakdown: `ARCHITECTURE.md` §8H.
 
 ## Next milestone
 
-**Module 8 — Recovery Scoring Model.** `probability = lookup(leg_type,
-amount_bucket, days_since_failure)` (Decision F table) as a live function, then a
-`promise_keeping_rate` warm-start multiplier capped 0.5×–1.3×; `cost` from
-`ChannelRateCard` (next-likely-step channel sum); recompute on case creation /
-diagnosis completion / daily. It **replaces the
-`torque.coordination.outreach_coordinator.priority()` placeholder** through that
-seam (D-098) — the Outreach Coordinator ordering and the human queue then sort by
-the real `(probability × amount_at_risk) ÷ cost`. Do not start without an
-approved scope.
+**Module 9 — Reporting & Measurement.** ₹ recovered by leg, recovery rate,
+incrementality lift with a **Wilson score CI**, the SUTVA-adjusted lift, the
+exception list (`Action`s `BLOCKED_BY_GUARDRAIL` grouped by `block_reason`), cost
+efficiency, and the mechanical explainability panel (a query over the `CaseEvent`
+stream, `event_seq_id` order). Module 8's `recovery_score` /
+`recovery_score_breakdown` columns are ready for the "top at-risk cases" view.
+Do not start without an approved scope.
 
 ## Never-violate rules (short form — full list in CONTINUATION_PROTOCOL.md)
 
@@ -88,57 +93,57 @@ approved scope.
    documented in code + `DECISIONS.md`.
 3. **One module = one implementation run = one audit.**
 4. **Do not implement `DEFERRED.md` work as a side effect.**
-5. **Do not resolve `UNRESOLVED.md` questions unilaterally.** (Module 7 resolved
-   U-01 #1/#2 — explicitly assigned to Module 7 by that file; the exact
-   `state_machine.py` diff was reported before the edit.)
+5. **Do not resolve `UNRESOLVED.md` questions unilaterally.** (Module 8 surfaced
+   U-09 — the scoring calibration defaults — rather than claiming them settled.)
 6. `state_machine.py` / `guards.py` are load-bearing. Changing either needs
-   explicit approval + a shown diff. (Module 7 changed `state_machine.py` — the
-   two U-01 edges, D-103; `guards.py` untouched.)
+   explicit approval + a shown diff. (Module 8 changed **neither**.)
 7. Every run verifies: `pytest`, `ruff`, migration roundtrip, `git diff HEAD` of
    `state_machine.py` **and** `guards.py`.
 
 ## Unresolved decisions / questions right now
 
-- **U-01** — **FULLY RESOLVED.** Edge 3 (M7c, D-066); edges 1–2 (Module 7, D-103).
-- **U-02** — RESOLVED (Module 5, D-091).
+- **U-01** — FULLY RESOLVED (Module 7, D-103 + M7c, D-066).
+- **U-02 / U-07** — RESOLVED (Module 5).
 - **U-03** — Tier 1 vs Tier 3 MAC precedence — stated default. Open.
 - **U-04** — systemic N / M / sustain numbers are placeholders. Open.
-- **U-07** — RESOLVED (Module 5, D-090).
+- **U-05 / U-06** — Part D items; `MacCodeRegistry` unseeded codes. Open.
 - **U-08** — issuer / BIN / acquirer / route extraction; blocks `ISSUER_SPECIFIC`
-  systemic detection and the §5.3 first-touch MAC lookup (D-083).
-- **U-05 / U-06** — Part D items; `MacCodeRegistry` unseeded codes.
+  systemic detection and the §5.3 first-touch MAC lookup (D-083). Open.
+- **U-09** — **NEW** — Module 8's calibration values (warm-start normalisation
+  shape, the 0.5×–1.3× cap, the ₹0.01 cost floor, the `amount_bucket`
+  thresholds) are stated defaults, not derived from Torque data. Not blocking.
 
 ## Known contradictions / caveats
 
 - **`README.md` is stale.** Trust `CURRENT_STATE.md` / the code.
-- **Module 7 is uncommitted** on top of committed Module 6 (`9345ce9`). Every
-  "verified fact" above (900 tests) reflects the working tree.
-- **`state_machine.py` changed in Module 7** — the two `DETECTED/DIAGNOSING →
-  CANCELLED` edges (D-103). Reported before the edit; `git diff` shows only those.
-- **Reconciliation does not need `Module 5`'s link execution** — the §7.1.1 direct
-  path updates existing `PaymentLink` rows and creates one from a
-  `notes.torque_case_id`; it lights up fully once Module 5's
-  `GENERATE_PAYMENT_LINK` execution creates link rows (still deferred).
-- **§7.1's implicit rules are filled by D-105 / D-106** — which case statuses are
-  "open", the `AMBIGUOUS` multi-match tie-break (latest-actioned case), and the
-  B2B `PARTIALLY_RECOVERED → PLAYBOOK_ACTIVE → RECOVERED` two-hop.
-- **`WRITTEN_OFF`** is a human-only close (`ESCALATED_TO_HUMAN → WRITTEN_OFF`),
-  Module 10. Module 7 drives `→ {RECOVERED, PARTIALLY_RECOVERED}` on a payment.
-- **`priority()` is still a placeholder** (`amount_at_risk` desc) — Module 8
-  replaces it (D-098). Module 7 consumes no score.
+- **Module 8 is uncommitted** on top of committed Module 7 (`dd995d2`). Every
+  "verified fact" above (1007 tests) reflects the working tree.
+- **`priority()` changed signature** — `priority(session, case)` (was
+  `priority(case)`). The DB session is needed for the real score (promise-keeping
+  history, rate card, next playbook step). Three Module 6 tests updated (D-113) —
+  behaviour preserved, only the score's *value* changed (the sanctioned Module 8
+  deliverable).
+- **`recovery_score` is a derived cache** — refreshed on creation / diagnosis /
+  daily; between daily sweeps a `human_queue` entry's stored `priority` can lag a
+  case whose bucket has aged. A live re-sort is a Module 10 concern (DEFERRED).
+- **`amount_bucket` does not move the probability** — Decision F seeds no
+  amount-tier variation; the dimension is kept for the breakdown / the §8.4
+  learned-model feature set only (D-110).
+- **Cost floors when the next step is free / unpriced** — a `RETRY_PAYMENT` next
+  step (no channel) or a `payment_link` channel (no rate-card row) → `₹0.01`
+  divisor. Correct resource-aware ranking (cheap + likely + valuable ranks
+  highest), just finite (D-111).
 - **The executor is still a stub (§5.4).** Torque still fires no real messages or
-  charges — safe by construction.
-- **Execution is still not auto-triggered** (Module 2→3, 3→4, 4→5). Module 7's
-  webhook→reconcile dispatch IS wired (D-104) because it is the last consumer and
-  disturbs no downstream resting state.
-- Module 1–6 caveats still stand.
+  charges. Execution is still not auto-triggered (Module 2→3, 3→4, 4→5;
+  D-080/D-088/D-093). Module 8's recompute triggers ARE wired inline (they only
+  write a derived column — no status change, no CaseEvent).
+- Module 1–7 caveats still stand.
 
 ## What to do next (for the agent reading this)
 
 Follow `CONTINUATION_PROTOCOL.md`: verify this snapshot against the live repo
 (`git log`, `git status`, `alembic heads/current`, `pytest`, `ruff`,
 `git diff HEAD -- src/torque/state_machine.py src/torque/models/guards.py` —
-expect the two D-103 edges on `state_machine.py`, empty on `guards.py`), report
-any drift, then — once the maintainer has committed Module 7 — propose **Module 8
-— Recovery Scoring Model** as one continuous scope, landing the real score
-through the `priority()` seam.
+expect **empty** on both), report any drift, then — once the maintainer has
+committed Module 8 — propose **Module 9 — Reporting & Measurement** as one
+continuous scope.

@@ -96,12 +96,22 @@ def create_checkout_case(session: Session, *, event_id) -> BufferOutcome:
             "merged_abandonment_context": dict(case.context or {}),
         }
         session.flush()
+        # Module 8 §8.5 item 1 — the surviving PAYMENT_DEGRADATION case's
+        # context grew; re-score it (not the superseded abandonment).
+        from torque.scoring.score import score_case
+
+        score_case(session, payment_case)
         event.processed = True
         session.flush()
         return BufferOutcome.CASE_MERGED
 
     # Canonical abandonment case — the §2.7 systemic hold hook applies.
     apply_active_hold_if_any(session, case)
+
+    # Module 8 §8.5 item 1 — score the case on creation.
+    from torque.scoring.score import score_case
+
+    score_case(session, case)
     event.processed = True
     session.flush()
     return BufferOutcome.CASE_CREATED

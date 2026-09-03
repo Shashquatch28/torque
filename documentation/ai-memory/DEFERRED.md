@@ -188,7 +188,8 @@ Still deferred within Module 5's area:
 - 🔧 **`GENERATE_PAYMENT_LINK` execution** — creating a real `PaymentLink` row from
   a Razorpay `plink_...` (the stub records the Action only).
 - 🔧 **`LOG_PROMISE` execution** — creating a `PromiseToPay` + `PROMISE_CAPTURED`.
-- 🔧 **Cost** from `ChannelRateCard` (Action.cost stays nullable — Module 8/9).
+- 🔧 **`Action.cost`** population by Module 5 — stays nullable (Module 9 reporting
+  concern). *(Module 8's forward cost reads `ChannelRateCard` directly — done.)*
 - 🔧 **`MacCodeRegistry` self-healing** (§5.3) — unseeded code → default
   `TIER_2_CAPPED_RETRY` + flagged `CaseEvent` (`tier_for()` still returns `None`).
   Blocked with the first-touch MAC lookup on U-08 / D-083.
@@ -224,9 +225,9 @@ Built in the Module 6 run (`torque.coordination` package + migration 0016). Now
   column — D-038).
 
 Still deferred within Module 6's area:
-- 🔧 The real Module 8 `(probability × amount_at_risk) ÷ cost` score —
-  `torque.coordination.outreach_coordinator.priority()` is the one-function seam;
-  the placeholder is `amount_at_risk` descending (D-098).
+- ✅ The real Module 8 `(probability × amount_at_risk) ÷ cost` score — **DONE in
+  Module 8**: `torque.coordination.outreach_coordinator.priority(session, case)`
+  now returns `torque.scoring.compute_recovery_score(...).score` (D-098 / D-113).
 - 🔧 **`LOG_PROMISE` execution** — creating a `PromiseToPay` + `PROMISE_CAPTURED`
   is still a Module 5 deferral, so the broken-promise feeder is exercised against
   a directly-constructed `BROKEN` promise; end-to-end awaits `LOG_PROMISE`.
@@ -276,16 +277,40 @@ Still deferred within Module 7's area:
 - 🔧 A `(merchant_id, counterparty_id)` composite index on `revenue_leak_case` —
   not added (demo scale; D-108).
 
-## Module 8 — Recovery Scoring Model
+## Module 8 — Recovery Scoring Model — ✅ COMPLETE
 
-- 🔧 `probability = lookup(leg_type, amount_bucket, days_since_failure)` as a live
-  function (Decision F benchmark table).
-- 🔧 Warm-start adjustment by `promise_keeping_rate`, capped
-  0.5×–1.3× (`PolicyConfig.warm_start_cap_low/high`; the 0.5/1.3 defaults are
-  unverified — Part E item 12).
-- 🔧 Cost sourcing (next-likely-step channel sum from `ChannelRateCard`).
-- 🔧 Recompute cadence (creation / diagnosis / daily).
-- 🔮 XGBoost + SHAP + T/X-learner upgrade (needs 500+ resolved cases).
+Built in the Module 8 run (`torque.scoring` package + migration 0017). Now
+**DONE**:
+- ✅ `cold_start_probability(leg_type, days_since_failure, *, amount_at_risk)` —
+  Decision F's exact 8-value table as a live function; bucket boundaries explicit
+  and tested. `amount_bucket` retained in the signature, inert (D-110).
+- ✅ Warm-start adjustment — `warm_start_multiplier` linear map
+  `0.5 + rate·0.8`, clamped `[cap_low, cap_high]` from
+  `PolicyConfig.warm_start_cap_low/high` (D-110). `None` history → ×1.0.
+- ✅ Cost sourcing — `compute_cost` sums `ChannelRateCard.rate_per_unit` for the
+  next playbook step's channel(s) (live run's `active_step_id`, else candidate
+  playbook entry); zero/unpriced/absent floors at
+  `PolicyConfig.recovery_score_cost_floor` (₹0.01, D-111).
+- ✅ `compute_recovery_score` / `RecoveryScore` — the one formula, exact
+  `Decimal`, `.explain()` (§8.7) + `.to_dict()` (JSONB). Persisted on
+  `revenue_leak_case.recovery_score` / `_breakdown` / `_updated_at` (D-109).
+- ✅ Recompute cadence — inline on creation (4 ingestion paths) + diagnosis
+  completion; daily Celery-beat sweep (`recompute_open_case_scores_task`,
+  `crontab(hour=2, minute=0)`); `recompute_open_cases` also refreshes queued
+  cases' `human_queue.priority` (D-112).
+- ✅ Module 6 integration — `outreach_coordinator.priority(session, case)` returns
+  the real score; `merge` + `human_queue` consume it through that one seam
+  (INV-56, D-113).
+
+Still deferred within Module 8's area:
+- 🔮 **XGBoost + SHAP + T/X-learner uplift** upgrade (needs 500+ resolved cases —
+  Decision F / §8.4). The feature set is named; no schema change needed when it
+  lands, only a new consumer.
+- 🔧 **Dashboard "top at-risk cases"** view and Module 9 reporting *consume*
+  `recovery_score` — their own later modules.
+- 🔧 **Agent Console queue re-sort** on score drift between daily sweeps
+  (Module 10). The daily sweep refreshes `human_queue.priority`; a live re-sort
+  on every score change is not wired.
 
 ## Module 9 — Reporting & Measurement
 

@@ -117,6 +117,12 @@ def ingest_invoice(session: Session, *, event_id) -> BufferOutcome:
     )
     target_case.amount_at_risk = total
 
+    # Module 8 §8.5 item 1 — score on creation / re-score on invoice attach
+    # (amount_at_risk and days-overdue just changed).
+    from torque.scoring.score import score_case
+
+    score_case(session, target_case)
+
     event.processed = True
     session.flush()
     return BufferOutcome.CASE_CREATED if created else BufferOutcome.CASE_ATTACHED

@@ -1956,6 +1956,166 @@ BY D-0NN`.
 
 ---
 
+## D-109 — Module 8 is a new `torque.scoring` package; the score is PERSISTED on `revenue_leak_case` (migration 0017)
+- **Milestone:** Module 8 — Recovery Scoring Model
+- **Decision:** Package placement, and whether the recovery score is a
+  compute-only function or a stored column.
+- **Chosen:** A new top-level package `torque.scoring` (`benchmarks.py` — the
+  Decision F cold-start lookup + §8.2 warm-start multiplier; `cost.py` — the
+  forward `ChannelRateCard` cost; `score.py` — `RecoveryScore` +
+  `compute_recovery_score` + `score_case` / `recompute_open_cases`; `tasks.py` —
+  the Celery recompute tasks), parallel to `torque.reconciliation` etc. The
+  score **is persisted**: migration **0017** adds three nullable columns to
+  `revenue_leak_case` — `recovery_score NUMERIC(18,4)` (for `ORDER BY … DESC`),
+  `recovery_score_breakdown JSONB` (the full §8.7 explainable structure), and
+  `recovery_score_updated_at TIMESTAMPTZ`.
+- **Alternatives:** compute-only (rejected — §8.5's "recompute on creation /
+  diagnosis / daily" cadence has nothing to recompute *onto*; the dashboard's
+  "top at-risk cases" and Module 9 would each re-derive the formula for every
+  open case on every read); a separate `recovery_score` table (rejected —
+  one score per case, no history kept in Module 8, a 1:1 side table is pure
+  overhead).
+- **Reasoning:** the three columns are a **derived cache**: no `guards.py`
+  change (it guards only `recovery_type` / `recovered_amount` /
+  `network_directive_tier` / `context`), no `CaseEvent`, no status change, no
+  new `CaseEventType` (the closed §4 vocabulary of 10 is untouched). Any
+  recompute path may refresh them freely.
+- **Consequence:** `guards.py` byte-unchanged; `state_machine.py` byte-unchanged
+  (Module 8 adds no transition). `alembic head` → `0017_recovery_score`.
+- **Status:** IN FORCE
+
+## D-110 — Warm-start normalisation: a linear map of `promise_keeping_rate` onto the cap band
+- **Milestone:** Module 8
+- **Decision:** §8.2 says `adjusted = base × normalized promise_keeping_rate`,
+  "capped at 0.5×–1.3×", without giving the normalisation. What is it?
+- **Chosen:** `multiplier = cap_low + promise_keeping_rate × (cap_high − cap_low)`
+  = `0.5 + rate × 0.8`, then clamped to `[cap_low, cap_high]`
+  (`PolicyConfig.warm_start_cap_low` / `_high`, defaults 0.5 / 1.3). So
+  `rate 0.0 → ×0.5` (exact lower cap), `rate 1.0 → ×1.3` (exact upper cap),
+  `rate ≈ 0.625 → ×1.0` (break-even), and a missing `promise_keeping_rate`
+  (`None` — no relationship history) → `×1.0` exactly (base used unchanged). The
+  clamp additionally defends against an out-of-range stored rate. The final
+  probability is `min(1, max(0, base × multiplier))`, quantised to 5 dp — bounded
+  and deterministic.
+- **Alternatives:** `multiplier = rate` directly (rejected — a "good" rate of
+  0.9 would only ever *reduce* the probability, contradicting §8.2's "strong
+  history lifts it"); `rate / population_baseline` (rejected — needs a baseline
+  figure the project does not have, and Torque has no resolved-outcome history
+  yet); replacing the cold-start number outright with a history-derived one
+  (rejected by §8.2 itself — capping keeps cold-start and warm-start cases on a
+  comparable scale).
+- **Reasoning:** the linear map is the simplest normalisation that (a) makes the
+  named caps the exact images of `rate ∈ {0, 1}`, (b) is monotone in the rate,
+  (c) needs no external constant, (d) is trivially bounded and testable. It is a
+  **stated default**, not derived from Torque data — the same status Part E item
+  12 already gives the 0.5 / 1.3 caps themselves (see U-09).
+- **Consequence:** `amount_bucket` is retained in the lookup *signature*
+  (Decision F names it) but seeds **no** probability variation — every Decision F
+  benchmark is leg × time only. The dimension is surfaced in the breakdown (a
+  grouping label + the §8.4 feature set) and is otherwise inert.
+- **Status:** IN FORCE
+
+## D-111 — Forward cost = next-step channel rate-card sum; zero / unpriced / absent cost floors the divisor
+- **Milestone:** Module 8
+- **Decision:** §8.2 — `cost` = Σ `ChannelRateCard.rate_per_unit` for "the
+  channel(s) the assigned playbook's next likely step would use". Which step is
+  "next likely", and what happens when the sum is zero / unknown (so
+  `(p × amount) ÷ cost` would divide by zero)?
+- **Chosen:**
+  - **Next likely step** = the node at the case's live `PlaybookRun.active_step_id`
+    (`RUNNING`), which is exactly the node `runner.execute_due_job` will execute
+    next (`next_step_source = LIVE_RUN`). No live run yet but the case is
+    diagnosed → the *candidate* playbook from
+    `torque.policy.selection.select_playbook_id` and its **entry** node
+    (`CANDIDATE_PLAYBOOK`) — this keeps the cost meaningful the moment diagnosis
+    completes, before Module 4's run-instantiation is wired (D-093). Neither
+    (a brand-new `DETECTED` case) → `NONE`.
+  - **Channels** via `torque.execution.executor.channel_for` — `RETRY_PAYMENT`
+    / `ESCALATE_HUMAN` / `LOG_PROMISE` carry none; `GENERATE_PAYMENT_LINK` maps
+    to `"payment_link"`, which has no seeded `ChannelRateCard` row.
+  - **Zero / unpriced / absent cost** → the divisor **floors** at
+    `PolicyConfig.recovery_score_cost_floor` (default ₹0.01 — one paisa,
+    ≈ the cheapest real channel). `cost_basis` records which: `PRICED` (a real
+    rate drove it — its sum may still be < the floor, e.g. a rate of 0),
+    `FLOOR_NO_CHANNEL` (a retry — no channel to price), `FLOOR_UNPRICED_CHANNEL`
+    (`payment_link` / a missing rate-card row), `FLOOR_NO_PLAYBOOK` (pre-diagnosis).
+- **Alternatives:** treat a missing cost as "free" and let the score go to
+  +∞/NaN (rejected — a `ZeroDivisionError`, and it would let an *absence of
+  information* dominate the queue); skip / null the score (rejected — §8.5
+  demands a score for every open case incl. at creation); a large constant
+  (rejected — arbitrary, and it would wrongly *sink* free next steps).
+- **Reasoning:** the blueprint is silent on zero cost, so the **conservative**
+  behaviour (task instruction) is chosen: keep the score finite, comparable, and
+  honest about its basis. A genuinely free next step (a retry) still ranks
+  highest — just finitely — which is correct resource-aware prioritisation.
+- **Consequence:** `PolicyConfig.recovery_score_cost_floor` added (not a
+  blueprint figure — the conservative default). No division by zero is
+  structurally possible: `effective_cost ≥ floor > 0` always.
+- **Status:** IN FORCE
+
+## D-112 — Recompute triggers: inline for creation / diagnosis, one Celery-beat entry for daily
+- **Milestone:** Module 8
+- **Decision:** §8.5 — recompute on (1) case creation, (2) diagnosis completion,
+  (3) daily for open cases. How, without a second scheduler?
+- **Chosen:**
+  - **(1) + (2) inline** — `torque.scoring.score.score_case(session, case)` is
+    called at the end of each leg's ingestion path
+    (`ingestion.cases` / `checkout` / `subscription` / `b2b`) and at the end of
+    `diagnosis.engine._apply_result`, **in the same transaction**. It writes only
+    the three derived columns — no `CaseEvent`, no status change — so it does not
+    disturb any tested post-ingestion / post-diagnosis contract (cases still end
+    `DETECTED` / route the same way).
+  - **(3) daily** — `torque.scoring.tasks.recompute_open_case_scores_task` on the
+    existing Celery app, wired as one `beat_schedule` entry
+    (`crontab(hour=2, minute=0)`) in `torque.ingestion.celery_app`. It re-scores
+    every open case and refreshes any `human_queue` entry's stored `priority`.
+  - `recompute_recovery_score_task(case_id)` is also provided as the reusable
+    single-case entry point.
+- **Alternatives:** enqueue a task per case-creation / diagnosis (rejected —
+  would run diagnosis-time scoring out-of-band and, in eager test mode, change
+  the tested synchronous contract, the exact reason D-080 / D-093 deferred the
+  *status-changing* inter-module dispatch); a new APScheduler / cron process
+  (rejected — "do not create a second scheduling architecture").
+- **Reasoning:** the deferral precedent (D-080 / D-093) is about **status /
+  side-effecting** orchestration; a derived-column write is safe to wire inline,
+  and §8.5 explicitly requires all three triggers.
+- **Consequence:** `ingestion/{cases,checkout,subscription,b2b}.py` and
+  `diagnosis/engine.py` each gain one `score_case(...)` call;
+  `ingestion/celery_app.py` gains one beat entry + the `torque.scoring`
+  autodiscover/import.
+- **Status:** IN FORCE
+
+## D-113 — The `priority()` seam becomes `(session, case)` and returns the real score; Module 6 placeholder assertions updated
+- **Milestone:** Module 8
+- **Decision:** D-098 reserved `torque.coordination.outreach_coordinator.priority()`
+  as the one-function Module 8 seam ("Module 8 replaces only this function
+  body"). Module 8's score needs the DB session (promise-keeping history, rate
+  card, the case's next playbook step) — the placeholder took only `case`.
+- **Chosen:** `priority(session, case) -> Decimal` now delegates to
+  `torque.scoring.compute_recovery_score(session, case).score` — the single
+  implementation of the formula. The two callers are updated:
+  `human_queue.enqueue` → `_priority(session, case)`;
+  `merge._ordered(session, items)`. No consumer re-derives the formula (a
+  structural test asserts `human_queue` / `merge` never import
+  `compute_recovery_score` / `benchmarks` / `cost`). `HumanQueueEntry.priority`
+  (`NUMERIC(14,2)`, migration 0016) is unchanged — it stores the score at
+  enqueue time; the daily sweep (D-112) refreshes it in place. Three Module 6
+  tests that pinned the `amount_at_risk` placeholder value
+  (`test_enqueue_defaults_priority_to_*`, `test_broken_promise_routes_*`,
+  `test_priority_is_amount_at_risk_placeholder`) are updated to assert the real
+  score — analogous to Module 7 inverting three state-machine tests.
+- **Alternatives:** keep `priority(case)` and thread the session another way
+  (rejected — a hidden global/session-registry is worse than an explicit
+  parameter); a second `priority_scored(session, case)` alongside the old one
+  (rejected — two seams, drift).
+- **Consequence:** all accepted Module 6 *behaviour* is preserved (queue ordered
+  by economic score, FIFO tie-break, idempotency, tenancy, merge primary =
+  higher score); only the score's *value* changes, which is the sanctioned
+  Module 8 deliverable.
+- **Status:** IN FORCE
+
+---
+
 ## Notes not recorded as decisions
 
 - The **Git-history incident of 2026-09-02** (a bad commit briefly on `main`,

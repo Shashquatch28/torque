@@ -521,3 +521,46 @@ def test_module7_added_self_paid_cancel_edges_only():
     assert {CaseStatus.RECOVERED, CaseStatus.PARTIALLY_RECOVERED} <= (
         _TRANSITIONS[CaseStatus.ESCALATED_TO_HUMAN]
     )
+
+
+# --- Module 8 structural invariants (migration 0017) --------------------
+
+
+def test_module8_recovery_score_columns_present_and_nullable(engine):
+    """Module 8 adds exactly three nullable derived columns on
+    `revenue_leak_case` — no table, no enum, no `CaseEventType`."""
+    cols = {c["name"]: c for c in inspect(engine).get_columns("revenue_leak_case")}
+    for name in ("recovery_score", "recovery_score_breakdown", "recovery_score_updated_at"):
+        assert name in cols, f"{name} missing from revenue_leak_case"
+        assert cols[name]["nullable"] is True
+
+    from torque.enums import CaseEventType
+
+    assert len(list(CaseEventType)) == 10  # closed §4 vocabulary untouched
+    tables = set(inspect(engine).get_table_names())
+    assert not {"recovery_score", "recovery_scoring", "case_score"} & tables
+
+
+def test_module8_recovery_score_has_no_guard_column_semantics(engine):
+    """`recovery_score` is a plain derived column — it is NOT written through a
+    `guards.py` context manager the way `recovery_type` / `recovered_amount` are.
+    Structurally that just means it has no CHECK / FK; the write-path freedom is
+    asserted in the Module 8 recompute tests."""
+    cks = {c["name"] for c in inspect(engine).get_check_constraints("revenue_leak_case")}
+    assert not any("recovery_score" in name for name in cks)
+    fks = {
+        col
+        for fk in inspect(engine).get_foreign_keys("revenue_leak_case")
+        for col in fk["constrained_columns"]
+    }
+    assert "recovery_score" not in fks
+
+
+def test_module8_is_one_migration_no_new_enum(engine):
+    from torque.enums import ALL_ENUMS
+
+    enum_names = {e.__name__ for e in ALL_ENUMS}
+    # Module 8's CostBasis / NextStepSource live in `torque.scoring`, NOT as
+    # Postgres enums and NOT in the ALL_ENUMS column set.
+    assert "CostBasis" not in enum_names
+    assert "NextStepSource" not in enum_names

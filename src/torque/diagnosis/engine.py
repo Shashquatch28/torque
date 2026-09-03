@@ -296,18 +296,27 @@ def _apply_result(
             actor=Actor.AGENT,
             reasoning=result.reasoning,
         )
-        session.flush()
-        return DiagnosisOutcome.ROUTED_TO_PLAYBOOK
-    transition_case(
-        session,
-        case,
-        CaseStatus.ESCALATED_TO_HUMAN,
-        trigger=_ROUTE_LOW_CONFIDENCE,
-        actor=Actor.AGENT,
-        reasoning=result.reasoning,
-    )
+        outcome = DiagnosisOutcome.ROUTED_TO_PLAYBOOK
+    else:
+        transition_case(
+            session,
+            case,
+            CaseStatus.ESCALATED_TO_HUMAN,
+            trigger=_ROUTE_LOW_CONFIDENCE,
+            actor=Actor.AGENT,
+            reasoning=result.reasoning,
+        )
+        outcome = DiagnosisOutcome.ESCALATED
+
+    # 5. Module 8 §8.5 item 2 — recompute the recovery score now that
+    # `root_cause_code` is known (the candidate playbook — hence the forward
+    # cost — and the bucket can shift). Derived column only; no CaseEvent.
+    from torque.scoring.score import score_case
+
+    score_case(session, case)
+
     session.flush()
-    return DiagnosisOutcome.ESCALATED
+    return outcome
 
 
 # --- entry point -------------------------------------------------------------

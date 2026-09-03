@@ -1,9 +1,9 @@
 # CURRENT STATE — read this first
 
-**Last updated:** 2026-09-03, after the **Module 5 corrective pass** (post-audit
-F-1/F-2/F-6 fixes; uncommitted, on top of the committed Module 5 `47622f0`).
-**Reconstructed from:** committed Module 5 (HEAD `47622f0`) + the uncommitted
-corrective pass + `Torque_Blueprint_v7_FullSystem.md`.
+**Last updated:** 2026-09-04, after the **Module 6 — Compliance & Cross-Leg
+Guardrail Engine** run (uncommitted, on top of committed Module 5 `e8194c2`).
+**Reconstructed from:** committed Modules 1–5 (HEAD `e8194c2`) + the uncommitted
+Module 6 changes + `Torque_Blueprint_v7_FullSystem.md`.
 **This file is derived documentation, not authoritative.** The repo and blueprint win.
 
 ---
@@ -19,63 +19,65 @@ control. Full vision: `PROJECT_CONTEXT.md` §1. Spec: `Torque_Blueprint_v7_FullS
 
 ## Where we are
 
-**Modules 1–4 — COMPLETE & committed** (`c17dd82`). Signal ingestion → diagnosis
-→ policy/playbook selection all live; diagnosed `PLAYBOOK_ACTIVE` cases get a
-version-pinned `PlaybookRun` at their entry step.
+**Modules 1–4 — COMPLETE & committed** (`c17dd82`). **Module 5 (Execution &
+Orchestration) — COMPLETE & committed** (`e8194c2` = the Module 5 run + its
+post-audit corrective pass; both are now committed — the earlier snapshot's
+"uncommitted" note was stale).
 
-**Module 5 (Execution & Orchestration) — §5 — COMPLETE** (this run, uncommitted).
-`torque.execution` executes a pinned run's graph on the **Postgres-polling** driver
-(chosen over Temporal — maintainer decision, D-090, resolves U-07).
+**Module 6 (Compliance & Cross-Leg Guardrail Engine) — §6 — COMPLETE** (this run,
+**uncommitted**). New package `torque.coordination`.
 
-| Module 5 capability | Behaviour |
+| Module 6 capability | Behaviour |
 |---|---|
-| Driver (§5.6) | `scheduled_job` table (0015) + 10 s/60 s Celery-beat pollers; due rows claimed `FOR UPDATE SKIP LOCKED` |
-| Runtime tick | `execute_due_job`: §5.1 loop — guardrails → executor stub → atomic Action+CaseEvent → `STEP_TRANSITIONED` → advance `active_step_id` → reschedule / finalize (all one transaction) |
-| Guardrails (§5.2, D-092) | network hard-stop, Card/UPI/NACH budgets, UPI hard-cap + peak-window defer, pre-debit gap w/ auto-insert self-heal, systemic-hold block; quiet-hours/UPI-window are defers |
-| Timing (D-025) | offset-from-completion; IST `allowed_hours` deferral (+ overnight); payday `next_month_end_working_day` substitution on the **entry step only** (D-094); never fires early. `max_duration` bounds the active span **from the first executed action** (D-094) |
-| Budgets | Card (`attempts_used_24h/_30d`) + UPI (`attempts_used`) consumed once per fired retry, row-locked; NACH counters are external |
-| Executor (§5.4) | internal **stub**, no external I/O — the seam real channel adapters attach to |
-| Terminal (D-093) | ESCALATE_HUMAN node → case `ESCALATED_TO_HUMAN`/run `ESCALATED`; else case `EXHAUSTED`/run `COMPLETED` |
-| U-02 settled (D-091) | `STEP_TRANSITIONED` = `{run_id, from_step_id, outcome, to_step_id?, edge_condition?}` |
+| Facade (§6.2) | `GuardrailEngine.check(session, *, action_type, now, case\|case_id, run, node, params)` → the **four-way `GuardDecision`** (ALLOW/BLOCK/DEFER/AUTO_INSERT_PREDEBIT — intentional deviation from `{allow, block_reason?}`, D-097). Composes the existing Module 5 / compliance predicates; §5.2 sequence first-failure-wins. Retry path = `check_retry_guardrails` verbatim. |
+| WhatsApp gate | gate #1 `whatsapp_opt_in` → `CONSENT_NOT_OBTAINED`; gate #2 approved **UTILITY** template (`approved_template_exists`, reused) → `TEMPLATE_NOT_APPROVED`; systemic-hold precedes both |
+| Open conversation (Q-F) | `active_wa_conversation_expires_at > now` → **DEFER** past the window (not a hard block — no enum migration) + enqueue the case (`OPEN_WA_CONVERSATION`) |
+| Cross-leg quiet period | 4h (`PolicyConfig.cross_leg_quiet_period_hours`) between outreach from *different* legs to the same counterparty → DEFER to `quiet_period_end + timing_offset`; writes an `ACTION_BLOCKED`/`OUTREACH_COORDINATOR_DEFERRED` row, step held (D-099) |
+| Merge (Part A §5 / §4.4) | grouped in the poll batch (both jobs already claimed under one `SKIP LOCKED`); higher-`priority` case owns one `Action` + one `ActionCase` per case (Σ `credit_weight` == `Decimal("1.00000")`); no `multi_case_template` → primary sends single-case, each secondary defers, never dropped (D-102) |
+| Priority | `outreach_coordinator.priority(case)` — the **Module 8 seam**; placeholder = `amount_at_risk` desc (D-098) |
+| Escalation ceiling (§6.3) | `runner._escalation_ceiling_hit` / `_escalate_on_ceiling` — one check at the top of the tick; unsuccessful attempts (`BLOCKED`/`FAILED`/`NO_RESPONSE`) ≥ `escalation_ceiling` → case `ESCALATED_TO_HUMAN` (existing legal edge, trigger `"escalation_ceiling"`), run `ESCALATED`, enqueue, drop timer, `StepResult.ESCALATED_CEILING`. Short-circuits before a graph-terminal `ESCALATE_HUMAN`. `escalation_ceiling <= max_attempts` enforced at save time (D-100 / INV-51). |
+| Human queue (§6.4) | `human_queue` table (migration **0016**), `TenantScoped`, `UNIQUE(case_id)` idempotent. Feeders: `sweep_escalated_to_human` (Q-H — no Module 3 change), escalation-ceiling (inline), `route_broken_promise` (routing hook — `LOG_PROMISE` still deferred). `list_for_merchant` orders priority-desc + FIFO, or `order="fifo"`. |
 
-**Modules 6–13 not started.** The Module-5 run is **uncommitted**.
+**Modules 7–13 not started.** The Module 6 run is **uncommitted**.
 
 ## Verified facts (checked this session against the repo)
 
 | Fact | Value |
 |---|---|
-| Git HEAD (`main`) | **`47622f0`** (committed Module 5). The **corrective pass** (F-1/F-2/F-6) sits uncommitted on top. |
-| Working tree | uncommitted Module-5 corrective pass. Modified: `src/torque/execution/runner.py` (F-1 max_duration-from-first-action + payday entry-only + F-6 guard), `src/torque/execution/scheduler.py` (F-2 per-job SAVEPOINT). New: `tests/test_module5_corrections.py`. Committed Module 5: `src/torque/execution/` (8 files), `src/torque/models/scheduled_job.py`, `migrations/0015`, 7 `test_module5_*`, `events/payloads.py`, `ingestion/celery_app.py`, `models/__init__.py`, `conftest.py`. |
-| Alembic head / current | **`0015_scheduled_job`** (M5 added it; the corrective pass added **no** migration). |
-| Test suite | **817 passed** (`uv run pytest -q`), 0 fail / 0 skip. 1 cosmetic `StarletteDeprecationWarning`. |
-| `def test_` functions | **689** |
+| Git HEAD (`main`) | **`e8194c2`** (committed Module 5 + corrective pass). Module 6 changes sit uncommitted on top. |
+| Working tree | Module 6. Modified: `src/torque/config.py` (+`cross_leg_quiet_period_hours`), `src/torque/execution/guardrails.py` (+2 optional `GuardDecision` fields), `src/torque/execution/runner.py` (facade dispatch, ceiling check, DEFER-writes-blocked-Action), `src/torque/execution/scheduler.py` (merge grouping in `execute_due_jobs`), `src/torque/models/__init__.py` (+`HumanQueueEntry`), `src/torque/playbooks/validation.py` (+`_check_escalation_ceiling`), `tests/conftest.py` (`whatsapp_opt_in=True` default + `make_active_run` seeds a WA template), `tests/test_module4_versioning.py` (coherent v2 rules), `tests/test_schema_introspection.py` (+5 Module 6 tests). New: `src/torque/coordination/` (5 files), `src/torque/models/human_queue_entry.py`, `migrations/versions/0016_human_queue.py`, 7 `tests/test_module6_*.py`. |
+| Alembic head / current | **`0016_human_queue`** (Module 6 added it; additive — one table, no enum, no `CaseEventType`). |
+| Test suite | **865 passed** (`uv run pytest -q`), 0 fail / 0 skip. 1 cosmetic `StarletteDeprecationWarning` (pre-existing). |
+| `def test_` functions | **737** (was 689) |
 | Lint | `uv run ruff check .` → clean |
-| Migration roundtrip | green (up→down→up incl. 0015) |
-| `src/torque/state_machine.py` | **byte-unchanged vs the Module-4 baseline `c17dd82`** (M5 + corrective pass touch neither). Uses the existing `PLAYBOOK_ACTIVE → {ESCALATED_TO_HUMAN, EXHAUSTED}` edges. |
-| `src/torque/models/guards.py` | **byte-unchanged vs `c17dd82`**. |
-| Stack | Python 3.11, SQLAlchemy 2.0, Alembic, Pydantic v2, FastAPI, **Celery + Redis + beat** (now also the execution pollers), PostgreSQL 16, `uv`, pytest, ruff |
-| DB / infra | Postgres host **5442**; Redis host **6389**. Tests run eager/mocked. **24 tables** (M5 added `scheduled_job`). |
+| Migration roundtrip | green (up→down→up incl. 0016) |
+| `src/torque/state_machine.py` | **`git diff HEAD --` empty** — byte-unchanged. §6.3 escalation uses the existing legal `PLAYBOOK_ACTIVE → ESCALATED_TO_HUMAN` edge. |
+| `src/torque/models/guards.py` | **`git diff HEAD --` empty** — byte-unchanged. |
+| Stack | Python 3.11, SQLAlchemy 2.0, Alembic, Pydantic v2, FastAPI, Celery + Redis + beat, PostgreSQL 16, `uv`, pytest, ruff |
+| DB / infra | Postgres host **5442**; Redis host **6389**. Tests run eager/mocked. **25 tables** (Module 6 added `human_queue`). |
 
-## What is implemented (new in Module 5)
+## What is implemented (new in Module 6)
 
-- **`torque.execution`** package: `scheduler.py` (schedule/claim/poll), `runner.py`
-  (`execute_due_job`, the §5.1 tick), `guardrails.py` (§5.2 Module-5 half),
-  `timing.py` (D-025 fire-time), `executor.py` (§5.4 stub), `rendering.py` (§4.4
-  multi-case), `tasks.py` (two beat pollers).
-- **`scheduled_job`** model + migration 0015. **`STEP_TRANSITIONED`** payload
-  settled in `events/payloads.py` (D-091). `celery_app` registers the pollers.
+- **`torque.coordination`** package: `guardrail_engine.py` (`GuardrailEngine`
+  facade), `outreach_coordinator.py` (priority seam, cross-leg quiet period,
+  open-conversation, WhatsApp gate, ceiling tally), `human_queue.py`
+  (`HumanQueueReason`, `enqueue`, `list_for_merchant`, the three feeders),
+  `merge.py` (`merge_groups`, `execute_merged`).
+- **`human_queue`** model + migration 0016. **`GuardDecision`** gains
+  `defer_until` / `human_queue_reason`. **`StepResult`** gains `ESCALATED_CEILING`
+  / `MERGED`. Playbook validation gains `escalation_ceiling <= max_attempts`.
 
-Full breakdown: `ARCHITECTURE.md` §8E.
+Full breakdown: `ARCHITECTURE.md` §8F.
 
 ## Next milestone
 
-**Module 6 — Compliance & Cross-Leg Guardrail Engine.** The canonical
-`GuardrailEngine.check()` facade (the callable home Module 5 consults), the
-Outreach Coordinator (Part A §5 — priority, 4 h cross-leg quiet period, merge,
-defer, open-conversation policy), the WhatsApp consent + approved-template gate,
-escalation-ceiling → `ESCALATED_TO_HUMAN` (§6.3), and the human queue. Module 5
-left these as the confirmed Module 5/6 line (D-092). Do not start without an
-approved scope.
+**Module 7 — Payment Reconciliation & Attribution.** Match `payment.captured` /
+`subscription.charged` / `payment_link.paid` to open cases; `AGENT_ASSISTED` vs
+`SELF_RECOVERED` (24h window); multi-case `credit_weight` re-split; case closure
+(`RECOVERED` / `PARTIALLY_RECOVERED`, `B2BInvoice.outstanding_amount` decrement) +
+`PAYMENT_RECONCILED`; the `DETECTED/DIAGNOSING → CANCELLED` state-machine edges
+(U-01 #1–2 — needs approval + a shown `state_machine.py` diff). Do not start
+without an approved scope.
 
 ## Never-violate rules (short form — full list in CONTINUATION_PROTOCOL.md)
 
@@ -84,65 +86,56 @@ approved scope.
    documented in code + `DECISIONS.md`.
 3. **One module = one implementation run = one audit.**
 4. **Do not implement `DEFERRED.md` work as a side effect.**
-5. **Do not resolve `UNRESOLVED.md` questions unilaterally.** (Module 5 resolved
-   U-07 and U-02 — both on explicit authority: U-07 by the maintainer's engine
-   choice, U-02 by Module 5's mandate to settle it.)
+5. **Do not resolve `UNRESOLVED.md` questions unilaterally.** (Module 6 resolved
+   none — U-01/03/04/08 untouched.)
 6. `state_machine.py` / `guards.py` are load-bearing. Changing either needs
-   explicit approval + a shown diff. (Module 5 changed **neither**.)
+   explicit approval + a shown diff. (Module 6 changed **neither**.)
 7. Every run verifies: `pytest`, `ruff`, migration roundtrip, `git diff HEAD` of
    `state_machine.py` **and** `guards.py`.
 
 ## Unresolved decisions / questions right now
 
 - **U-01** — edges 1–2 (`DETECTED/DIAGNOSING → CANCELLED`) — Module 7. Edge 3
-  RESOLVED (M7c). `DIAGNOSING → SYSTEMIC_HOLD` residual: not needed by M3–M5.
-- **U-02** — **RESOLVED** (Module 5, D-091): `STEP_TRANSITIONED` shape settled.
-- **U-03** — Tier 1 vs Tier 3 MAC precedence is a stated default. Open.
+  RESOLVED (M7c).
+- **U-02** — **RESOLVED** (Module 5, D-091).
+- **U-03** — Tier 1 vs Tier 3 MAC precedence — stated default. Open.
 - **U-04** — systemic N / M / sustain numbers are placeholders. Open.
 - **U-07** — **RESOLVED** (Module 5, D-090): durable execution = Postgres-polling.
 - **U-08** — issuer / BIN / acquirer / route extraction; blocks `ISSUER_SPECIFIC`
-  systemic detection, the §5.3 first-touch MAC lookup (D-083), and MAC self-healing.
-- **U-05 / U-06** — Part D items 1–4; `MacCodeRegistry` unseeded codes.
+  systemic detection and the §5.3 first-touch MAC lookup (D-083).
+- **U-05 / U-06** — Part D items; `MacCodeRegistry` unseeded codes.
 
 ## Known contradictions / caveats
 
 - **`README.md` is stale.** Trust `CURRENT_STATE.md` / the code.
-- **The corrective pass is uncommitted** on top of committed Module 5 (`47622f0`).
-  Every "verified fact" above (817 tests, the F-1/F-2/F-6 fixes) reflects the working
-  tree.
-- **Payday times the entry step only** (D-094); advancing steps use static offsets.
-  `max_duration` is measured from the first executed action, so a run waiting on a
-  scheduled first fire (payday, long offset) no longer exhausts before it acts.
-- **`run.status = COMPLETED` ≠ recovered** (D-096) — it means execution terminated;
-  the case status (`EXHAUSTED` vs `RECOVERED`, + Module 7's `recovery_type`) is the
-  recovery signal.
-- **A poll batch isolates each job in a SAVEPOINT** (D-095): one poison job errors
-  and is retried later without rolling back siblings; `SKIP LOCKED` concurrency intact.
-- **Systemic hold drains an active run** (block → `on_blocked`), it does not pause it
-  — a blueprint gap (pause/resume needs the deferred `PLAYBOOK_ACTIVE → SYSTEMIC_HOLD`
-  sweep). Known limitation (F-4).
-- **Execution is not auto-triggered.** No auto-dispatch anywhere: Module 2→3
-  (D-080), 3→4 (D-088), **4→5** (D-093). Each engine + task is ready and invocable;
-  the demo/tests wire them explicitly (`activate_case` → `schedule_run` → pollers).
-- **The executor is a stub (§5.4).** `run_action` performs no external I/O and
-  returns `SUCCESS` by default; real WhatsApp/email/SMS/retry/Payment-Link adapters
-  are deferred. So Module 5 fires no real messages or charges — safe by construction.
-- **Module 5/6 line (D-092):** Module 5 enforces retry-rail + systemic + timing
-  guardrails; the `GuardrailEngine` facade, Outreach Coordinator, and WhatsApp
-  consent/template gate are **Module 6**. Systemic hold is a §5.2 **BLOCK**
-  (follows `on_blocked`), not an invented state transition.
-- **Recovery closure stays Module 7.** A successful retry (stub) advances the graph;
-  it does **not** mark the case `RECOVERED` (that's Module 7 reconciliation,
-  out-of-band). A drained ladder ends `EXHAUSTED` or `ESCALATED_TO_HUMAN`.
-- **`NETWORK_HARD_STOP`** is the `BlockReason` used for both TIER_1 and TIER_3 retry
-  blocks (the enum has no instrument-dead value; §5.2.1's
-  `INSTRUMENT_NOT_RECURRING_CAPABLE` is a `HardStopReason`).
-- Module 1–4 caveats still stand.
+- **Module 6 is uncommitted** on top of committed Module 5 (`e8194c2`). Every
+  "verified fact" above (865 tests, migration 0016) reflects the working tree.
+- **`GuardrailEngine.check()` returns the four-way `GuardDecision`**, not the
+  blueprint's `{allow, block_reason?}` (D-097 / Q-A) — a documented deviation so
+  Module 5's shipped DEFER / AUTO_INSERT_PREDEBIT semantics don't regress.
+- **`priority()` is a placeholder** (`amount_at_risk` desc) — the real Module 8
+  `(probability × amount) ÷ cost` replaces it through that one function (D-098).
+- **The open-WhatsApp-conversation path is a DEFER + human-queue flag**, not a
+  hard block — avoids a `BlockReason` enum migration (Q-F). `HumanQueueReason` has
+  a 4th value `OPEN_WA_CONVERSATION` beyond §6.4's three feeders.
+- **Cross-stratum merge is not attempted** — the 10 s / 60 s pollers claim
+  disjoint job sets, so a merge pair split across them sends solo (the safe
+  un-merged baseline, not a double-send; `UNIQUE(run_id)` + `SKIP LOCKED` still
+  guarantee each step fires once). Documented in `merge.py` / D-102.
+- **An `OUTREACH_COORDINATOR_DEFERRED` block counts toward the escalation
+  ceiling** (it is a `BLOCKED_BY_GUARDRAIL` row) — a case that can never get an
+  outreach through legitimately escalates to a human (D-100 / Q-D, literal).
+- **The executor is still a stub (§5.4).** Module 6 fires no real messages —
+  safe by construction. Real channel adapters remain deferred.
+- **Execution is still not auto-triggered.** Module 4→5 dispatch (D-093) and the
+  earlier inter-module triggers stay deferred; the demo/tests wire them.
+- Module 1–5 caveats still stand.
 
 ## What to do next (for the agent reading this)
 
 Follow `CONTINUATION_PROTOCOL.md`: verify this snapshot against the live repo
 (`git log`, `git status`, `alembic heads/current`, `pytest`, `ruff`,
 `git diff HEAD -- src/torque/state_machine.py src/torque/models/guards.py`), report
-any drift, then — once the maintainer has committed Module 5 — propose **Module 6 —
-Compliance & Cross-Leg Guardrail Engine** as one continuous scope.
+any drift, then — once the maintainer has committed Module 6 — propose **Module 7
+— Payment Reconciliation & Attribution** as one continuous scope, surfacing the
+U-01 `CANCELLED` edges as a question with the required `state_machine.py` diff.

@@ -66,6 +66,16 @@ class GuardDecision:
     block_reason: BlockReason | None = None
     #: AUTO_INSERT_PREDEBIT: the 1-indexed retry attempt the notice must cover.
     predebit_attempt_number: int | None = None
+    #: DEFER: an explicit reschedule target (UTC). Used by the Module 6 Outreach
+    #: Coordinator so a cross-leg-quiet-period / open-conversation defer lands at
+    #: `quiet_period_end + timing_offset` (Part A §5) rather than the generic
+    #: next-window target. `None` → the runner computes the default defer target.
+    defer_until: datetime | None = None
+    #: DEFER/BLOCK: when set, the runner also enqueues the case into the Module 6
+    #: human queue (§6.4) with this reason, in the same transaction. Used by the
+    #: open-WhatsApp-conversation path (Q-F): the automated template is suspended
+    #: (defer) *and* the case is flagged for human pickup.
+    human_queue_reason: str | None = None
 
 
 _ALLOW = GuardDecision(GuardKind.ALLOW)

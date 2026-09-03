@@ -12,6 +12,7 @@ from torque.models.case_event import CaseEvent
 from torque.models.channel_rate_card import ChannelRateCard
 from torque.models.counterparty import Counterparty
 from torque.models.event import Event
+from torque.models.human_queue_entry import HumanQueueEntry
 from torque.models.mac_code_registry import MacCodeRegistry
 from torque.models.merchant import Merchant
 from torque.models.merchant_counterparty import MerchantCounterparty
@@ -38,6 +39,7 @@ __all__ = [
     "ChannelRateCard",
     "Counterparty",
     "Event",
+    "HumanQueueEntry",
     "MacCodeRegistry",
     "Merchant",
     "MerchantCounterparty",

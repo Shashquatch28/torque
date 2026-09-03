@@ -443,3 +443,39 @@ def test_b2b_invoice_check_constraints_present(engine):
         "ck_b2b_invoice_outstanding_not_above_original",
         "ck_b2b_invoice_days_overdue_non_negative",
     } <= cks
+
+
+# --- Module 6 structural invariants (migration 0016) ----------------------
+
+
+def test_module6_human_queue_table_present_and_tenant_scoped(engine):
+    cols = {c["name"] for c in inspect(engine).get_columns("human_queue")}
+    assert {"entry_id", "merchant_id", "case_id", "reason", "priority", "enqueued_at"} <= cols
+    assert "merchant_id" in cols  # TenantScoped
+
+
+def test_module6_human_queue_case_id_is_unique(engine):
+    uniques = inspect(engine).get_unique_constraints("human_queue")
+    assert any(u["column_names"] == ["case_id"] for u in uniques)  # idempotency backstop
+
+
+def test_module6_human_queue_reason_is_not_a_pg_enum(engine):
+    col = next(
+        c for c in inspect(engine).get_columns("human_queue") if c["name"] == "reason"
+    )
+    assert col["type"].__class__.__name__ in {"VARCHAR", "String"}  # vocabulary in code (D-097)
+
+
+def test_module6_human_queue_fifo_index_present(engine):
+    idx = {i["name"]: i["column_names"] for i in inspect(engine).get_indexes("human_queue")}
+    assert idx["ix_human_queue_enqueued_at"] == ["enqueued_at"]
+
+
+def test_module6_is_one_migration_no_new_enum_no_new_case_event_type(engine):
+    from torque.enums import CaseEventType
+
+    assert len(list(CaseEventType)) == 10  # closed §4 vocabulary untouched
+    tables = set(inspect(engine).get_table_names())
+    assert "human_queue" in tables
+    # no speculative Module 7+ tables
+    assert not {"escalation_resolution", "agent_queue_claim"} & tables

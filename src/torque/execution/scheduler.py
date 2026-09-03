@@ -124,10 +124,33 @@ def execute_due_jobs(
     it); on failure only that job's savepoint rolls back — its row stays claimed-
     but-unmodified and is re-tried on a later poll, while committed sibling work is
     untouched. Each job's own writes remain all-or-nothing (`StepResult.ERROR` on a
-    raise). The caller owns the outer transaction/commit."""
+    raise). The caller owns the outer transaction/commit.
+
+    Module 6 Outreach Coordinator merge (Part A §5 / §4.4): before the solo loop,
+    claimed jobs whose current step is a non-terminal customer-outreach action are
+    grouped by `(merchant_id, counterparty_id)`; a group of 2+ folds into a single
+    merged `Action` (or, with no `multi_case_template`, the primary sends and the
+    rest defer) — see `torque.coordination.merge`. Both jobs of a pair are already
+    claimed under this pass's one lock, so the merge needs no extra concurrency
+    machinery."""
+    from torque.coordination.merge import execute_merged, merge_groups
+
     now = now or datetime.now(UTC)
     results: list[StepResult] = []
-    for job in claim_due_jobs(session, leg_types=leg_types, now=now, limit=limit):
+    claimed = claim_due_jobs(session, leg_types=leg_types, now=now, limit=limit)
+
+    groups = merge_groups(session, claimed, now=now)
+    merged_job_ids = {it.job.job_id for items in groups.values() for it in items}
+    for items in groups.values():
+        try:
+            with session.begin_nested():
+                results.extend(execute_merged(session, items, now=now))
+        except Exception:  # noqa: BLE001 — a merge failure must not abort the pass
+            results.append(StepResult.ERROR)
+
+    for job in claimed:
+        if job.job_id in merged_job_ids:
+            continue
         try:
             with session.begin_nested():
                 result = execute_due_job(session, job, now=now)

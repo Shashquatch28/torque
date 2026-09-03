@@ -85,12 +85,18 @@ def test_effective_rules_use_pinned_version(db, make_case):
     run = db.scalars(select(PlaybookRun).where(PlaybookRun.case_id == case.case_id)).one()
 
     # Publish a v2 with different rules; the pinned run still resolves v1's rules.
+    # (escalation_ceiling lowered with max_attempts to keep v2 a valid playbook —
+    # Module 6 §6.3 enforces escalation_ceiling <= max_attempts at save time.)
     base = db.get(Playbook, (C.PLAYBOOK_NSF_RETRY, 1))
     db.add(
         Playbook(
             playbook_id=C.PLAYBOOK_NSF_RETRY, version=2, leg_type=base.leg_type,
             mandate_type=base.mandate_type, steps_graph=deepcopy(base.steps_graph),
-            stopping_rules={**deepcopy(base.stopping_rules), "max_attempts": 1},
+            stopping_rules={
+                **deepcopy(base.stopping_rules),
+                "max_attempts": 1,
+                "escalation_ceiling": 1,
+            },
         )
     )
     db.flush()

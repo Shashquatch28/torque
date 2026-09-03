@@ -587,20 +587,93 @@ violation**.
 - **Enforcement:** `HELPER` (`upi_attempt_gate_open` + row-locked increment).
 - **Tests:** `tests/test_module5_guardrails.py`, `tests/test_module5_idempotency.py`.
 
+## INV-47 — One guardrail decision path: the `GuardrailEngine` facade (Module 6)
+- **Domain:** `torque.execution.runner` guardrail dispatch.
+- **Invariant:** the runtime tick consults exactly one function —
+  `torque.coordination.guardrail_engine.GuardrailEngine.check()` — for the
+  allow / block / defer / auto-insert decision on every actionable step. The
+  facade **composes** the existing pure predicates
+  (`torque.execution.guardrails`, `torque.compliance.*`,
+  `torque.coordination.outreach_coordinator`) and never re-implements them; the
+  §5.2 sequence runs first-failure-wins (retry: hard-stop → rail budget →
+  pre-debit self-heal → systemic; contact: systemic → cross-leg quiet period →
+  WhatsApp gate #1/#2 → open-conversation → quiet-hours). Return shape is the
+  four-way `GuardDecision` (D-097).
+- **Enforcement:** `HELPER` — `runner._guardrails` calls only the facade;
+  `check_retry_guardrails` / `check_contact_guardrails` remain as the composed
+  predicates, not a second dispatch path.
+- **Tests:** `tests/test_module6_guardrail_engine.py`,
+  `tests/test_module6_whatsapp_gate.py`,
+  `tests/test_module6_outreach_coordinator.py`.
+
+## INV-48 — Escalation ceiling routes a run to a human before it exhausts (Module 6 §6.3)
+- **Domain:** `torque.execution.runner._escalation_ceiling_hit` /
+  `_escalate_on_ceiling`; `revenue_leak_case.status`; `playbook_run.status`.
+- **Invariant:** once a run's unsuccessful-attempt count
+  (`BLOCKED_BY_GUARDRAIL` + `FAILED` + `NO_RESPONSE` Actions) reaches
+  `stopping_rules.escalation_ceiling`, the next tick — **before** the
+  execution-layer stopping bounds and before any further action — transitions the
+  case `PLAYBOOK_ACTIVE → ESCALATED_TO_HUMAN` (existing legal edge, trigger
+  `"escalation_ceiling"`), sets the run `ESCALATED`, enqueues the case
+  (`ESCALATION_CEILING`), deletes the timer, and returns
+  `StepResult.ESCALATED_CEILING`. Exactly one transition — a graph-terminal
+  `ESCALATE_HUMAN` node never also runs.
+- **Enforcement:** `HELPER` (the tick check) + `HELPER`
+  (`state_machine.transition_case` for the edge legality).
+- **Tests:** `tests/test_module6_escalation_ceiling.py`.
+
+## INV-49 — Human queue is idempotent per case and tenant-scoped (Module 6 §6.4)
+- **Domain:** `human_queue`; `torque.coordination.human_queue`.
+- **Invariant:** at most one `HumanQueueEntry` per `case_id`
+  (`UNIQUE(case_id)`); `enqueue()` returns the existing row unchanged if the case
+  is already queued (first reason wins), so any feeder — the
+  `ESCALATED_TO_HUMAN` sweep, the escalation-ceiling path, a broken
+  `PromiseToPay` — is safe to re-run. Every read/write is through `TenantScope`.
+- **Enforcement:** `DB-CONSTRAINT` (`UNIQUE(case_id)`) + `ORM-FACADE`
+  (`TenantScope`) + `HELPER` (`enqueue` checks first).
+- **Tests:** `tests/test_module6_human_queue.py`.
+
+## INV-50 — A merged outreach Action conserves attribution exactly (Module 6 Part A §5)
+- **Domain:** `torque.coordination.merge.execute_merged`; `action` / `action_case`.
+- **Invariant:** a merge writes **one** `Action` (attributed to the
+  higher-`priority` run) with **one `ActionCase` per participating case**;
+  `credit_weight` is proportional to each case's `amount_at_risk` with the primary
+  taking the exact remainder, so Σ `credit_weight` == `Decimal("1.00000")` (the
+  same guard as INV-12). Every participating run then advances on the send
+  outcome (its own `STEP_TRANSITIONED` + `active_step_id` + reschedule) so none
+  can re-fire; with no `multi_case_template` the primary sends single-case and
+  each secondary is deferred (`OUTREACH_COORDINATOR_DEFERRED`), never dropped.
+- **Enforcement:** `HELPER` (the merge weights) + `ORM-GUARD`
+  (`_validate_action_case_set`, INV-12).
+- **Tests:** `tests/test_module6_merge.py`.
+
+## INV-51 — `escalation_ceiling <= max_attempts` at playbook-save time (Module 6 §6.3)
+- **Domain:** `playbook.stopping_rules` / `merchant_playbook_config` merged result.
+- **Invariant:** save-time rejection if `escalation_ceiling > max_attempts` — the
+  ceiling is a sub-bound on unsuccessful attempts and cannot exceed the attempt
+  cap. Checked on the base rules **and** on any merchant override merged onto them
+  (the same defense-in-depth path as INV-11, the UPI cap).
+- **Enforcement:** `ORM-GUARD` (via `validate_playbook` /
+  `validate_merchant_playbook_config` → `_check_escalation_ceiling`).
+- **Tests:** `tests/test_module6_validation.py`.
+
 ---
 
 ## Invariants that are PLANNED (not yet enforced anywhere)
 
-- Quiet-hours / `allowed_hours` enforcement on outreach (Module 5/6).
-- Outreach Coordinator: 4h cross-leg quiet period, merge, defer, open-conversation
-  suspension (Module 6).
-- Pre-debit ≥24h gap actually blocking a retry (predicate exists; enforcement is
-  Module 5/6).
-- Card/UPI/NACH budget checks actually blocking a `RETRY_PAYMENT` (predicates
-  exist; enforcement is Module 5).
+- Pre-debit ≥24h gap actually blocking a retry: **IMPLEMENTED in Module 5**
+  (auto-insert self-heal; INV-46 family) — surfaced through the Module 6 facade
+  (INV-47).
+- Card/UPI/NACH budget checks actually blocking a `RETRY_PAYMENT`: **IMPLEMENTED
+  in Module 5** (INV-46) — surfaced through the Module 6 facade (INV-47).
+- Quiet-hours / `allowed_hours` on outreach + the Outreach Coordinator (4h
+  cross-leg quiet period, merge, defer, open-conversation): **IMPLEMENTED in
+  Module 6** (INV-47/50).
 - `SystemicEvent` → `SYSTEMIC_HOLD` case suppression: **`NETWORK_WIDE` tier
   IMPLEMENTED in M7c** (INV-27/28/29). `ISSUER_SPECIFIC` still planned (blocked
   on issuer extraction — U-08). Driving `PLAYBOOK_ACTIVE → SYSTEMIC_HOLD` (edge
-  legal since M7c) + mid-run recovery is Module 5.
-- `PlaybookRun.status` transition legality (Module 4/5).
+  legal since M7c) + mid-run recovery is a Module 5 blueprint gap (F-4).
+- `PlaybookRun.status` transition legality (still enum + assignment only).
 - `recovery_type` derivation rules (Module 7).
+- The Module 8 `(probability × amount_at_risk) ÷ cost` score — Module 6's
+  `priority()` is the seam (D-098).

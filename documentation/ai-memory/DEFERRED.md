@@ -195,28 +195,50 @@ Still deferred within Module 5's area:
 - 🔧 The **Module 4 → Module 5 auto-dispatch trigger** — `schedule_run` is not
   auto-called by `activate_case` (D-093); orchestration-layer concern.
 
-## Module 6 — Compliance & Cross-Leg Guardrail Engine
+## Module 6 — Compliance & Cross-Leg Guardrail Engine — ✅ COMPLETE
 
-- 🔧 **`GuardrailEngine.check(action_type, case_id, params)`** — the single
-  callable interface. Does not exist.
-- 🔧 The full **`SEND_WHATSAPP` guardrail**: gate #1 (`Counterparty.whatsapp_opt_in`)
-  AND gate #2 (`approved_template_exists`) AND the open-conversation check
-  (`Merchant_Counterparty.active_wa_conversation_expires_at > now()` → suspend
-  templates, route to human), producing `Action.outcome = BLOCKED_BY_GUARDRAIL`
-  with `CONSENT_NOT_OBTAINED` / `TEMPLATE_NOT_APPROVED`. Only the gate-#2
-  predicate exists.
-- 🔧 **Quiet-hours** enforcement (defer, not block) on customer contact.
-- 🔧 **Outreach Coordinator** (Part A §5, owned by Module 6): the
-  `(probability × amount) ÷ cost` priority, the 4h cross-leg minimum quiet
-  period, merge policy (one `Action` with multi-`ActionCase`), defer policy
-  (`OUTREACH_COORDINATOR_DEFERRED` `CaseEvent`), open-conversation policy.
-- 🔧 **Escalation-ceiling** handling — Module 6 (not Module 5) transitions a run's
-  case to `ESCALATED_TO_HUMAN` at `stopping_rules.escalation_ceiling`.
-- 🔧 **Human queue** — FIFO-per-merchant keyed on `case_id`, fed by
-  low-confidence diagnoses + escalation-ceiling + `PromiseToPay` broken, sorted
-  by the Module 8 score.
-- 🔧 Human-agent routing for `PromiseToPay` `BROKEN` (deliberately not a per-row
+Built in the Module 6 run (`torque.coordination` package + migration 0016). Now
+**DONE**:
+- ✅ **`GuardrailEngine.check()`** — the single facade Module 5's tick consults
+  (§6.2). Returns the four-way `GuardDecision` (D-097). Composes the existing
+  predicates; §5.2 sequence first-failure-wins.
+- ✅ The full **`SEND_WHATSAPP` guardrail** — gate #1 (`whatsapp_opt_in`) + gate
+  #2 (`approved_template_exists`, UTILITY) + open-conversation suspension
+  (`active_wa_conversation_expires_at > now` → defer past the window + human-queue
+  flag, Q-F), producing `CONSENT_NOT_OBTAINED` / `TEMPLATE_NOT_APPROVED`.
+- ✅ **Quiet-hours** on customer contact — defer only (never a block; Q-G).
+- ✅ **Outreach Coordinator** (Part A §5) — `priority()` (Module 8 seam, D-098),
+  the 4h cross-leg quiet period (defer to `quiet_period_end + timing_offset`,
+  `ACTION_BLOCKED`/`OUTREACH_COORDINATOR_DEFERRED`), the live **merge** in the
+  poll batch (one `Action` + multi-`ActionCase`, or primary-sends/secondary-defers
+  with no `multi_case_template`), open-conversation policy.
+- ✅ **Escalation-ceiling** — `runner._escalation_ceiling_hit` /
+  `_escalate_on_ceiling` (§6.3): Module 6 transitions the case to
+  `ESCALATED_TO_HUMAN` at `stopping_rules.escalation_ceiling` (D-100), before any
+  further action, one transition only. `escalation_ceiling <= max_attempts`
+  enforced at save time (INV-51).
+- ✅ **Human queue** — persistent `human_queue` table (migration 0016),
+  FIFO-per-merchant keyed on `case_id`, fed by the `ESCALATED_TO_HUMAN` sweep +
+  escalation-ceiling + broken `PromiseToPay`, ordered by `priority()`.
+- ✅ **Broken-promise routing** — `human_queue.route_broken_promise` (no per-row
   column — D-038).
+
+Still deferred within Module 6's area:
+- 🔧 The real Module 8 `(probability × amount_at_risk) ÷ cost` score —
+  `torque.coordination.outreach_coordinator.priority()` is the one-function seam;
+  the placeholder is `amount_at_risk` descending (D-098).
+- 🔧 **`LOG_PROMISE` execution** — creating a `PromiseToPay` + `PROMISE_CAPTURED`
+  is still a Module 5 deferral, so the broken-promise feeder is exercised against
+  a directly-constructed `BROKEN` promise; end-to-end awaits `LOG_PROMISE`.
+- 🔧 **Cross-stratum merge** — the 10 s / 60 s pollers claim disjoint job sets, so
+  a merge pair split across them (or across two workers of one stratum) sends solo
+  (the safe un-merged baseline, not a double-send). Documented in `merge.py` /
+  D-102; widening it needs cross-stratum coordination the §5.6 fallback lacks.
+- 🔧 **Per-node WhatsApp template category** — the gate checks for an approved
+  UTILITY template; the catalog nodes carry no category.
+- 📋 **Agent Console** manual override (pause / cancel / resolve) over queue
+  entries, `escalation_resolution`, `HUMAN_RESOLVED` — Module 10 (Q-I). Module 6
+  only routes cases *into* the queue.
 
 ## Module 7 — Payment Reconciliation & Attribution
 

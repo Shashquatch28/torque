@@ -36,6 +36,20 @@ def _check_upi_ceiling(mandate_type: MandateType | None, rules: StoppingRules) -
         )
 
 
+def _check_escalation_ceiling(rules: StoppingRules) -> None:
+    """Module 6 §6.3 (Q-D): `escalation_ceiling` is a sub-bound on the run's
+    unsuccessful attempts and must not exceed `max_attempts` — otherwise a run
+    could exhaust its attempt cap before the ceiling could ever route it to a
+    human. Enforced at playbook-save time, on the base rules and on any merchant
+    override merged onto them (the same defense-in-depth path as the UPI cap)."""
+    if rules.escalation_ceiling > rules.max_attempts:
+        raise PlaybookValidationError(
+            f"escalation_ceiling={rules.escalation_ceiling} exceeds "
+            f"max_attempts={rules.max_attempts} (Module 6 §6.3 — the ceiling is a "
+            f"sub-bound on unsuccessful attempts, it cannot exceed the attempt cap)"
+        )
+
+
 def validate_playbook(
     *,
     leg_type: LegType,
@@ -54,6 +68,7 @@ def validate_playbook(
     graph = parse_step_graph(steps_graph)
     rules = parse_stopping_rules(stopping_rules)
     _check_upi_ceiling(mandate_type, rules)
+    _check_escalation_ceiling(rules)
     return graph.to_json_dict(), rules.model_dump(mode="json")
 
 
@@ -84,4 +99,5 @@ def validate_merchant_playbook_config(
         )
     effective = effective_stopping_rules(latest_stopping_rules, override)
     _check_upi_ceiling(latest_mandate_type, effective)
+    _check_escalation_ceiling(effective)
     return normalised

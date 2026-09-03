@@ -1054,18 +1054,133 @@ fixed both (no new migration, `state_machine.py`/`guards.py` still untouched):
 
 ---
 
+## Module 6 — Compliance & Cross-Leg Guardrail Engine — COMPLETE
+
+*(One module = one run = one audit. Built on committed Module 5. The read-only
+Module 6 audit was approved with ten locked decisions Q-A … Q-J; this run
+implements exactly that scope.)*
+
+- **Commit:** *(uncommitted — maintainer commits after review)*. HEAD at
+  implementation time: **`e8194c2`** (committed Module 5 + its corrective pass —
+  the Module 5 run and corrective pass are now committed, not "uncommitted" as
+  the earlier `CURRENT_STATE.md` still said).
+- **Migration:** **0016_human_queue** (additive: one table `human_queue`,
+  `UNIQUE(case_id)` idempotency backstop, indexes on `merchant_id`/`enqueued_at`;
+  **no enum, no ALTER, no new `CaseEventType`** — the closed §4 vocabulary of 10
+  is untouched). `alembic head` → `0016`; up→down→up roundtrip green.
+- **New package `torque.coordination`** (execution-package-free — Q-J):
+  - **`guardrail_engine.py`** — `GuardrailEngine.check(session, *, action_type,
+    now, case|case_id, run, node, params)` → the single facade Module 5 consults
+    (§6.2). Composes the existing pure predicates; runs the §5.2 sequence
+    first-failure-wins. Returns the **four-way `GuardDecision`**
+    (ALLOW / BLOCK / DEFER / AUTO_INSERT_PREDEBIT) — the intentional deviation
+    from the blueprint's `{allow, block_reason?}` wording (D-097 / Q-A).
+  - **`outreach_coordinator.py`** — `priority()` (Module 8 seam — `amount_at_risk`
+    placeholder, D-098 / Q-B), `cross_leg_quiet_period_defer()` (the 4h Part A §5
+    quiet period → `quiet_period_end + timing_offset`, `PolicyConfig.
+    cross_leg_quiet_period_hours`), `open_conversation_defer()` (§3
+    `active_wa_conversation_expires_at`), `whatsapp_gate()` (gate #1
+    `whatsapp_opt_in` + gate #2 `approved_template_exists` for an approved UTILITY
+    template — reused, not reimplemented), `unsuccessful_action_count()` (the
+    escalation-ceiling tally).
+  - **`human_queue.py`** — `HumanQueueReason` (a plain-string vocabulary, D-097),
+    `enqueue()` (idempotent on `case_id`), `list_for_merchant()`
+    (priority-desc then FIFO, or `order="fifo"`), `sweep_escalated_to_human()`
+    (feeder 1 — Q-H, no Module 3 change), `route_broken_promise()` (feeder 3 —
+    routing hook for a `BROKEN` `PromiseToPay`, never a harsher message).
+  - **`merge.py`** — `merge_groups()` + `execute_merged()`: the live Outreach
+    Coordinator merge (Part A §5 / §4.4), driven from the poll batch where both
+    jobs are already claimed under one `FOR UPDATE SKIP LOCKED`. Higher-`priority`
+    case owns one merged `Action` (one `ActionCase` per case, `credit_weight`
+    proportional to `amount_at_risk`, Σ = `Decimal("1.00000")` exact); with no
+    `multi_case_template` the primary sends single-case and each secondary is
+    **deferred** (`ACTION_BLOCKED`/`OUTREACH_COORDINATOR_DEFERRED`, timer bumped,
+    step not advanced) — never dropped (Q-C).
+- **New model `HumanQueueEntry`** (`torque/models/human_queue_entry.py`,
+  `TenantScoped`) + registered in `models/__init__.py`.
+- **`GuardDecision` extended** (`torque/execution/guardrails.py`) with two optional
+  fields — `defer_until` (explicit reschedule target) and `human_queue_reason`
+  (flag the case for human pickup). The four-way `GuardKind` is unchanged; every
+  existing DEFER/BLOCK/AUTO_INSERT path is byte-for-byte preserved.
+- **Runner integration** (`torque/execution/runner.py`, `scheduler.py`):
+  - `_guardrails()` now delegates to `GuardrailEngine.check()` — the retry path is
+    the unchanged Module 5 predicate verbatim; contact actions get the coordinator
+    + WhatsApp gates.
+  - a DEFER carrying `OUTREACH_COORDINATOR_DEFERRED` also writes an
+    `ACTION_BLOCKED` row (Part A §5 defer policy) and — for open-conversation —
+    enqueues the case; the step is **not** advanced.
+  - **§6.3 escalation ceiling:** `_escalation_ceiling_hit` / `_escalate_on_ceiling`
+    — one check at the top of the tick (before the execution-layer stopping
+    bounds). Trips when accumulated unsuccessful attempts (blocked / failed /
+    no-response — Q-D) reach `stopping_rules.escalation_ceiling`; transitions the
+    case `→ ESCALATED_TO_HUMAN` (existing legal edge, trigger
+    `"escalation_ceiling"`), sets the run `ESCALATED`, enqueues it, drops the
+    timer, returns `StepResult.ESCALATED_CEILING`. Short-circuits before a
+    graph-terminal `ESCALATE_HUMAN` could run — one transition only.
+  - `StepResult` gains `ESCALATED_CEILING` and `MERGED`.
+  - `execute_due_jobs` groups claimed outreach jobs by `(merchant_id,
+    counterparty_id)` and folds 2+ via `merge.execute_merged` before the solo
+    loop.
+- **Playbook validation** (`torque/playbooks/validation.py`): new
+  `_check_escalation_ceiling` — `escalation_ceiling <= max_attempts`, enforced on
+  the base rules and on any merchant override merged onto them (the same
+  defense-in-depth path as the UPI cap, Q-D). All eleven catalog playbooks and
+  the test fixtures already satisfy it.
+- **State machine:** the ceiling escalation uses the existing legal
+  `PLAYBOOK_ACTIVE → ESCALATED_TO_HUMAN` edge — **`state_machine.py` and
+  `guards.py` byte-unchanged vs HEAD** (`git diff HEAD --` empty).
+- **Decisions:** D-097 (four-way `GuardDecision` facade + string reason
+  vocabulary), D-098 (Module 8 `priority()` seam), D-099 (`GuardDecision`
+  `defer_until` / `human_queue_reason` + the OUTREACH_COORDINATOR_DEFERRED
+  DEFER-writes-a-blocked-Action rule), D-100 (escalation-ceiling semantics +
+  insertion point + `escalation_ceiling <= max_attempts`), D-101 (persistent
+  `human_queue` table + the low-confidence sweep + open-conversation as a 4th
+  reason), D-102 (merge trigger = both jobs due in one claimed batch; residual
+  cross-stratum race documented).
+- **Deviations from blueprint:** (1) `GuardrailEngine.check()` returns the
+  four-way `GuardDecision`, not `{allow, block_reason?}` (D-097 / Q-A). (2) the
+  open-WhatsApp-conversation path is a **defer** (past the window) + human-queue
+  flag, not a hard block — avoids a `BlockReason` enum migration (Q-F). (3)
+  `HumanQueueReason` has a 4th value `OPEN_WA_CONVERSATION` beyond §6.4's three
+  feeders (Q-F requires the enqueue).
+- **Deferred introduced / still deferred:** Module 8 itself (the real
+  `(probability × amount) ÷ cost` score — `priority()` is the seam); `LOG_PROMISE`
+  execution (the broken-promise routing hook is exercised against a
+  directly-built `BROKEN` promise); real channel adapters; Agent Console controls
+  + `escalation_resolution` + `HUMAN_RESOLVED` (Module 10 — Q-I); a per-node
+  WhatsApp template category (the gate checks UTILITY); cross-stratum merge
+  (the 10 s / 60 s pollers claim disjoint sets — a split pair sends solo, the
+  safe un-merged baseline, documented in `merge.py`).
+- **Tests at completion:** **737** `def test_` functions (was 689); `pytest`
+  collects and passes **865** (was 817), 0 fail / 0 skip. Module 6 adds 7 test
+  files (43 functions) + 5 schema-introspection tests; `test_module4_versioning`
+  updated (v2 playbook now needs a coherent `escalation_ceiling`); `conftest`
+  `make_counterparty` defaults `whatsapp_opt_in=True` and `make_active_run` seeds
+  an approved WA template so existing Module 5 drains still send their WA nudges.
+  `ruff` clean. `alembic upgrade head` → `0016`; roundtrip green. 1 cosmetic
+  `StarletteDeprecationWarning` (pre-existing).
+- **Verification status:** complete + verified against a live Postgres. `pytest`
+  865 green, `ruff` clean, roundtrip green, `state_machine.py`/`guards.py`
+  `git diff HEAD` empty, migration 0016 applies, two-connection merge concurrency
+  test green.
+- **Recommended commit message:**
+  `Module 6: compliance & cross-leg guardrail engine — GuardrailEngine facade, Outreach Coordinator, escalation ceiling, human queue`
+
+---
+
 ## What comes next
 
-**Module 5 — Execution & Orchestration — COMPLETE.** Version-pinned runs now
-execute end-to-end on the Postgres-polling driver: guardrailed action execution,
-timing/payday/allowed-hours, retry-budget consumption, atomic audit, and terminal
-finalization. Next is **Module 6 — Compliance & Cross-Leg Guardrail Engine** (the
-canonical `GuardrailEngine.check()` facade, the Outreach Coordinator — quiet
-period / merge / defer — the WhatsApp consent+template gate, escalation-ceiling →
-`ESCALATED_TO_HUMAN`, and the human queue). Do not start it without an approved
-scope.
+**Module 6 — Compliance & Cross-Leg Guardrail Engine — COMPLETE.** The
+`GuardrailEngine` facade is the one interface Module 5 consults; the Outreach
+Coordinator (4h cross-leg quiet period, live merge, defer, open-conversation),
+the full WhatsApp gate, the §6.3 escalation ceiling, and the persistent human
+queue are all live. Next is **Module 7 — Payment Reconciliation & Attribution**
+(match `payment.captured` / `subscription.charged` / `payment_link.paid` to open
+cases; `AGENT_ASSISTED` vs `SELF_RECOVERED`; `credit_weight` re-split; case
+closure + `PAYMENT_RECONCILED`; the `DETECTED/DIAGNOSING → CANCELLED` edges,
+U-01). Do not start it without an approved scope.
 
-Deferred items that do **not** block Module 6: the Module 4 → 5 auto-dispatch
-trigger (D-093); real channel adapters (§5.4); the earlier inter-module dispatch
-triggers (D-080 / D-088); the §5.3 first-touch MAC lookup (D-083, U-08); the
-standing Module-2 refinements; a real Temporal engine (D-090).
+Deferred items that do **not** block Module 7: Module 8 scoring (the `priority()`
+seam awaits it); `LOG_PROMISE` execution; real channel adapters; the earlier
+inter-module dispatch triggers (D-080 / D-088 / D-093); the §5.3 first-touch MAC
+lookup (D-083, U-08); a real Temporal engine (D-090); cross-stratum merge.

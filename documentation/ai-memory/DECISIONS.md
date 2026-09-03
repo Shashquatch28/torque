@@ -1663,6 +1663,170 @@ BY D-0NN`.
   keeps recovery a single-source-of-truth case concept.
 - **Status:** IN FORCE
 
+## D-097 — `GuardrailEngine.check()` returns the four-way `GuardDecision`; queue reasons are plain strings
+- **Milestone:** Module 6 — Compliance & Cross-Leg Guardrail Engine
+- **Decision:** What does the single Module 6 facade Module 5 consults return, and
+  how is the human-queue `reason` vocabulary modelled?
+- **Chosen:** **Intentional deviation (approved, Q-A).** Blueprint §6.2 names the
+  return `{ allow: bool, block_reason?: BlockReason }`. `GuardrailEngine.check()`
+  returns the existing four-way `torque.execution.guardrails.GuardDecision`
+  (`GuardKind.ALLOW / BLOCK / DEFER / AUTO_INSERT_PREDEBIT`) instead — Module 5
+  already relies on `DEFER` (quiet-hours, NPCI UPI peak window) and
+  `AUTO_INSERT_PREDEBIT` (the §5.2.3 pre-debit self-heal), neither of which a
+  bare boolean can express. The facade **composes** the existing predicates
+  (`torque.execution.guardrails`, `torque.compliance.*`,
+  `torque.coordination.outreach_coordinator`) — it never re-implements them —
+  and runs the §5.2 sequence first-failure-wins. `HumanQueueEntry.reason` is a
+  plain `String(32)`, not a Postgres enum; the `HumanQueueReason` vocabulary
+  lives in `torque.coordination.human_queue` (same posture as
+  `MerchantWhatsAppTemplate.approval_status`, D-042).
+- **Alternatives:** a literal 2-field return (loses defer / self-heal, or forces
+  the runner to keep calling the Module-5 functions directly and the "one
+  interface" guarantee is void); a `reason` PG enum + `ALTER TYPE` per addition.
+- **Reasoning:** the narrower wording predates Module 5's shipped DEFER /
+  self-heal semantics; a superset return regresses nothing and keeps the runner's
+  handling unchanged. `git diff HEAD` of `state_machine.py` / `guards.py` stays
+  empty.
+- **Consequence:** the runner's `_guardrails` delegates to the facade; old
+  direct-call tests of `check_retry_guardrails` / `check_contact_guardrails` keep
+  passing (those functions remain).
+- **Status:** IN FORCE
+
+## D-098 — `priority()` is the Module 8 seam; the placeholder is `amount_at_risk` descending
+- **Milestone:** Module 6
+- **Decision:** The Outreach Coordinator priority ordering and the human-queue
+  `priority` both want Module 8's `(probability × amount_at_risk) ÷ cost`
+  (Blueprint Part A §5 / §8) — Module 8 is not built. What do they use now?
+- **Chosen:** A single function `torque.coordination.outreach_coordinator.priority(
+  case) -> Decimal` returning the **approved placeholder** — `amount_at_risk`
+  (Q-B). Merge primary-selection and the human queue's ordering and stored
+  `priority` all route through it. Module 8 replaces only this function body.
+- **Alternatives:** build a minimal probability/cost lookup inside Module 6
+  (scope creep, a second owner for a Module 8 concern); pull Module 8 forward.
+- **Reasoning:** keeps the seam explicit and one-line; the "resource-aware
+  prioritization" differentiator is then demonstrably Module 8's deliverable, not
+  silently faked here.
+- **Consequence:** `HumanQueueEntry.priority` is `Numeric(14, 2)`, matching
+  `RevenueLeakCase.amount_at_risk` — no schema change when Module 8 lands.
+- **Status:** IN FORCE
+
+## D-099 — `GuardDecision` gains `defer_until` / `human_queue_reason`; an OUTREACH_COORDINATOR_DEFERRED DEFER writes a blocked Action
+- **Milestone:** Module 6
+- **Decision:** How does the Part A §5 defer policy — "deferred to
+  `quiet_period_end + timing_offset` … a `CaseEvent` of type `ACTION_BLOCKED`
+  with `block_reason = OUTREACH_COORDINATOR_DEFERRED` is written" — fit the
+  runner's existing DEFER (bump the timer, write nothing) vs BLOCK (write an
+  Action, advance the step) split?
+- **Chosen:** Two optional fields added to the frozen `GuardDecision`
+  (`defer_until: datetime | None`, `human_queue_reason: str | None`) — the
+  four-way `GuardKind` is unchanged. New runner rule: a `DEFER` whose
+  `block_reason is OUTREACH_COORDINATOR_DEFERRED` **also** writes an
+  `ACTION_BLOCKED` row via `write_action_and_event` (so the `ACTION_BLOCKED`
+  `CaseEvent` is written, INV-13) **and** does **not** advance the step
+  (deferred, never skipped); if `human_queue_reason` is set it also enqueues the
+  case in the same transaction. A plain timing DEFER (UPI peak window, quiet
+  hours) is unchanged — no Action, timer bump only. `defer_until`, when set, is
+  the exact reschedule target (the coordinator computes it via
+  `timing.compute_fire_time`, already pushed into `allowed_hours`).
+- **Alternatives:** a fifth `GuardKind` (violates Q-A "four-way"); make it a plain
+  BLOCK (advances the step — contradicts "never skipped").
+- **Reasoning:** additive, backward-compatible, and the OUTREACH_COORDINATOR_DEFERRED
+  block_reason already existed on some DEFER decisions and was simply ignored.
+- **Consequence:** used by both the cross-leg quiet period and the
+  open-conversation suspension.
+- **Status:** IN FORCE
+
+## D-100 — Escalation ceiling: unsuccessful-attempt count, checked before the stopping bounds, `escalation_ceiling <= max_attempts`
+- **Milestone:** Module 6
+- **Decision:** §6.3 semantics — a ceiling on *what*, checked *where* in the tick,
+  and its relationship to `max_attempts`.
+- **Chosen (Q-D):**
+  - **What:** the count of the run's `Action`s whose outcome is
+    `BLOCKED_BY_GUARDRAIL`, `FAILED`, or `NO_RESPONSE`
+    (`torque.coordination.outreach_coordinator.UNSUCCESSFUL_OUTCOMES`). An
+    `OUTREACH_COORDINATOR_DEFERRED` block counts (it is a `BLOCKED_BY_GUARDRAIL`
+    row) — a case that can never get an outreach through legitimately escalates
+    to a human. A pure timing DEFER writes no Action and does not count.
+  - **Where:** one check (`_escalation_ceiling_hit`) at the **top of
+    `execute_due_job`, before `_stopping_rule_hit`** — so an
+    `ESCALATED_TO_HUMAN` outcome wins over `EXHAUSTED`, and the run never fires
+    another doomed action after tripping the ceiling.
+  - **Relationship:** `escalation_ceiling <= max_attempts` is enforced at
+    playbook-save time (`_check_escalation_ceiling` in
+    `torque.playbooks.validation`, on the base rules and any merged merchant
+    override) — the ceiling is a sub-bound on unsuccessful attempts and cannot
+    exceed the attempt cap.
+  - **Effect:** `transition_case(ESCALATED_TO_HUMAN, trigger="escalation_ceiling")`
+    via the existing legal edge, `run.status = ESCALATED`, enqueue
+    (`HumanQueueReason.ESCALATION_CEILING`), delete the timer, return
+    `StepResult.ESCALATED_CEILING`. This short-circuits before any graph-terminal
+    `ESCALATE_HUMAN` node runs — exactly one transition, no collision.
+- **Alternatives:** count all executed actions (that is `max_attempts`); check
+  after the stopping bounds (EXHAUSTED would pre-empt the human route); a model
+  `@validator` on `StoppingRules` (broader blast radius than the two validation
+  entry points).
+- **Consequence:** one Module-4 test (`test_effective_rules_use_pinned_version`)
+  updated to keep its v2 playbook coherent. All eleven catalog playbooks already
+  satisfy the bound.
+- **Status:** IN FORCE
+
+## D-101 — Persistent `human_queue` table; low-confidence feeder is an origin-agnostic sweep; open-conversation is a 4th reason
+- **Milestone:** Module 6
+- **Decision:** Is the §6.4 human queue a table or a derived view? How is the
+  "low-confidence diagnoses" feeder wired without reopening Module 3? Where does
+  the open-conversation "flag for human pickup" land?
+- **Chosen (Q-E / Q-H / Q-F):**
+  - **A real table** `human_queue` (migration **0016**), `TenantScoped`,
+    `UNIQUE(case_id)` as the idempotency backstop, `reason` + `priority` +
+    `enqueued_at`. `enqueue()` is a no-op if the case is already queued (first
+    reason wins).
+  - **Feeder 1** = `sweep_escalated_to_human(session, merchant_id)` — enqueues
+    every canonical `status == ESCALATED_TO_HUMAN` case not already queued, with
+    reason `LOW_CONFIDENCE_DIAGNOSIS`. **Module 3 is not touched** — the sweep is
+    origin-agnostic ("this case is waiting for a human"); a case escalated by the
+    Module-4 no-playbook path (D-086) or the §6.3 ceiling is already queued (or
+    keeps its own reason) and the sweep skips it.
+  - **Feeder 3** = `route_broken_promise(session, promise)` — enqueues a `BROKEN`
+    `PromiseToPay`'s case with reason `PROMISE_BROKEN`, nothing else (never a
+    harsher automated message). `LOG_PROMISE` execution is still deferred, so the
+    hook is tested against a directly-built `BROKEN` promise.
+  - **Open-conversation** enqueues with a 4th reason `OPEN_WA_CONVERSATION` —
+    §6.4's list of three feeders is not exhaustive of every "flag for human
+    pickup" path (Q-F requires the enqueue).
+- **Alternatives:** a derived query (cannot store `reason`, no FIFO guarantee); a
+  Module 3 edit to enqueue on escalation (touches a completed module).
+- **Consequence:** `list_for_merchant` offers `order="priority"` (default:
+  priority desc, FIFO tie-break) and `order="fifo"`.
+- **Status:** IN FORCE
+
+## D-102 — Merge triggers on two jobs due in one claimed batch; the cross-stratum race is an accepted, documented residual
+- **Milestone:** Module 6
+- **Decision:** When do two cases merge, and how is the concurrency handled
+  without a larger architecture?
+- **Chosen (Q-C):** `execute_due_jobs` groups the jobs it has **already claimed
+  under one `FOR UPDATE SKIP LOCKED`** by `(merchant_id, counterparty_id)`; a
+  group of 2+ whose current steps are non-terminal outreach actions folds via
+  `merge.execute_merged` before the solo loop. Higher-`priority` case (D-098)
+  owns one `Action`; `credit_weight` is proportional to `amount_at_risk` with the
+  primary taking the exact remainder so Σ = `Decimal("1.00000")`. Every
+  participating run advances on the send outcome (reusing `runner._advance`) so
+  none can re-fire. With no `multi_case_template` the primary sends single-case
+  and each secondary gets an `ACTION_BLOCKED`/`OUTREACH_COORDINATOR_DEFERRED` row
+  with its timer bumped `>= 1h` and its step held.
+  **Residual race (documented in `merge.py`):** the two §5.6 pollers (10 s
+  `PAYMENT_DEGRADATION` / 60 s others) claim disjoint job sets, and two workers
+  of one stratum also claim disjoint sets — a merge pair split across pollers/
+  workers is never co-claimed, so no merge happens and the two cases each get
+  their own solo outreach. That is the un-merged baseline (two messages for two
+  cases), **not** a double-send of one case; `UNIQUE(run_id)` + `SKIP LOCKED`
+  still guarantee each step fires at most once. Closing it would need
+  cross-stratum coordination the §5.6 fallback deliberately lacks.
+- **Alternatives:** a merge-candidate lock table / cross-stratum queue (a larger
+  concurrency architecture — out of scope per Q-C).
+- **Consequence:** `StepResult.MERGED` added; tested through `execute_due_jobs`
+  and with two real DB connections.
+- **Status:** IN FORCE
+
 ---
 
 ## Notes not recorded as decisions

@@ -458,6 +458,10 @@ def make_counterparty(db):
             phone=kw.pop("phone", "+919000000000"),
             email=kw.pop("email", "test@example.com"),
             payment_failure_nudge_consent=kw.pop("payment_failure_nudge_consent", True),
+            # Module 6 adds the real WhatsApp gate to the execution path; default
+            # opt-in so existing Module 5 drains still send their WA nudges. Tests
+            # that exercise the consent block pass whatsapp_opt_in=False explicitly.
+            whatsapp_opt_in=kw.pop("whatsapp_opt_in", True),
             **kw,
         )
         db.add(cp)
@@ -533,10 +537,12 @@ def make_active_run(db, seeded_catalog, make_merchant, make_counterparty, make_e
     `(case, run, job)`. `payday=False` (default) writes
     `payday_cycle_override_enabled=False` so retry steps fire on their static
     offset rather than a month-end target."""
-    from torque.enums import CaseStatus, LegType
+    from torque.enums import CaseStatus, LegType, WhatsAppTemplateCategory
     from torque.execution import schedule_run
-    from torque.models import RevenueLeakCase
+    from torque.models import MerchantWhatsAppTemplate, RevenueLeakCase
     from torque.policy.engine import ActivationOutcome, activate_case
+
+    _tmpl_seq = {"n": 0}
 
     def _make(
         *,
@@ -548,11 +554,27 @@ def make_active_run(db, seeded_catalog, make_merchant, make_counterparty, make_e
         amount_at_risk=1000,
         suggested_timing_adjustment=None,
         payday=False,
+        wa_template=True,
     ):
         m = merchant or make_merchant(
             risk_appetite_config={"payday_cycle_override_enabled": payday}
         )
         cp = counterparty or make_counterparty()
+        if wa_template:
+            # Module 6 WhatsApp gate #2 — an approved UTILITY template for the leg
+            # so catalog playbooks' WA nudge steps still send in existing drains.
+            _tmpl_seq["n"] += 1
+            db.add(
+                MerchantWhatsAppTemplate(
+                    template_id=f"wamtpl_run_{_tmpl_seq['n']}",
+                    merchant_id=m.merchant_id,
+                    template_name="run_nudge",
+                    category=WhatsAppTemplateCategory.UTILITY,
+                    approval_status="APPROVED",
+                    leg_type=leg,
+                )
+            )
+            db.flush()
         ev = make_event(m)
         default_ctx = {} if leg is LegType.B2B_RECEIVABLE else {"gateway": "razorpay"}
         case = RevenueLeakCase(

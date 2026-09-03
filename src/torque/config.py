@@ -80,6 +80,11 @@ class PolicyConfig(BaseSettings):
     subscription_failure_buffer_seconds: int = 30
     # Module 2 Section 2.4 — cross-leg dedup lookback (Part E item 10).
     cross_leg_dedup_window_hours: int = 2
+    # Module 6 Part A §5 — Outreach Coordinator minimum quiet period between two
+    # outreach events from DIFFERENT legs to the same counterparty at the same
+    # merchant. A stated default (4h); consumed by
+    # torque.coordination.outreach_coordinator.
+    cross_leg_quiet_period_hours: int = 4
     # Module 7 Section 7.1 — AGENT_ASSISTED vs SELF_RECOVERED window (Part E item 11).
     attribution_window_hours: int = 24
     # Module 3 Section 3.3 / Decision E — uncalibrated launch threshold.

@@ -60,6 +60,12 @@ from torque.playbooks.stopping_rules import StoppingRules
 from torque.policy import traversal
 from torque.policy.engine import resolve_effective_stopping_rules
 
+# Module 6 (`torque.coordination`) is imported LAZILY inside the functions that
+# use it: `coordination` composes `torque.execution.*` predicates, so a
+# module-level import here would be circular. By the time the runtime tick calls
+# these, `torque.execution` is fully loaded. Same pattern as the lazy
+# `state_machine` import in `_transition_case`.
+
 _CONTACT_ACTIONS = frozenset(
     {
         ActionType.SEND_WHATSAPP,
@@ -84,6 +90,8 @@ class StepResult(Enum):
     DEFERRED = auto()  # a *when* constraint; timer rescheduled, no action
     AUTO_INSERTED_PREDEBIT = auto()  # §5.2.3 self-heal; retry re-armed 24h out
     ESCALATED = auto()  # reached a human-escalation terminal
+    ESCALATED_CEILING = auto()  # Module 6 §6.3: run tripped stopping_rules.escalation_ceiling
+    MERGED = auto()  # Module 6 Part A §5: folded into a sibling case's merged Action
     EXHAUSTED = auto()  # ran out of attempts/duration or hit a non-escalate terminal
     ERROR = auto()  # the tick raised; its per-job SAVEPOINT was rolled back (F-2)
 
@@ -118,6 +126,14 @@ def execute_due_job(
     node = traversal.node(graph, step_id)
     action_type = ActionType(node["action_template"]["type"])
 
+    # Module 6 §6.3 — escalation ceiling. "When do we give up on automation" is a
+    # compliance/policy decision Module 6 owns, checked before the execution-layer
+    # stopping bounds so an ESCALATED_TO_HUMAN outcome wins over EXHAUSTED. Trips
+    # when accumulated unsuccessful attempts (blocked / failed / no-response,
+    # Q-D) reach `stopping_rules.escalation_ceiling` (validated <= max_attempts).
+    if _escalation_ceiling_hit(session, run, rules):
+        return _escalate_on_ceiling(session, case, run, job, now=now)
+
     # Stopping rules (safety bounds; acyclic graphs usually terminate first).
     if _stopping_rule_hit(session, run, rules, now=now):
         return _finalize_exhausted(session, case, run, job)
@@ -133,11 +149,30 @@ def execute_due_job(
     terminal = traversal.is_terminal(graph, step_id)
 
     # Guardrails (only for non-terminal actionable steps; the escalation terminal
-    # and log-only actions carry none).
+    # and log-only actions carry none). Routed through the Module 6
+    # `GuardrailEngine` facade (§6.2) — it composes the same §5.2 predicates plus
+    # the Outreach Coordinator / WhatsApp gates and returns the same four-way
+    # `GuardDecision` (D-097).
     if not terminal or action_type in _CONTACT_ACTIONS:
-        decision = _guardrails(session, case, action_type, now=now)
+        decision = _guardrails(session, case, action_type, now=now, run=run, node=node)
         if decision.kind is G.GuardKind.DEFER:
-            job.fire_at = _defer_target(action_type, rules, now=now)
+            # A cross-leg-quiet-period / open-conversation defer (Part A §5) also
+            # records an ACTION_BLOCKED / OUTREACH_COORDINATOR_DEFERRED row and
+            # may flag the case for human pickup — the step is NOT advanced
+            # (deferred, never skipped). A plain timing defer records nothing.
+            if decision.block_reason is BlockReason.OUTREACH_COORDINATOR_DEFERRED:
+                _write_action(
+                    session, run, case, action_type,
+                    outcome=ActionOutcome.BLOCKED_BY_GUARDRAIL,
+                    block_reason=BlockReason.OUTREACH_COORDINATOR_DEFERRED, now=now,
+                )
+            if decision.human_queue_reason is not None:
+                from torque.coordination import human_queue
+
+                human_queue.enqueue(
+                    session, case=case, reason=decision.human_queue_reason, now=now
+                )
+            job.fire_at = decision.defer_until or _defer_target(action_type, rules, now=now)
             session.flush()
             return StepResult.DEFERRED
         if decision.kind is G.GuardKind.AUTO_INSERT_PREDEBIT:
@@ -242,6 +277,49 @@ def _finalize_exhausted(
     return StepResult.EXHAUSTED
 
 
+# --- Module 6 §6.3 — escalation ceiling ------------------------------------
+
+
+def _escalation_ceiling_hit(session: Session, run: PlaybookRun, rules: StoppingRules) -> bool:
+    """True once the run's accumulated unsuccessful attempts (blocked / failed /
+    no-response Actions — Q-D) reach `stopping_rules.escalation_ceiling`. The
+    ceiling is validated `<= max_attempts` at playbook-save time, so it is always
+    a reachable sub-bound on the attempt cap."""
+    from torque.coordination.outreach_coordinator import unsuccessful_action_count
+
+    hit = unsuccessful_action_count(
+        session, merchant_id=run.merchant_id, run_id=run.run_id
+    )
+    return hit >= rules.escalation_ceiling
+
+
+def _escalate_on_ceiling(
+    session: Session,
+    case: RevenueLeakCase,
+    run: PlaybookRun,
+    job: ScheduledJob,
+    *,
+    now: datetime,
+) -> StepResult:
+    """Module 6 (not Module 5) transitions the case to `ESCALATED_TO_HUMAN`, sets
+    the run `ESCALATED`, enqueues the case for human pickup, and drops the timer —
+    one transition only, and never in addition to a graph-terminal `ESCALATE_HUMAN`
+    (this check short-circuits the tick before that node ever executes)."""
+    from torque.coordination import human_queue
+
+    _transition_case(session, case, CaseStatus.ESCALATED_TO_HUMAN, "escalation_ceiling")
+    run.status = PlaybookRunStatus.ESCALATED
+    human_queue.enqueue(
+        session,
+        case=case,
+        reason=human_queue.HumanQueueReason.ESCALATION_CEILING,
+        now=now,
+    )
+    session.delete(job)
+    session.flush()
+    return StepResult.ESCALATED_CEILING
+
+
 # --- pre-debit self-heal (§5.2.3) --------------------------------------------
 
 
@@ -285,12 +363,31 @@ def _write_predebit_row(
 # --- helpers -----------------------------------------------------------------
 
 
-def _guardrails(session: Session, case: RevenueLeakCase, action_type: ActionType, *, now: datetime):
-    if action_type is ActionType.RETRY_PAYMENT:
-        return G.check_retry_guardrails(session, case, now=now)
-    if action_type in _CONTACT_ACTIONS:
-        return G.check_contact_guardrails(session, case, now=now)
-    return G.GuardDecision(G.GuardKind.ALLOW)
+def _guardrails(
+    session: Session,
+    case: RevenueLeakCase,
+    action_type: ActionType,
+    *,
+    now: datetime,
+    run: PlaybookRun,
+    node: dict,
+):
+    """Consult the Module 6 `GuardrailEngine` facade (§6.2). It runs the §5.2
+    sequence — the Module 5 retry/systemic/pre-debit predicates unchanged, plus
+    the Outreach Coordinator cross-leg quiet period, the WhatsApp consent +
+    template gate, and the open-conversation suspension — and returns the same
+    four-way `GuardDecision` the runner already handles (D-097)."""
+    from torque.coordination.guardrail_engine import GuardrailEngine
+
+    return GuardrailEngine.check(
+        session,
+        action_type=action_type,
+        case=case,
+        now=now,
+        run=run,
+        node=node,
+        params=(node.get("params") or {}),
+    )
 
 
 def _defer_target(action_type: ActionType, rules: StoppingRules, *, now: datetime) -> datetime:

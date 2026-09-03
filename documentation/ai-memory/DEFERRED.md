@@ -161,35 +161,39 @@ Still deferred (these are **Module 5**, the execution half — not Module 4's jo
   are ready and invocable, but no diagnosis-completion code enqueues
   `activate_case_task`; the cross-module trigger is an orchestration-layer concern.
 
-## Module 5 — Execution / Orchestration
+## Module 5 — Execution / Orchestration — ✅ COMPLETE
 
-- 🔧 **Temporal** workflow-per-`PlaybookRun` (or the Postgres-polling fallback:
-  `scheduled_jobs` table + stratified 10s/60s pollers). Go/no-go open (Part E
-  item 8).
-- 🔧 **`checkGuardrails` / `executeAction` / `writeActionAndEvent` /
-  `waitForNextStep`** activities. Only the *write primitive*
-  (`write_action_and_event`) exists.
-- 🔧 The **guardrail check sequence** (§5.2 ordered, first-failure-wins) for
-  `RETRY_PAYMENT` and for customer-contact actions.
-- 🔧 **Channel adapters:** Meta WhatsApp Cloud API, Resend email, Fast2SMS,
-  Razorpay Payment Links create, Razorpay retry / Mandate Execute / NACH
-  re-presentment. None exist.
-- 🔧 **`GENERATE_PAYMENT_LINK` execution** — creating a `PaymentLink` row from a
-  real Razorpay `plink_...`.
-- 🔧 **`LOG_PROMISE` execution** — creating a `PromiseToPay` from a captured
-  promise + writing `PROMISE_CAPTURED`.
-- 🔧 **`write_action_and_event` extension** for real channel/cost values (M5 left
-  `channel`/`cost` nullable — D-031).
-- 🔧 **`MacCodeRegistry` self-healing**: on an unseeded code, default to
-  `TIER_2_CAPPED_RETRY` and write a flagged `CaseEvent`. `tier_for()` currently
-  just returns `None`.
-- 🔧 **Retry-rail enforcement** — actually blocking a `RETRY_PAYMENT` on
-  `card_retry_within_budget` / `upi_attempt_gate_open` /
-  `within_upi_execution_window` / `nach_retry_eligible`. Predicates exist;
-  nothing calls them to block.
-- 🔧 **Pre-debit self-heal** — auto-inserting a `SEND_PRE_DEBIT_NOTIFICATION`
-  step ahead of a retry when `gap_satisfied` is false.
-- 🔧 Cost computation from `ChannelRateCard`.
+Built in the Module 5 run (`torque.execution`, Postgres-polling driver, D-090).
+The following are now **DONE**:
+- ✅ Durable execution driver — **Postgres-polling** (§5.6): `scheduled_job` table
+  (migration 0015) + stratified 10 s/60 s Celery-beat pollers, `FOR UPDATE SKIP
+  LOCKED`. (Temporal was the alternative; U-07 resolved to polling, D-090.)
+- ✅ The runtime tick (`execute_due_job`) — the §5.1 loop end-to-end: guardrails →
+  execute → atomic Action+CaseEvent → `STEP_TRANSITIONED` → advance
+  `active_step_id` → reschedule / finalize.
+- ✅ The §5.2 **guardrail check sequence** (Module-5 half, D-092) for
+  `RETRY_PAYMENT` and customer-contact actions, first-failure-wins.
+- ✅ **Retry-rail enforcement** — Card/UPI/NACH predicates now *block* a retry, and
+  Card/UPI counters are consumed once per fired retry (row-locked, INV-46).
+- ✅ **Pre-debit self-heal** — auto-insert a `SEND_PRE_DEBIT_NOTIFICATION` ahead of
+  a subscription retry when `gap_satisfied` is false (§5.2.3).
+- ✅ Timing (D-025): offset-from-completion, `allowed_hours` deferral, payday
+  substitution, UPI peak-window re-defer.
+- ✅ `STEP_TRANSITIONED` audit (U-02 settled, D-091).
+
+Still deferred within Module 5's area:
+- 🔧 **Real channel adapters** (§5.4) — Meta WhatsApp, Resend, Fast2SMS, Razorpay
+  retry / Mandate Execute / NACH re-presentment / Payment Links. `executor.run_action`
+  is an internal **stub** (no external I/O); this is the seam they attach to.
+- 🔧 **`GENERATE_PAYMENT_LINK` execution** — creating a real `PaymentLink` row from
+  a Razorpay `plink_...` (the stub records the Action only).
+- 🔧 **`LOG_PROMISE` execution** — creating a `PromiseToPay` + `PROMISE_CAPTURED`.
+- 🔧 **Cost** from `ChannelRateCard` (Action.cost stays nullable — Module 8/9).
+- 🔧 **`MacCodeRegistry` self-healing** (§5.3) — unseeded code → default
+  `TIER_2_CAPPED_RETRY` + flagged `CaseEvent` (`tier_for()` still returns `None`).
+  Blocked with the first-touch MAC lookup on U-08 / D-083.
+- 🔧 The **Module 4 → Module 5 auto-dispatch trigger** — `schedule_run` is not
+  auto-called by `activate_case` (D-093); orchestration-layer concern.
 
 ## Module 6 — Compliance & Cross-Leg Guardrail Engine
 

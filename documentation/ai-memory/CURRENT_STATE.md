@@ -1,9 +1,9 @@
 # CURRENT STATE — read this first
 
-**Last updated:** 2026-09-03, after the **Module 4 — Policy & Playbook Engine**
+**Last updated:** 2026-09-03, after the **Module 5 — Execution & Orchestration**
 run (uncommitted).
-**Reconstructed from:** the committed Module 3 (HEAD) + the uncommitted Module-4
-run + `Torque_Blueprint_v7_FullSystem.md`.
+**Reconstructed from:** the committed Module 4 (HEAD `c17dd82`) + the uncommitted
+Module-5 run + `Torque_Blueprint_v7_FullSystem.md`.
 **This file is derived documentation, not authoritative.** The repo and blueprint win.
 
 ---
@@ -19,65 +19,63 @@ control. Full vision: `PROJECT_CONTEXT.md` §1. Spec: `Torque_Blueprint_v7_FullS
 
 ## Where we are
 
-**Module 1 (Core Data Model) — Part A — COMPLETE** (M1–M6b).
-**Module 2 (Signal Ingestion) — Part B — COMPLETE & committed.** Four legs ingest
-into canonical `RevenueLeakCase`s in `DETECTED`; bidirectional §2.4 Merge; §2.5
-`NETWORK_WIDE` systemic detection.
-**Module 3 (Diagnosis Engine) — §3 — COMPLETE & committed.** `torque.diagnosis`:
-rule-based classification → `root_cause_code` + `diagnosis_confidence`, routed
-`DIAGNOSING → PLAYBOOK_ACTIVE` (≥ T=0.65) or `→ ESCALATED_TO_HUMAN` (< T).
-**Module 4 (Policy & Playbook Engine) — §4 — COMPLETE** (this run, uncommitted).
-`torque.policy`: catalog + selection + version-pinned `PlaybookRun` instantiation.
+**Modules 1–4 — COMPLETE & committed** (`c17dd82`). Signal ingestion → diagnosis
+→ policy/playbook selection all live; diagnosed `PLAYBOOK_ACTIVE` cases get a
+version-pinned `PlaybookRun` at their entry step.
 
-| Module 4 capability | Behaviour |
+**Module 5 (Execution & Orchestration) — §5 — COMPLETE** (this run, uncommitted).
+`torque.execution` executes a pinned run's graph on the **Postgres-polling** driver
+(chosen over Temporal — maintainer decision, D-090, resolves U-07).
+
+| Module 5 capability | Behaviour |
 |---|---|
-| Catalog (§4.1) | 11 playbooks (`catalog.py`), ORM-seeded so graphs pass save-time validation (D-085); UPI AutoPay `max_attempts = 3` |
-| Selection (§4.1) | `select_playbook_id(leg, root_cause, mandate_type)`; subscription NSF is rail-specific; "trivial" causes → `None` |
-| Run instantiation | `activate_case`: pin latest version, `active_step_id = entry`, `status = RUNNING`, atomic, idempotent (one live run/case) |
-| No playbook / disabled | `PLAYBOOK_ACTIVE → ESCALATED_TO_HUMAN` via the existing legal edge (D-086) |
-| Traversal rules (§4) | pure `entry_step_id`/`next_step_id`/`is_terminal`/`step_template` (`traversal.py`) — no execution |
-| Payday (§4.3) | policy gate only (`payday.py`, `Merchant.risk_appetite_config`, D-087); timing computation is Module 5 |
-| Multi-case (§4.4) | `step_template(node, multi_case)` → multi template or single + defer signal; reuses `ActionCase` |
+| Driver (§5.6) | `scheduled_job` table (0015) + 10 s/60 s Celery-beat pollers; due rows claimed `FOR UPDATE SKIP LOCKED` |
+| Runtime tick | `execute_due_job`: §5.1 loop — guardrails → executor stub → atomic Action+CaseEvent → `STEP_TRANSITIONED` → advance `active_step_id` → reschedule / finalize (all one transaction) |
+| Guardrails (§5.2, D-092) | network hard-stop, Card/UPI/NACH budgets, UPI hard-cap + peak-window defer, pre-debit gap w/ auto-insert self-heal, systemic-hold block; quiet-hours/UPI-window are defers |
+| Timing (D-025) | offset-from-completion; IST `allowed_hours` deferral (+ overnight); payday `next_month_end_working_day` substitution; never fires early |
+| Budgets | Card (`attempts_used_24h/_30d`) + UPI (`attempts_used`) consumed once per fired retry, row-locked; NACH counters are external |
+| Executor (§5.4) | internal **stub**, no external I/O — the seam real channel adapters attach to |
+| Terminal (D-093) | ESCALATE_HUMAN node → case `ESCALATED_TO_HUMAN`/run `ESCALATED`; else case `EXHAUSTED`/run `COMPLETED` |
+| U-02 settled (D-091) | `STEP_TRANSITIONED` = `{run_id, from_step_id, outcome, to_step_id?, edge_condition?}` |
 
-**Modules 5–13 not started.** The Module-4 run is **uncommitted**.
+**Modules 6–13 not started.** The Module-5 run is **uncommitted**.
 
 ## Verified facts (checked this session against the repo)
 
 | Fact | Value |
 |---|---|
-| Git HEAD (`main`) | the committed Module 3 (Module 4 sits uncommitted on top) |
-| Working tree | uncommitted Module-4 run. New: `src/torque/policy/` (`__init__`, `catalog`, `selection`, `traversal`, `payday`, `engine`, `tasks`), `tests/test_module4_{catalog,selection,activation,versioning,resolution,traversal,payday,task}.py`. Modified: `src/torque/exceptions.py` (+`PlaybookGraphError`), `src/torque/ingestion/celery_app.py` (task registration). |
-| Alembic head / current | **`0014_diagnosis_timing`** — **no Module-4 migration** (catalog ORM-seeded, payday flag in JSONB, multi_case_template in params). |
-| Test suite | **754 passed** (`uv run pytest -q`), 0 fail / 0 skip. 1 cosmetic `StarletteDeprecationWarning`. |
-| `def test_` functions | **632** |
+| Git HEAD (`main`) | **`c17dd82`** (committed Module 4). Module 5 sits uncommitted on top. |
+| Working tree | uncommitted Module-5 run. New: `src/torque/execution/` (`__init__`, `scheduler`, `runner`, `guardrails`, `timing`, `executor`, `rendering`, `tasks`), `src/torque/models/scheduled_job.py`, `migrations/versions/0015_scheduled_job.py`, `tests/test_module5_{timing,execution,guardrails,scheduler,idempotency,multicase,tenancy}.py` (7 files). Modified: `models/__init__.py`, `events/payloads.py` (STEP_TRANSITIONED settled), `ingestion/celery_app.py` (task+beat wiring), `tests/conftest.py` (M5 fixtures). |
+| Alembic head / current | **`0015_scheduled_job`** (M5 added it; additive table). |
+| Test suite | **808 passed** (`uv run pytest -q`), 0 fail / 0 skip. 1 cosmetic `StarletteDeprecationWarning`. |
+| `def test_` functions | **680** |
 | Lint | `uv run ruff check .` → clean |
-| Migration roundtrip | green (up→down→up) |
-| `src/torque/state_machine.py` | **byte-unchanged vs HEAD**. M4 uses the existing `PLAYBOOK_ACTIVE → ESCALATED_TO_HUMAN` edge; run creation needs no transition. |
+| Migration roundtrip | green (up→down→up incl. 0015) |
+| `src/torque/state_machine.py` | **byte-unchanged vs HEAD**. M5 uses the existing `PLAYBOOK_ACTIVE → {ESCALATED_TO_HUMAN, EXHAUSTED}` edges. |
 | `src/torque/models/guards.py` | **byte-unchanged vs HEAD**. |
-| Stack | Python 3.11, SQLAlchemy 2.0, Alembic, Pydantic v2, FastAPI, **Celery + Redis + beat**, PostgreSQL 16, `uv`, pytest, ruff |
-| DB / infra | Postgres host **5442**; Redis host **6389**. Tests run eager/mocked. |
+| Stack | Python 3.11, SQLAlchemy 2.0, Alembic, Pydantic v2, FastAPI, **Celery + Redis + beat** (now also the execution pollers), PostgreSQL 16, `uv`, pytest, ruff |
+| DB / infra | Postgres host **5442**; Redis host **6389**. Tests run eager/mocked. **24 tables** (M5 added `scheduled_job`). |
 
-## What is implemented (new in Module 4)
+## What is implemented (new in Module 5)
 
-- **`torque.policy`** package: `catalog.py` (11 playbooks + `seed_catalog`),
-  `selection.py` (`select_playbook_id`), `engine.py` (`activate_case`,
-  `ActivationOutcome`, `resolve_effective_stopping_rules`), `traversal.py` (pure
-  graph rules), `payday.py` (override policy gate), `tasks.py`
-  (`activate_case_task`).
-- **`exceptions.PlaybookGraphError`**; `celery_app` registers `torque.policy` tasks.
+- **`torque.execution`** package: `scheduler.py` (schedule/claim/poll), `runner.py`
+  (`execute_due_job`, the §5.1 tick), `guardrails.py` (§5.2 Module-5 half),
+  `timing.py` (D-025 fire-time), `executor.py` (§5.4 stub), `rendering.py` (§4.4
+  multi-case), `tasks.py` (two beat pollers).
+- **`scheduled_job`** model + migration 0015. **`STEP_TRANSITIONED`** payload
+  settled in `events/payloads.py` (D-091). `celery_app` registers the pollers.
 
-No schema change; 23 tables unchanged. Full breakdown: `ARCHITECTURE.md` §8D.
+Full breakdown: `ARCHITECTURE.md` §8E.
 
 ## Next milestone
 
-**Module 5 — Execution / Orchestration.** The Temporal workflow per `PlaybookRun`:
-runtime graph traversal driving `active_step_id` (using Module 4's `traversal`
-rules), timing/fire-time computation (offset from previous completion, payday
-substitution, `allowed_hours` deferral — D-025), guardrail checks immediately
-before each action (retry budgets, quiet hours, pre-debit gap, systemic hold), the
-atomic `Action` + `CaseEvent` write (the `write_action_and_event` primitive
-already exists), and settling **U-02**'s `STEP_TRANSITIONED` payload. Do not start
-without an approved scope.
+**Module 6 — Compliance & Cross-Leg Guardrail Engine.** The canonical
+`GuardrailEngine.check()` facade (the callable home Module 5 consults), the
+Outreach Coordinator (Part A §5 — priority, 4 h cross-leg quiet period, merge,
+defer, open-conversation policy), the WhatsApp consent + approved-template gate,
+escalation-ceiling → `ESCALATED_TO_HUMAN` (§6.3), and the human queue. Module 5
+left these as the confirmed Module 5/6 line (D-092). Do not start without an
+approved scope.
 
 ## Never-violate rules (short form — full list in CONTINUATION_PROTOCOL.md)
 
@@ -86,53 +84,53 @@ without an approved scope.
    documented in code + `DECISIONS.md`.
 3. **One module = one implementation run = one audit.**
 4. **Do not implement `DEFERRED.md` work as a side effect.**
-5. **Do not resolve `UNRESOLVED.md` questions unilaterally.** Routine mapping
-   choices may be made and documented as decisions.
+5. **Do not resolve `UNRESOLVED.md` questions unilaterally.** (Module 5 resolved
+   U-07 and U-02 — both on explicit authority: U-07 by the maintainer's engine
+   choice, U-02 by Module 5's mandate to settle it.)
 6. `state_machine.py` / `guards.py` are load-bearing. Changing either needs
-   explicit approval + a shown diff. (Module 4 changed **neither**.)
+   explicit approval + a shown diff. (Module 5 changed **neither**.)
 7. Every run verifies: `pytest`, `ruff`, migration roundtrip, `git diff HEAD` of
    `state_machine.py` **and** `guards.py`.
 
 ## Unresolved decisions / questions right now
 
 - **U-01** — edges 1–2 (`DETECTED/DIAGNOSING → CANCELLED`) — Module 7. Edge 3
-  RESOLVED (M7c). `DIAGNOSING → SYSTEMIC_HOLD` residual: not needed by M3/M4.
-- **U-02** — `STEP_TRANSITIONED` payload provisional; **Module 5** settles it.
-  Module 4 writes no `STEP_TRANSITIONED` (run creation is status-neutral).
-- **U-03** — Tier 1 vs Tier 3 MAC precedence is a stated default.
-- **U-04** — systemic N / M / sustain numbers are placeholders.
-- **U-07** — inbound half RESOLVED (Celery). `PlaybookRun`-execution / Temporal
-  half stays open — **Module 5**.
+  RESOLVED (M7c). `DIAGNOSING → SYSTEMIC_HOLD` residual: not needed by M3–M5.
+- **U-02** — **RESOLVED** (Module 5, D-091): `STEP_TRANSITIONED` shape settled.
+- **U-03** — Tier 1 vs Tier 3 MAC precedence is a stated default. Open.
+- **U-04** — systemic N / M / sustain numbers are placeholders. Open.
+- **U-07** — **RESOLVED** (Module 5, D-090): durable execution = Postgres-polling.
 - **U-08** — issuer / BIN / acquirer / route extraction; blocks `ISSUER_SPECIFIC`
-  systemic detection and the §5.3 first-touch MAC lookup (D-083).
+  systemic detection, the §5.3 first-touch MAC lookup (D-083), and MAC self-healing.
 - **U-05 / U-06** — Part D items 1–4; `MacCodeRegistry` unseeded codes.
 
 ## Known contradictions / caveats
 
 - **`README.md` is stale.** Trust `CURRENT_STATE.md` / the code.
-- **The Module-4 run is uncommitted.** Every "verified fact" above (754 tests, the
-  `torque.policy` package) reflects the working tree, not any commit.
-- **No auto-dispatch anywhere yet:** Module 2→3 (D-080) and Module 3→4 (D-088)
-  triggers are deferred to the orchestration layer. Each engine + task is ready and
-  independently invocable; nothing enqueues the next stage automatically.
-- **Module 4 = policy, not execution.** `activate_case` creates the `PlaybookRun`
-  and provides the graph-reading rules; it fires no actions, advances no
-  `active_step_id`, computes no fire times, builds no Temporal (all Module 5).
-- **No-playbook / disabled cases escalate** (D-086) — fraud-suspected, UPI
-  cap-exhausted, NACH clearing-pending, dispute-suspected, subscription
-  card-expired reach `PLAYBOOK_ACTIVE` (≥ T) but have no catalog playbook, so
-  Module 4 routes them `→ ESCALATED_TO_HUMAN`.
-- **The catalog is app-seeded, not migrated** (D-085) — `seed_catalog(session)`
-  must run at deploy/demo/test; it is idempotent.
-- **`PLAYBOOK_ACTIVE → SYSTEMIC_HOLD`** legal but dormant (Module 5 drives it).
-- Standing Module 2/3 caveats remain (Leg-3 rail seeding initial-state only;
-  systemic rollup `payment.failed`-only; `NETWORK_WIDE`-only; subscription decline
-  read from the source Event; checkout always escalates; etc.).
+- **The Module-5 run is uncommitted.** Every "verified fact" above (808 tests, the
+  `torque.execution` package, migration 0015) reflects the working tree.
+- **Execution is not auto-triggered.** No auto-dispatch anywhere: Module 2→3
+  (D-080), 3→4 (D-088), **4→5** (D-093). Each engine + task is ready and invocable;
+  the demo/tests wire them explicitly (`activate_case` → `schedule_run` → pollers).
+- **The executor is a stub (§5.4).** `run_action` performs no external I/O and
+  returns `SUCCESS` by default; real WhatsApp/email/SMS/retry/Payment-Link adapters
+  are deferred. So Module 5 fires no real messages or charges — safe by construction.
+- **Module 5/6 line (D-092):** Module 5 enforces retry-rail + systemic + timing
+  guardrails; the `GuardrailEngine` facade, Outreach Coordinator, and WhatsApp
+  consent/template gate are **Module 6**. Systemic hold is a §5.2 **BLOCK**
+  (follows `on_blocked`), not an invented state transition.
+- **Recovery closure stays Module 7.** A successful retry (stub) advances the graph;
+  it does **not** mark the case `RECOVERED` (that's Module 7 reconciliation,
+  out-of-band). A drained ladder ends `EXHAUSTED` or `ESCALATED_TO_HUMAN`.
+- **`NETWORK_HARD_STOP`** is the `BlockReason` used for both TIER_1 and TIER_3 retry
+  blocks (the enum has no instrument-dead value; §5.2.1's
+  `INSTRUMENT_NOT_RECURRING_CAPABLE` is a `HardStopReason`).
+- Module 1–4 caveats still stand.
 
 ## What to do next (for the agent reading this)
 
 Follow `CONTINUATION_PROTOCOL.md`: verify this snapshot against the live repo
 (`git log`, `git status`, `alembic heads/current`, `pytest`, `ruff`,
 `git diff HEAD -- src/torque/state_machine.py src/torque/models/guards.py`), report
-any drift, then — once the maintainer has committed Module 4 — propose **Module 5 —
-Execution / Orchestration** as one continuous scope per the module execution protocol.
+any drift, then — once the maintainer has committed Module 5 — propose **Module 6 —
+Compliance & Cross-Leg Guardrail Engine** as one continuous scope.

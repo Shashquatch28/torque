@@ -66,6 +66,14 @@ if it produced a design decision, a `DECISIONS.md` entry. Do not delete it.
 
 ## U-02 — `CaseEvent.STEP_TRANSITIONED` payload shape is provisional
 
+- **RESOLVED (2026-09-03, Module 5; D-091).** Module 5 is the first and only writer
+  of `STEP_TRANSITIONED`, so its execution loop settled the shape to
+  `{ run_id, from_step_id, outcome, to_step_id?, edge_condition? }`: `run_id` adds
+  run attribution (`CaseEvent` has no `run_id` column, D-005), and `to_step_id` /
+  `edge_condition` are nullable because a terminal step has no next step / edge.
+  This reconstructs `previous → outcome → next` with case+run attribution. No
+  `CaseEvent` schema change. See `DECISIONS.md` **D-091**. *(Kept here with the
+  original context below; moved to Resolved.)*
 - **Question:** Is `{ from_step_id?, to_step_id, edge_condition, outcome }` the
   final shape?
 - **Current state:** Implemented as `StepTransitionedPayload` in
@@ -160,6 +168,14 @@ if it produced a design decision, a `DECISIONS.md` entry. Do not delete it.
 
 ## U-07 — Workflow engine for `PlaybookRun` execution (Module 5; Decision C / Part E item 8)
 
+- **FULLY RESOLVED (2026-09-03, Module 5; D-090).** The maintainer chose the
+  **Postgres-polling fallback** (§5.6) over Temporal for the durable-execution half
+  when Module 5 was proposed. Built: a `scheduled_job` table (migration 0015,
+  `UNIQUE(run_id)`) + two stratified Celery-beat pollers (10 s `PAYMENT_DEGRADATION`
+  / 60 s others), claiming due rows `FOR UPDATE SKIP LOCKED`. Durable state lives
+  entirely in Postgres; Celery is the repeatable-timer trigger only. Temporal
+  remains a future driver swap behind the same `execute_due_job` tick. Both halves
+  now resolved; see `DECISIONS.md` **D-090** / **D-057**.
 - **PARTIALLY RESOLVED (2026-09-02, M7b).** The question had two halves.
   - **Inbound / Module 2 delayed jobs — RESOLVED:** **Celery + Redis (broker
     only, no result backend)**. Implemented in M7b (`torque.ingestion.celery_app`)
@@ -176,7 +192,7 @@ if it produced a design decision, a `DECISIONS.md` entry. Do not delete it.
 - **What would unblock it:** the maintainer picking Temporal or the polling
   fallback when Module 5 is proposed.
 - **Must implementation stop first?** Not for M7c (Celery beat / scheduler
-  covers the 60s systemic job). **Yes for Module 5** `PlaybookRun` execution.
+  covers the 60s systemic job). ~~**Yes for Module 5**~~ — resolved above (D-090).
 
 ## U-08 — Issuer / BIN / acquirer / route extraction (blocks `ISSUER_SPECIFIC` systemic detection)
 

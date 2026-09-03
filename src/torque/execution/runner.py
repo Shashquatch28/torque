@@ -1,0 +1,430 @@
+"""The runtime execution tick — Blueprint §5.1 workflow loop, driven by the
+Postgres poller (§5.6) instead of Temporal (D-090).
+
+`execute_due_job` runs ONE claimed `ScheduledJob` inside the caller's transaction
+(the poller gives each job its own `session_scope`, so the whole tick — action +
+budget + `active_step_id` + `CaseEvent`s + job row — commits or rolls back as one
+unit, §2.3). The loop, per §5.1:
+
+    resolve active_step_id → node
+      → stopping-rule check (max_attempts / max_duration → EXHAUSTED)
+      → allowed_hours re-check (DEFER: reschedule, never fire early)
+      → guardrails (BLOCK → ACTION_BLOCKED + on_blocked edge;
+                     DEFER → reschedule; AUTO_INSERT_PREDEBIT → §5.2.3 self-heal)
+      → execute action (executor stub, §5.4) → ACTION_EXECUTED
+      → STEP_TRANSITIONED (audit the graph move)
+      → advance active_step_id + reschedule the timer, OR finalize at a terminal.
+
+Idempotency & exactly-once: one pending job per run (`UNIQUE(run_id)`), claimed
+`FOR UPDATE SKIP LOCKED`; a redelivered/duplicate poll finds no claimable row, and
+a crash rolls the tick back leaving the timer for the next poll. `active_step_id`
+is the single authoritative pointer (D-024) — never a parallel position system.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from enum import Enum, auto
+
+from sqlalchemy import func
+from sqlalchemy.orm import Session
+
+from torque.compliance.pre_debit import PRE_DEBIT_MIN_GAP_HOURS
+from torque.db.scoped import TenantScope
+from torque.enums import (
+    ActionOutcome,
+    ActionType,
+    Actor,
+    BlockReason,
+    CaseEventType,
+    CaseStatus,
+    MandateType,
+    PlaybookRunStatus,
+)
+from torque.events import write_action_and_event
+from torque.events.case_event_writer import append_case_event
+from torque.execution import guardrails as G
+from torque.execution import timing
+from torque.execution.executor import ActionContext, channel_for, run_action
+from torque.models import (
+    Action,
+    CardRetryBudget,
+    Merchant,
+    Playbook,
+    PlaybookRun,
+    PreDebitNotification,
+    RevenueLeakCase,
+    ScheduledJob,
+    UPIRetryBudget,
+)
+from torque.playbooks.stopping_rules import StoppingRules
+from torque.policy import traversal
+from torque.policy.engine import resolve_effective_stopping_rules
+from torque.policy.payday import effective_timing_adjustment
+
+_CONTACT_ACTIONS = frozenset(
+    {
+        ActionType.SEND_WHATSAPP,
+        ActionType.SEND_EMAIL,
+        ActionType.SEND_SMS,
+        ActionType.GENERATE_PAYMENT_LINK,
+        ActionType.SEND_PRE_DEBIT_NOTIFICATION,
+    }
+)
+_NON_TERMINAL_RUN = (PlaybookRunStatus.RUNNING, PlaybookRunStatus.PAUSED)
+_OUTCOME_TO_EDGE: dict[ActionOutcome, traversal.Outcome] = {
+    ActionOutcome.SUCCESS: "on_success",
+    ActionOutcome.FAILED: "on_failed",
+    ActionOutcome.NO_RESPONSE: "on_no_response",
+}
+
+
+class StepResult(Enum):
+    NOOP = auto()  # job's run is gone / already terminal
+    EXECUTED = auto()  # an action fired and the run advanced
+    BLOCKED = auto()  # guardrail blocked; followed on_blocked and advanced
+    DEFERRED = auto()  # a *when* constraint; timer rescheduled, no action
+    AUTO_INSERTED_PREDEBIT = auto()  # §5.2.3 self-heal; retry re-armed 24h out
+    ESCALATED = auto()  # reached a human-escalation terminal
+    EXHAUSTED = auto()  # ran out of attempts/duration or hit a non-escalate terminal
+
+
+def execute_due_job(
+    session: Session, job: ScheduledJob, *, now: datetime | None = None
+) -> StepResult:
+    now = now or datetime.now(UTC)
+    scope = TenantScope(session, job.merchant_id)
+
+    run = scope.get(PlaybookRun, job.run_id)
+    if run is None or PlaybookRunStatus(run.status) not in _NON_TERMINAL_RUN:
+        session.delete(job)  # stale timer for a finished/absent run
+        session.flush()
+        return StepResult.NOOP
+
+    case = session.get(RevenueLeakCase, run.case_id)
+    pinned = session.get(Playbook, (run.playbook_id, run.playbook_version))
+    graph = pinned.steps_graph
+    rules = resolve_effective_stopping_rules(session, run)
+    step_id = run.active_step_id
+    node = traversal.node(graph, step_id)
+    action_type = ActionType(node["action_template"]["type"])
+
+    # Stopping rules (safety bounds; acyclic graphs usually terminate first).
+    if _stopping_rule_hit(session, run, case, rules, now=now):
+        return _finalize_exhausted(session, case, run, job)
+
+    # allowed_hours re-check — a *when* constraint (§5.2.5): defer, never fire early.
+    if not timing.within_allowed_hours(now, rules.allowed_hours.start, rules.allowed_hours.end):
+        job.fire_at = timing.next_window_opening(
+            now, rules.allowed_hours.start, rules.allowed_hours.end
+        )
+        session.flush()
+        return StepResult.DEFERRED
+
+    terminal = traversal.is_terminal(graph, step_id)
+
+    # Guardrails (only for non-terminal actionable steps; the escalation terminal
+    # and log-only actions carry none).
+    if not terminal or action_type in _CONTACT_ACTIONS:
+        decision = _guardrails(session, case, action_type, now=now)
+        if decision.kind is G.GuardKind.DEFER:
+            job.fire_at = _defer_target(action_type, rules, now=now)
+            session.flush()
+            return StepResult.DEFERRED
+        if decision.kind is G.GuardKind.AUTO_INSERT_PREDEBIT:
+            return _auto_insert_predebit(
+                session, case, run, job, attempt=decision.predebit_attempt_number, now=now
+            )
+        if decision.kind is G.GuardKind.BLOCK:
+            _write_action(
+                session, run, case, action_type,
+                outcome=ActionOutcome.BLOCKED_BY_GUARDRAIL,
+                block_reason=decision.block_reason, now=now,
+            )
+            return _advance(session, case, run, job, graph, step_id, "on_blocked",
+                            ActionOutcome.BLOCKED_BY_GUARDRAIL, now=now)
+
+    # Execute the action (stub, §5.4).
+    channel = channel_for(action_type)
+    outcome = run_action(
+        ActionContext(
+            action_type=action_type,
+            channel=channel,
+            template=(node.get("params") or {}).get("template"),
+        )
+    )
+    _write_action(session, run, case, action_type, outcome=outcome, block_reason=None, now=now)
+    if action_type is ActionType.RETRY_PAYMENT:
+        _consume_retry_budget(session, case)
+    elif action_type is ActionType.SEND_PRE_DEBIT_NOTIFICATION:
+        # A graph pre-debit node records its compliance row (covering the next
+        # retry attempt) — the same row the §5.2.3 auto-insert would create.
+        _write_predebit_row(
+            session, case, attempt=G.executed_retry_count(session, case) + 1, now=now
+        )
+
+    if terminal:
+        return _finalize_terminal(session, case, run, job, step_id, action_type, outcome)
+
+    edge = _OUTCOME_TO_EDGE.get(outcome, "on_no_response")
+    return _advance(session, case, run, job, graph, step_id, edge, outcome, now=now)
+
+
+# --- advancement + finalization ----------------------------------------------
+
+
+def _advance(
+    session: Session,
+    case: RevenueLeakCase,
+    run: PlaybookRun,
+    job: ScheduledJob,
+    graph: dict,
+    from_step: str,
+    edge: traversal.Outcome,
+    outcome: ActionOutcome,
+    *,
+    now: datetime,
+) -> StepResult:
+    next_id = traversal.next_step_id(graph, from_step, edge)
+    blocked = outcome is ActionOutcome.BLOCKED_BY_GUARDRAIL
+    result = StepResult.BLOCKED if blocked else StepResult.EXECUTED
+
+    if next_id is None:  # no edge for this outcome → the ladder ends here
+        _step_event(session, case, run, from_step, None, None, outcome)
+        return _finalize_exhausted(session, case, run, job)
+
+    _step_event(session, case, run, from_step, next_id, edge, outcome)
+    run.active_step_id = next_id
+    next_node = traversal.node(graph, next_id)
+    job.fire_at = _next_fire_time(session, case, run, next_node, now=now)
+    session.flush()
+    return result
+
+
+def _finalize_terminal(
+    session: Session,
+    case: RevenueLeakCase,
+    run: PlaybookRun,
+    job: ScheduledJob,
+    step_id: str,
+    action_type: ActionType,
+    outcome: ActionOutcome,
+) -> StepResult:
+    _step_event(session, case, run, step_id, None, None, outcome)
+    if action_type is ActionType.ESCALATE_HUMAN:
+        _transition_case(session, case, CaseStatus.ESCALATED_TO_HUMAN, "playbook_escalation")
+        run.status = PlaybookRunStatus.ESCALATED
+        session.delete(job)
+        session.flush()
+        return StepResult.ESCALATED
+    return _finalize_exhausted(session, case, run, job)
+
+
+def _finalize_exhausted(
+    session: Session, case: RevenueLeakCase, run: PlaybookRun, job: ScheduledJob
+) -> StepResult:
+    """The playbook ran its course without recovery. The run completes; the case
+    is EXHAUSTED (recovery, if it happens, is Module 7's out-of-band closure)."""
+    if CaseStatus(case.status) is CaseStatus.PLAYBOOK_ACTIVE:
+        _transition_case(session, case, CaseStatus.EXHAUSTED, "playbook_exhausted")
+    run.status = PlaybookRunStatus.COMPLETED
+    session.delete(job)
+    session.flush()
+    return StepResult.EXHAUSTED
+
+
+# --- pre-debit self-heal (§5.2.3) --------------------------------------------
+
+
+def _auto_insert_predebit(
+    session: Session,
+    case: RevenueLeakCase,
+    run: PlaybookRun,
+    job: ScheduledJob,
+    *,
+    attempt: int,
+    now: datetime,
+) -> StepResult:
+    """Send the pre-debit notice now and re-arm the *same* retry step 24h out,
+    instead of dead-ending on `PRE_DEBIT_GAP_NOT_MET` — the graph position does not
+    move (the notice sits *ahead of* the retry, §5.2.3)."""
+    _write_action(
+        session, run, case, ActionType.SEND_PRE_DEBIT_NOTIFICATION,
+        outcome=ActionOutcome.SUCCESS, block_reason=None, now=now,
+    )
+    _write_predebit_row(session, case, attempt=attempt, now=now)
+    job.fire_at = now + timedelta(hours=PRE_DEBIT_MIN_GAP_HOURS)
+    session.flush()
+    return StepResult.AUTO_INSERTED_PREDEBIT
+
+
+def _write_predebit_row(
+    session: Session, case: RevenueLeakCase, *, attempt: int, now: datetime
+) -> None:
+    TenantScope(session, case.merchant_id).add(
+        PreDebitNotification(
+            case_id=case.case_id,
+            notified_at=now,
+            covers_attempt_number=attempt,
+            channel=channel_for(ActionType.SEND_PRE_DEBIT_NOTIFICATION) or "whatsapp",
+            notified_amount=case.amount_at_risk,
+        )
+    )
+    session.flush()
+
+
+# --- helpers -----------------------------------------------------------------
+
+
+def _guardrails(session: Session, case: RevenueLeakCase, action_type: ActionType, *, now: datetime):
+    if action_type is ActionType.RETRY_PAYMENT:
+        return G.check_retry_guardrails(session, case, now=now)
+    if action_type in _CONTACT_ACTIONS:
+        return G.check_contact_guardrails(session, case, now=now)
+    return G.GuardDecision(G.GuardKind.ALLOW)
+
+
+def _defer_target(action_type: ActionType, rules: StoppingRules, *, now: datetime) -> datetime:
+    # A UPI execution-window defer waits past the NPCI peak; anything else waits
+    # for the next contact window.
+    upi = timing.next_upi_execution_time(now)
+    if upi > now:
+        return upi
+    return timing.next_window_opening(now, rules.allowed_hours.start, rules.allowed_hours.end)
+
+
+def _next_fire_time(
+    session: Session, case: RevenueLeakCase, run: PlaybookRun, next_node: dict, *, now: datetime
+) -> datetime:
+    merchant = session.get(Merchant, run.merchant_id)
+    payday = effective_timing_adjustment(case, merchant) if merchant is not None else None
+    rules = resolve_effective_stopping_rules(session, run)
+    return timing.compute_fire_time(
+        previous_completion=now,
+        timing_offset_hours=float(next_node.get("timing_offset_hours", 0)),
+        allowed_start=rules.allowed_hours.start,
+        allowed_end=rules.allowed_hours.end,
+        payday_adjustment=payday,
+    )
+
+
+def _stopping_rule_hit(
+    session: Session,
+    run: PlaybookRun,
+    case: RevenueLeakCase,
+    rules: StoppingRules,
+    *,
+    now: datetime,
+) -> bool:
+    if run.created_at is not None:
+        created = run.created_at if run.created_at.tzinfo else run.created_at.replace(tzinfo=UTC)
+        if now - created > timedelta(days=rules.max_duration_days):
+            return True
+    executed = int(
+        session.scalar(
+            TenantScope(session, run.merchant_id)
+            .select(Action)
+            .where(Action.run_id == run.run_id)
+            .where(Action.outcome != ActionOutcome.BLOCKED_BY_GUARDRAIL)
+            .with_only_columns(func.count())
+        )
+        or 0
+    )
+    return executed >= rules.max_attempts
+
+
+def _write_action(
+    session: Session,
+    run: PlaybookRun,
+    case: RevenueLeakCase,
+    action_type: ActionType,
+    *,
+    outcome: ActionOutcome,
+    block_reason: BlockReason | None,
+    now: datetime,
+) -> Action:
+    blocked = outcome is ActionOutcome.BLOCKED_BY_GUARDRAIL
+    action = Action(
+        merchant_id=case.merchant_id,
+        primary_case_id=case.case_id,
+        run_id=run.run_id,
+        action_type=action_type,
+        channel=channel_for(action_type),
+        executed_at=None if blocked else now,
+        outcome=outcome,
+        block_reason=block_reason,
+        cost=None,
+    )
+    return write_action_and_event(
+        session, action=action, actor=Actor.AGENT, counterparty_id=case.counterparty_id
+    )
+
+
+def _step_event(
+    session: Session,
+    case: RevenueLeakCase,
+    run: PlaybookRun,
+    from_step: str,
+    to_step: str | None,
+    edge_condition: str | None,
+    outcome: ActionOutcome,
+) -> None:
+    append_case_event(
+        session,
+        case_id=case.case_id,
+        event_type=CaseEventType.STEP_TRANSITIONED,
+        payload={
+            "run_id": str(run.run_id),
+            "from_step_id": from_step,
+            "to_step_id": to_step,
+            "edge_condition": edge_condition,
+            "outcome": ActionOutcome(outcome).value,
+        },
+        actor=Actor.AGENT,
+        counterparty_id=case.counterparty_id,
+    )
+
+
+def _transition_case(
+    session: Session, case: RevenueLeakCase, target: CaseStatus, trigger: str
+) -> None:
+    from torque.state_machine import transition_case
+
+    transition_case(session, case, target, trigger=trigger, actor=Actor.AGENT)
+
+
+def _consume_retry_budget(session: Session, case: RevenueLeakCase) -> None:
+    """Increment the rail counter for a card/UPI retry that actually fired, in the
+    same transaction as the Action write. NACH re-presentment consumes no counter
+    here — dishonour counts advance only on a bank return file (external, D-072).
+    Card/UPI rows are row-locked for the update so a concurrent tick cannot
+    double-count (item 12)."""
+    scope = TenantScope(session, case.merchant_id)
+    mandate_type = G._mandate_type_of(case)
+    mandate_id = (case.context or {}).get("mandate_id") or ""
+
+    if mandate_type is MandateType.UPI_AUTOPAY:
+        budget = session.scalars(
+            scope.select(UPIRetryBudget)
+            .where(UPIRetryBudget.mandate_id == mandate_id)
+            .with_for_update()
+        ).first()
+        if budget is not None:
+            budget.attempts_used += 1
+            session.flush()
+        return
+    if mandate_type is MandateType.NACH:
+        return
+    # CARD (payment leg, or subscription card).
+    token = G._card_token_hash(session, case)
+    if not token:
+        return
+    budget = session.scalars(
+        scope.select(CardRetryBudget)
+        .where(CardRetryBudget.card_token_hash == token)
+        .with_for_update()
+    ).first()
+    if budget is not None:
+        budget.attempts_used_24h += 1
+        budget.attempts_used_30d += 1
+        session.flush()

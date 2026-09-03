@@ -539,6 +539,51 @@ violation**.
   `HELPER` (selection map).
 - **Tests:** `tests/test_module4_catalog.py`, `tests/test_module4_selection.py`.
 
+## INV-43 — At most one pending timer per run; step execution is exactly-once (Module 5)
+- **Domain:** `scheduled_job`, `torque.execution.scheduler` / `runner`.
+- **Invariant:** a `PlaybookRun` has at most one pending `scheduled_job`
+  (`UNIQUE(run_id)`). The poller claims due rows `FOR UPDATE SKIP LOCKED`, so two
+  workers never process the same job; each execution tick (action + budget +
+  `active_step_id` + `CaseEvent`s + the job row) commits or rolls back as ONE
+  transaction. A crash rolls the tick back leaving the timer for the next poll
+  (at-least-once delivery, exactly-once effect) — no double action, no double
+  attempt consumption, no double advancement.
+- **Enforcement:** `DB` (`UNIQUE(run_id)` + `SKIP LOCKED`) + `HELPER`
+  (single-transaction `execute_due_job`).
+- **Tests:** `tests/test_module5_idempotency.py` (incl. two-connection concurrency),
+  `tests/test_module5_scheduler.py`.
+
+## INV-44 — A run executes only on its pinned playbook version (Module 5)
+- **Domain:** `torque.execution.runner`.
+- **Invariant:** runtime traversal reads the graph + base rules of the run's pinned
+  `(playbook_id, playbook_version)` — never `MAX(version)`. Publishing a newer
+  version never alters an in-flight run's graph, `active_step_id` space, or
+  effective stopping rules (which merge the merchant override onto the pinned base).
+- **Enforcement:** `HELPER` (`runner` / `resolve_effective_stopping_rules` load by
+  the composite key) atop the composite FK (D-024).
+- **Tests:** `tests/test_module5_execution.py::test_execution_uses_pinned_version_not_latest`.
+
+## INV-45 — Execution reads only the run's own merchant's data (Module 5)
+- **Domain:** every lookup in `torque.execution.runner` / `guardrails` / `scheduler`.
+- **Invariant:** the run, case, source Event, rail budgets (Card/UPI/NACH), systemic
+  event, and the timer are all reached through `TenantScope(job.merchant_id)` — a
+  merchant-A run never reads or consumes merchant-B data even when a card token /
+  mandate id is shared across tenants. The poller is cross-merchant but processes
+  each job in its own merchant scope.
+- **Enforcement:** `HELPER` (`TenantScope` on every lookup).
+- **Tests:** `tests/test_module5_tenancy.py`.
+
+## INV-46 — The UPI AutoPay hard cap is never exceeded (Module 5)
+- **Domain:** `torque.execution.guardrails` + `runner` retry-budget consumption.
+- **Invariant:** a UPI AutoPay `RETRY_PAYMENT` fires only while
+  `attempts_used < 3 AND mandate_cancelled_at IS NULL` (§3 gate); a firing retry
+  increments `attempts_used` by exactly one in the same transaction, under a row
+  lock (`FOR UPDATE`), so concurrent ticks cannot double-count and a forbidden
+  attempt cannot execute. Module 5 never fabricates `mandate_cancelled_at` (NPCI /
+  Module 2 owns it) or NACH return data (bank return file, external).
+- **Enforcement:** `HELPER` (`upi_attempt_gate_open` + row-locked increment).
+- **Tests:** `tests/test_module5_guardrails.py`, `tests/test_module5_idempotency.py`.
+
 ---
 
 ## Invariants that are PLANNED (not yet enforced anywhere)

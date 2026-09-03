@@ -515,6 +515,102 @@ def make_case(db, make_merchant, make_counterparty, make_event):
     return _make
 
 
+# --- Module 5 execution fixtures -----------------------------------------
+
+
+@pytest.fixture()
+def seeded_catalog(db):
+    """The Module 4 playbook catalog, seeded through the ORM (validated graphs)."""
+    from torque.policy.catalog import seed_catalog
+
+    seed_catalog(db)
+
+
+@pytest.fixture()
+def make_active_run(db, seeded_catalog, make_merchant, make_counterparty, make_event):
+    """Create a diagnosed `PLAYBOOK_ACTIVE` case, run Module 4 `activate_case` to
+    instantiate its version-pinned run, and arm the Module 5 timer. Returns
+    `(case, run, job)`. `payday=False` (default) writes
+    `payday_cycle_override_enabled=False` so retry steps fire on their static
+    offset rather than a month-end target."""
+    from torque.enums import CaseStatus, LegType
+    from torque.execution import schedule_run
+    from torque.models import RevenueLeakCase
+    from torque.policy.engine import ActivationOutcome, activate_case
+
+    def _make(
+        *,
+        leg=LegType.PAYMENT_DEGRADATION,
+        root_cause_code,
+        context=None,
+        merchant=None,
+        counterparty=None,
+        amount_at_risk=1000,
+        suggested_timing_adjustment=None,
+        payday=False,
+    ):
+        m = merchant or make_merchant(
+            risk_appetite_config={"payday_cycle_override_enabled": payday}
+        )
+        cp = counterparty or make_counterparty()
+        ev = make_event(m)
+        default_ctx = {} if leg is LegType.B2B_RECEIVABLE else {"gateway": "razorpay"}
+        case = RevenueLeakCase(
+            merchant_id=m.merchant_id,
+            leg_type=leg,
+            source_event_id=ev.event_id,
+            counterparty_id=cp.counterparty_id,
+            amount_at_risk=amount_at_risk,
+            context=context if context is not None else default_ctx,
+            status=CaseStatus.PLAYBOOK_ACTIVE,
+            root_cause_code=root_cause_code,
+            suggested_timing_adjustment=suggested_timing_adjustment,
+        )
+        db.add(case)
+        db.flush()
+        outcome = activate_case(db, case_id=case.case_id)
+        assert outcome is ActivationOutcome.RUN_CREATED, outcome
+        from sqlalchemy import select as _select
+
+        from torque.models import PlaybookRun
+
+        run = db.scalars(
+            _select(PlaybookRun).where(PlaybookRun.case_id == case.case_id)
+        ).one()
+        job = schedule_run(db, run_id=run.run_id)
+        return case, run, job
+
+    return _make
+
+
+@pytest.fixture()
+def drain_run(db):
+    """Execute a run's scheduled steps to completion, advancing a virtual clock to
+    each step's `fire_at` (always in-window by construction). Returns the list of
+    `StepResult`s."""
+    from sqlalchemy import select as _select
+
+    from torque.execution import execute_due_jobs
+    from torque.models import PlaybookRun, ScheduledJob
+
+    def _drain(run, *, legs=None, max_iter=25):
+        from torque.enums import LegType
+
+        legs = legs or tuple(LegType)
+        results = []
+        for _ in range(max_iter):
+            job = db.scalars(
+                _select(ScheduledJob).where(ScheduledJob.run_id == run.run_id)
+            ).first()
+            if job is None:
+                break
+            results.extend(execute_due_jobs(db, leg_types=legs, now=job.fire_at))
+            db.refresh(run) if db.get(PlaybookRun, run.run_id) else None
+        return results
+
+    return _drain
+
+
 # --- Milestone 4 playbook fixtures ---------------------------------------
 
 VALID_STEPS_GRAPH = {

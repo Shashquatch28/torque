@@ -31,9 +31,13 @@ celery_app.conf.update(
     task_eager_propagates=_settings.celery_task_always_eager,
     timezone="UTC",
 )
-celery_app.autodiscover_tasks(["torque.ingestion", "torque.diagnosis", "torque.policy"])
+celery_app.autodiscover_tasks(
+    ["torque.ingestion", "torque.diagnosis", "torque.policy", "torque.execution"]
+)
 
-# Blueprint §2.5 (Milestone 7c): the systemic-detection job runs every 60s.
+# Repeatable beat jobs. §2.5 systemic detection (60s), plus the Module 5 §5.6
+# stratified execution pollers: 10s for PAYMENT_DEGRADATION's live-session window,
+# 60s for the other three legs' multi-day timelines.
 # Run the scheduler in dev with:
 #   uv run celery -A torque.ingestion.celery_app:celery_app beat
 celery_app.conf.beat_schedule = {
@@ -41,11 +45,20 @@ celery_app.conf.beat_schedule = {
         "task": "torque.ingestion.detect_systemic",
         "schedule": 60.0,
     },
+    "execution-poll-payment": {
+        "task": "torque.execution.poll_payment_jobs",
+        "schedule": 10.0,
+    },
+    "execution-poll-other": {
+        "task": "torque.execution.poll_other_jobs",
+        "schedule": 60.0,
+    },
 }
 
 # Import the task modules so the tasks register even without autodiscovery
-# (autodiscovery only fires for installed apps in some run modes). The Module 3
-# diagnosis task lives in its own package; it is registered here the same way.
+# (autodiscovery only fires for installed apps in some run modes). Each module's
+# tasks live in its own package; they are registered here the same way.
 from torque.diagnosis import tasks as _diagnosis_tasks  # noqa: E402,F401
+from torque.execution import tasks as _execution_tasks  # noqa: E402,F401
 from torque.ingestion import tasks as _tasks  # noqa: E402,F401
 from torque.policy import tasks as _policy_tasks  # noqa: E402,F401

@@ -953,17 +953,91 @@ definition contract — versioned `Playbook`, `MerchantPlaybookConfig`,
 
 ---
 
+## Module 5 — Execution & Orchestration — COMPLETE
+
+*(One module = one run = one audit. Built on the committed Module 4. The
+orchestration engine was a maintainer decision — Postgres-polling over Temporal,
+D-090.)*
+
+- **Commit:** *(uncommitted — maintainer commits after the audit)*. HEAD at
+  implementation time: `c17dd82` (committed Module 4).
+- **Migration:** **0015_scheduled_job** (additive: one table `scheduled_job`,
+  `UNIQUE(run_id)`, indexes on `merchant_id`/`fire_at`; reuses the `leg_type`
+  enum). `alembic head` → `0015`; up→down→up roundtrip green.
+- **Maintainer decision:** durable `PlaybookRun` execution uses the **§5.6
+  Postgres-polling** driver, not Temporal (resolves U-07; D-090). Module 5/6
+  guardrail line confirmed (D-092).
+- **Objective:** execute a version-pinned `PlaybookRun`'s graph at runtime —
+  resolve `active_step_id`, run §5.2 guardrails, execute the action (§5.4 stub),
+  record the outcome + `STEP_TRANSITIONED` atomically, advance the pointer, and
+  reschedule — driven by the polling timer.
+- **Scope delivered (`torque.execution` package):**
+  - **Polling driver:** `scheduled_job` model + migration 0015; `scheduler.py`
+    (`schedule_run`, `claim_due_jobs` with `FOR UPDATE SKIP LOCKED`,
+    `execute_due_jobs`); `tasks.py` two Celery-beat pollers (10 s
+    `PAYMENT_DEGRADATION` / 60 s others, §5.6) + beat-schedule wiring.
+  - **Runtime tick (`runner.execute_due_job`):** the §5.1 loop — stopping-rule
+    check → `allowed_hours` re-check (defer) → guardrails → execute → atomic
+    Action+CaseEvent (`write_action_and_event`) → `STEP_TRANSITIONED` → advance
+    `active_step_id` (Module 4's `traversal` rules) or finalize.
+  - **Timing (`timing.py`, D-025):** offset from previous completion; IST
+    `allowed_hours` deferral incl. overnight windows; payday substitution
+    (`next_month_end_working_day`); UPI peak-window re-defer. Distinguishes *step
+    offset* from *execution window*.
+  - **Guardrails (`guardrails.py`, §5.2, Module-5 half per D-092):** network
+    hard-stop, Card/UPI/NACH budgets, UPI hard-cap + peak-window defer, §5.2.3
+    pre-debit gap **with auto-insert self-heal**, systemic-hold block; quiet-hours
+    / UPI-window are defers.
+  - **Retry-budget consumption:** Card (`attempts_used_24h/_30d`) and UPI
+    (`attempts_used`) incremented once per fired retry, row-locked; NACH consumes
+    no counter (returns are external).
+  - **Executor (`executor.py`, §5.4):** internal stub, no external I/O,
+    monkeypatchable — the seam real adapters attach to.
+  - **Multi-case rendering (`rendering.py`, §4.4):** single vs `multi_case_template`
+    resolution + combined-amount context; reuses `ActionCase` attribution;
+    rejects superseded cases.
+  - **U-02 settled (D-091):** `STEP_TRANSITIONED` payload finalised
+    (`{run_id, from_step_id, outcome, to_step_id?, edge_condition?}`).
+- **State machine:** uses the existing `PLAYBOOK_ACTIVE → {ESCALATED_TO_HUMAN,
+  EXHAUSTED}` edges — **`state_machine.py` and `guards.py` byte-unchanged vs HEAD**.
+  Terminal mapping D-093.
+- **Idempotency / concurrency:** one pending timer per run + `SKIP LOCKED`
+  (INV-43); proven with two real DB connections. Atomic tick; tenant-scoped
+  (INV-45); version-pinned execution (INV-44); UPI cap never exceeded (INV-46).
+- **Decisions:** D-090 (polling driver), D-091 (STEP_TRANSITIONED / U-02), D-092
+  (Module 5/6 guardrail line), D-093 (dispatch deferral, executor stub, terminal
+  mapping).
+- **Deviations from blueprint:** none beyond the sanctioned Decision-C choice of
+  the fallback engine (D-090). `NETWORK_HARD_STOP` is used for both TIER_1 and
+  TIER_3 retry blocks (the `BlockReason` enum has no instrument-dead value; §5.2.1
+  names `INSTRUMENT_NOT_RECURRING_CAPABLE`, which is a `HardStopReason`).
+- **Deferred introduced:** Module 4 → 5 auto-dispatch trigger (D-093); real
+  channel adapters + the Outreach Coordinator + WhatsApp consent/template gate
+  (Module 6, D-092); a real Temporal option (D-090 leaves it a driver swap).
+- **Tests at completion:** **680** `def test_` functions (was 632); `pytest`
+  collects and passes **808** (was 754), 0 fail / 0 skip. Module 5 adds 7 test
+  files (48 functions). `ruff` clean. `alembic upgrade head` → `0015`; roundtrip
+  green. 1 cosmetic `StarletteDeprecationWarning`.
+- **Verification status:** complete + verified against a live Postgres. `pytest`
+  808 green, `ruff` clean, roundtrip green, `state_machine.py`/`guards.py` diffs
+  empty, migration 0015 applies.
+- **Recommended commit message:**
+  `Module 5: execution & orchestration — Postgres-polling driver, runtime traversal, guardrails, timing`
+
+---
+
 ## What comes next
 
-**Module 4 — Policy & Playbook Engine — COMPLETE.** Diagnosed `PLAYBOOK_ACTIVE`
-cases now select a catalog playbook and get a version-pinned `PlaybookRun` at
-their entry step (or escalate when no automated playbook applies). Next is
-**Module 5 — Execution / Orchestration** (the Temporal workflow per run: runtime
-graph traversal driving `active_step_id`, timing computation incl. the payday
-substitution + `allowed_hours` deferral, guardrail checks immediately before each
-action, the atomic `Action` + `CaseEvent` write, and settling U-02's
-`STEP_TRANSITIONED` payload). Do not start it without an approved scope.
+**Module 5 — Execution & Orchestration — COMPLETE.** Version-pinned runs now
+execute end-to-end on the Postgres-polling driver: guardrailed action execution,
+timing/payday/allowed-hours, retry-budget consumption, atomic audit, and terminal
+finalization. Next is **Module 6 — Compliance & Cross-Leg Guardrail Engine** (the
+canonical `GuardrailEngine.check()` facade, the Outreach Coordinator — quiet
+period / merge / defer — the WhatsApp consent+template gate, escalation-ceiling →
+`ESCALATED_TO_HUMAN`, and the human queue). Do not start it without an approved
+scope.
 
-Deferred items that do **not** block Module 5: the Module 3 → Module 4 (D-088)
-and Module 2 → Module 3 (D-080) auto-dispatch triggers; the §5.3 first-touch MAC
-lookup (D-083, blocked on U-08); the standing Module-2 refinements.
+Deferred items that do **not** block Module 6: the Module 4 → 5 auto-dispatch
+trigger (D-093); real channel adapters (§5.4); the earlier inter-module dispatch
+triggers (D-080 / D-088); the §5.3 first-touch MAC lookup (D-083, U-08); the
+standing Module-2 refinements; a real Temporal engine (D-090).

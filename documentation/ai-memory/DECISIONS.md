@@ -1508,6 +1508,91 @@ BY D-0NN`.
   version pinning meaningful for rules as well as graph.
 - **Status:** IN FORCE
 
+## D-090 — Durable `PlaybookRun` execution uses the Postgres-polling driver, not Temporal
+- **Milestone:** Module 5 — Execution & Orchestration
+- **Decision:** Which durable orchestration engine drives multi-day `PlaybookRun`
+  execution (the open half of U-07 / blueprint Decision C)?
+- **Chosen:** The **Postgres-polling fallback** (§5.6), selected by the maintainer
+  when Module 5 was proposed. A `scheduled_job(job_id, merchant_id, run_id UNIQUE,
+  case_id, fire_at, leg_type)` table (migration **0015**) + two stratified
+  Celery-beat pollers (10 s for `PAYMENT_DEGRADATION`, 60 s for the other three
+  legs). Due rows are claimed `FOR UPDATE SKIP LOCKED`; each step executes in one
+  transaction that advances `fire_at` (run continues) or deletes the row (terminal).
+- **Alternatives:** Temporal (OSS, self-hosted) — the blueprint's §5.1 stated
+  preference; rejected for the build window because it needs a self-hosted cluster
+  + the `temporalio` SDK, whereas polling reuses the existing Postgres + Celery
+  stack and is fully testable in the harness.
+- **Reasoning:** the blueprint fully specifies the fallback ("a working fallback is
+  already specified either way", Part E item 8); no new infra/dependency; the
+  durable state lives entirely in Postgres, never in Celery/Redis task state (§5.5).
+- **Consequence:** resolves U-07's remaining half. Celery is the repeatable-timer
+  *trigger* only. Migrating to Temporal later is a driver swap behind the same
+  `execute_due_job` tick.
+- **Status:** IN FORCE
+
+## D-091 — `STEP_TRANSITIONED` payload settled (resolves U-02)
+- **Milestone:** Module 5
+- **Decision:** Finalise the provisional `CaseEvent.STEP_TRANSITIONED` payload
+  (U-02 / Part E item 3), which Module 5 is the first and only writer of.
+- **Chosen:** `{ run_id, from_step_id, outcome, to_step_id?, edge_condition? }`.
+  `run_id` adds run attribution (a case may host successive runs; `CaseEvent` has no
+  `run_id` column — D-005 — so it lives in the payload). `to_step_id` /
+  `edge_condition` are nullable: a terminal step has no next step / edge. `outcome`
+  is the `ActionOutcome` that drove edge selection. This reconstructs
+  `previous → outcome → next` with case+run attribution and the `CaseEvent`
+  timestamp.
+- **Alternatives:** keep the 4-field provisional shape (no run attribution; a
+  required `to_step_id` cannot represent termination); add a `run_id` column to
+  `CaseEvent` (contradicts D-005's single-history-mechanism minimalism).
+- **Reasoning:** Module 5 owns settling this (Part E item 3); the additions are the
+  minimum needed for faithful reconstruction, not speculative fields.
+- **Consequence:** U-02 moves to Resolved. No existing writer changed (Module 5 is
+  the first). No `CaseEvent` schema change.
+- **Status:** IN FORCE
+
+## D-092 — Module 5 runs the retry/systemic/timing guardrails; the GuardrailEngine facade + Outreach Coordinator are Module 6
+- **Milestone:** Module 5
+- **Decision:** Where does the §5.2 guardrail sequence split between Module 5 and
+  Module 6 (maintainer-confirmed line)?
+- **Chosen:** **Module 5** runs, immediately before each action: network hard-stop,
+  the rail budgets (Card/UPI/NACH), the §5.2.3 pre-debit 24 h gap **with self-heal
+  auto-insert**, and the systemic-hold check; it treats quiet-hours and the UPI
+  execution window as **defers** (reschedule the timer), not failures.
+  **Module 6** later adds the canonical `GuardrailEngine.check()` facade, the
+  Outreach Coordinator (quiet-period / merge / defer policy), and the WhatsApp
+  consent + approved-template gate. `torque.execution.guardrails` is structured so
+  Module 6 extends it rather than replacing it.
+- **Alternatives:** pull the Outreach Coordinator + WhatsApp gate into Module 5 now
+  (scope creep into Module 6); enforce nothing (unsafe once real channels attach).
+- **Reasoning:** the demo executor performs no real contact, so deferring the
+  contact-consent gates to Module 6 is safe; the retry-rail + systemic + timing
+  checks are squarely Module 5's execution concern.
+- **Consequence:** WhatsApp `whatsapp_opt_in`/template gating and the Outreach
+  Coordinator remain Module 6 (DEFERRED.md). Systemic hold is a **BLOCK** that
+  follows the `on_blocked` edge (§5.2 literal), not an invented state transition.
+- **Status:** IN FORCE
+
+## D-093 — Module 4 → Module 5 dispatch, action channels, and terminal mapping
+- **Milestone:** Module 5
+- **Decision:** Assorted execution-shape choices with a single sensible answer.
+- **Chosen:**
+  - **Dispatch trigger deferred:** `schedule_run` (arm a run's first timer) is not
+    auto-called by Module 4's `activate_case`; the Module 4 → 5 hand-off is left to
+    the orchestration layer, consistent with the earlier inter-module dispatch
+    deferrals (D-080 / D-088). Engine + poller are ready and invocable.
+  - **Executor is an internal stub (§5.4):** `torque.execution.executor.run_action`
+    performs no external I/O and returns `SUCCESS` by default — the seam real
+    channel adapters attach to later. No provider integrations in demo scope.
+  - **Terminal → case status:** reaching an `ESCALATE_HUMAN` terminal node ⇒ case
+    `→ ESCALATED_TO_HUMAN`, run `ESCALATED`; any other terminal, or hitting
+    `max_attempts` / `max_duration_days`, ⇒ case `→ EXHAUSTED`, run `COMPLETED`.
+    Recovery closure (`RECOVERED`/`CANCELLED`) stays Module 7's out-of-band job.
+  - **`max_attempts`** counts executed (non-blocked) Actions for the run — a safety
+    bound atop the acyclic graph.
+- **Reasoning:** each uses an existing legal state-machine edge and the established
+  deferral pattern; none invents domain behaviour or touches `state_machine.py`.
+- **Status:** IN FORCE
+
 ---
 
 ## Notes not recorded as decisions

@@ -25,6 +25,7 @@ from torque.models.playbook_run import PlaybookRun
 from torque.models.pre_debit_notification import PreDebitNotification
 from torque.models.promise_to_pay import PromiseToPay
 from torque.models.revenue_leak_case import RevenueLeakCase
+from torque.models.scheduled_job import ScheduledJob
 from torque.models.systemic_event import SystemicEvent
 from torque.models.upi_retry_budget import UPIRetryBudget
 
@@ -50,6 +51,7 @@ __all__ = [
     "PreDebitNotification",
     "PromiseToPay",
     "RevenueLeakCase",
+    "ScheduledJob",
     "SystemicEvent",
     "UPIRetryBudget",
 ]

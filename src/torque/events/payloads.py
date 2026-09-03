@@ -92,11 +92,16 @@ class HumanResolvedPayload(_Payload):
 
 
 class StepTransitionedPayload(_Payload):
-    # PROVISIONAL — Part E item 3. Shape not yet independently confirmed.
-    from_step_id: str | None = None
-    to_step_id: str
-    edge_condition: str
+    # SETTLED by Module 5 (D-091, resolves U-02 / Part E item 3). The execution
+    # loop is the first and only writer, so the shape is fixed to what
+    # reconstructing a run's traversal actually needs: run attribution, the step
+    # just executed, the outcome that drove edge selection, and the next step —
+    # nullable because a terminal node has no next step / edge (the run finalized).
+    run_id: str
+    from_step_id: str
     outcome: str
+    to_step_id: str | None = None
+    edge_condition: str | None = None
 
 
 PAYLOAD_MODELS: dict[CaseEventType, type[_Payload]] = {

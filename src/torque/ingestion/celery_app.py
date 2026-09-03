@@ -31,7 +31,7 @@ celery_app.conf.update(
     task_eager_propagates=_settings.celery_task_always_eager,
     timezone="UTC",
 )
-celery_app.autodiscover_tasks(["torque.ingestion"])
+celery_app.autodiscover_tasks(["torque.ingestion", "torque.diagnosis"])
 
 # Blueprint §2.5 (Milestone 7c): the systemic-detection job runs every 60s.
 # Run the scheduler in dev with:
@@ -43,6 +43,8 @@ celery_app.conf.beat_schedule = {
     },
 }
 
-# Import the task module so the tasks register even without autodiscovery
-# (autodiscovery only fires for installed apps in some run modes).
+# Import the task modules so the tasks register even without autodiscovery
+# (autodiscovery only fires for installed apps in some run modes). The Module 3
+# diagnosis task lives in its own package; it is registered here the same way.
+from torque.diagnosis import tasks as _diagnosis_tasks  # noqa: E402,F401
 from torque.ingestion import tasks as _tasks  # noqa: E402,F401

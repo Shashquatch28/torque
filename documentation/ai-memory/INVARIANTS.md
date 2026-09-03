@@ -451,6 +451,49 @@ violation**.
   (constant-time) + `UNIQUE(idempotency_key)` (INV-18).
 - **Tests:** `tests/test_checkout_injection.py`.
 
+## INV-35 — A case is diagnosed at most once; diagnosis is idempotent (Module 3)
+- **Domain:** `torque.diagnosis.diagnose_case`.
+- **Invariant:** only a `DETECTED` case, or a `DIAGNOSING` case that has no
+  `root_cause_code` yet (the §2.5 systemic-resume entry state), that is **not**
+  superseded (`superseded_by_case_id IS NULL`) is diagnosable. Every other case —
+  already-diagnosed, terminal, `SYSTEMIC_HOLD`, superseded, or missing — is a
+  `NOOP` with no writes. Repeated task execution / redelivery therefore never
+  produces a second diagnosis or a duplicate `DIAGNOSIS_COMPLETED` event.
+- **Enforcement:** `HELPER` — the `_is_eligible` gate in `engine.py`.
+- **Tests:** `tests/test_diagnosis_idempotency.py`.
+
+## INV-36 — Diagnosis is atomic (Module 3)
+- **Domain:** `torque.diagnosis.diagnose_case`.
+- **Invariant:** the status transition(s) (`DETECTED → DIAGNOSING → {PLAYBOOK_ACTIVE
+  | ESCALATED_TO_HUMAN}`), the case-field writes (`root_cause_code`,
+  `root_cause_label`, `diagnosis_confidence`, `suggested_timing_adjustment`,
+  `context.is_hard_decline`), and the `DIAGNOSIS_COMPLETED` `CaseEvent` all commit
+  together or not at all. A failure at any point leaves the case exactly as it was
+  (`DETECTED`, no root cause, no event).
+- **Enforcement:** `HELPER` — the single `atomic(session)` block in `engine.py`;
+  the caller's `session_scope()` for the outer transaction.
+- **Tests:** `tests/test_diagnosis_atomicity.py`.
+
+## INV-37 — Diagnosis reads only the case's own merchant's evidence (Module 3)
+- **Domain:** every supporting lookup in `engine.py`.
+- **Invariant:** the rail budgets (`UPIRetryBudget`, `NACHRetryPolicy`), the
+  counterparty relationship (`MerchantCounterparty`), the invoices (`B2BInvoice`),
+  and the source `Event` are all read through `TenantScope(session,
+  case.merchant_id)`. A merchant-A case is never diagnosed with merchant-B
+  evidence, even when a mandate id / counterparty is shared across merchants.
+- **Enforcement:** `HELPER` — `TenantScope.select` / `.get` inject the
+  `merchant_id` filter (INV-01 family).
+- **Tests:** `tests/test_diagnosis_tenancy.py`.
+
+## INV-38 — Confidence routing follows the policy threshold `T` (Module 3)
+- **Domain:** `torque.diagnosis.diagnose_case`.
+- **Invariant:** a diagnosed case routes `DIAGNOSING → ESCALATED_TO_HUMAN` iff
+  `diagnosis_confidence < T` and `→ PLAYBOOK_ACTIVE` otherwise, where `T =
+  PolicyConfig.diagnosis_confidence_threshold` (a policy value, Decision E; launch
+  default 0.65). `T` is read at diagnosis time, never hardcoded at the call site.
+- **Enforcement:** `HELPER` — `_apply_result` reads `_diagnosis_confidence_threshold()`.
+- **Tests:** `tests/test_diagnosis_routing.py`.
+
 ---
 
 ## Invariants that are PLANNED (not yet enforced anywhere)

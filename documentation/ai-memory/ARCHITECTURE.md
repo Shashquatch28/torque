@@ -21,7 +21,7 @@ Do not describe `PLANNED` / `DEFERRED` behaviour as if it exists.
 |---|---|---|
 | 1 — Core Data Model | shared case object, tenancy, PII/DPDP, event sourcing, retry-rail compliance entities | `IMPLEMENTED` (M1–M6b) |
 | 2 — Signal Ingestion | webhook intake, signature verify, idempotency, out-of-order buffer, cross-leg dedup, systemic detection job | **`IMPLEMENTED` (Module 2 complete)** — all four legs: Leg 1 `payment.failed` (90s buffer, `PAYMENT_DEGRADATION`), Leg 3 `subscription.charged.failed` (30s buffer, `SUBSCRIPTION_FAILURE`, UPI/NACH/Card rail seeding), Leg 2 `checkout.abandoned` (signed `/internal` injection endpoint, no buffer, `CHECKOUT_ABANDONMENT`), Leg 4 `invoice.overdue` (no buffer, `B2BInvoice` + §3 grouping, `B2B_RECEIVABLE`); **bidirectional** §2.4 cross-leg Merge; §2.5 `NETWORK_WIDE` systemic detection + hold/resume + §2.7 hold-on-ingest across all legs; `PLAYBOOK_ACTIVE→SYSTEMIC_HOLD` edge added (dormant). Celery/Redis broker-only + Celery beat. Remaining *refinements* (not blockers): `ISSUER_SPECIFIC` detection (U-08); systemic rollup over subscription failures (D-073); a real storefront pixel (Part D item 1); dispatch to Module 3 |
-| 3 — Diagnosis Engine | root-cause classification + confidence; owns `root_cause_code` enum | `PLANNED` |
+| 3 — Diagnosis Engine | root-cause classification + confidence; owns `root_cause_code` enum | **`IMPLEMENTED` (Module 3 complete)** — `torque.diagnosis` package: rule-based per-leg classification (§3.2), `T = 0.65` confidence routing to `PLAYBOOK_ACTIVE`/`ESCALATED_TO_HUMAN` (§3.3), `is_hard_decline` set here (D-058/D-084), `suggested_timing_adjustment` (§3.4, new col), one `DIAGNOSIS_COMPLETED` event per case, idempotent + atomic + tenant-scoped. Auto-dispatch from Module 2 (D-080) and §5.3 first-touch MAC lookup (D-083) deferred. See §8C |
 | 4 — Policy & Playbook Engine | root cause → bounded action graph; playbook authoring/validation (validation part `IMPLEMENTED` in M4) | `PLANNED` (runtime) |
 | 5 — Execution / Orchestration | channel adapters, retry-budget enforcement, atomic Action+CaseEvent write (primitive `IMPLEMENTED` in M5), Temporal workflow | `PLANNED` (runtime) |
 | 6 — Compliance & Cross-Leg Guardrail Engine | `GuardrailEngine.check()`, Outreach Coordinator, escalation ceiling, human queue | `PLANNED` |
@@ -64,11 +64,15 @@ SQLAlchemy 2.0 models on the shared `Base` with `NAMING_CONVENTION`.
   `DETECTED`), `root_cause_code`/`root_cause_label` (**plain strings** — enum
   owned by Module 3, deliberately not frozen), `network_directive_mac_code` +
   `network_directive_tier` (**two discrete columns, not a JSON blob**),
-  `diagnosis_confidence` float, `context` JSONB (typed per leg),
-  `control_group` (denormalized, read-only), `superseded_by_case_id` self-FK,
-  `recovery_type` + `recovered_amount` (**Module-7-only writes**), `opened_at`,
-  `closed_at`. CHECKs: `diagnosis_confidence` ∈ [0,1] or NULL;
-  `amount_at_risk >= 0`; `recovered_amount >= 0` or NULL. `IMPLEMENTED`.
+  `diagnosis_confidence` float (**written by Module 3**),
+  `suggested_timing_adjustment` `VARCHAR(64)` nullable (**§3.4 payday-cycle hint,
+  written by Module 3**, migration `0014`, D-079), `context` JSONB (typed per
+  leg), `control_group` (denormalized, read-only), `superseded_by_case_id`
+  self-FK, `recovery_type` + `recovered_amount` (**Module-7-only writes**),
+  `opened_at`, `closed_at`. CHECKs: `diagnosis_confidence` ∈ [0,1] or NULL;
+  `amount_at_risk >= 0`; `recovered_amount >= 0` or NULL. `root_cause_code` /
+  `root_cause_label` / `diagnosis_confidence` / `suggested_timing_adjustment` are
+  written by Module 3 (§9); `is_hard_decline` (in `context`) likewise. `IMPLEMENTED`.
 - **Typed leg contexts** (`src/torque/contexts/`, Pydantic, `extra="forbid"`):
   `PaymentDegradationContext` (`decline_code?` — raw Razorpay `error_code`,
   `gateway`, `retry_count`, `is_hard_decline: bool | None` — **default `None`;
@@ -245,7 +249,11 @@ Notes:
   with `values_callable` on any column that binds it.
 - **`WhatsAppTemplateCategory`**: `UTILITY`, `MARKETING`. `AUTHENTICATION`
   intentionally omitted (`DEFERRED` — add via `ALTER TYPE ... ADD VALUE`).
-- `root_cause_code` is **NOT** an enum here — owned by Module 3, `PLANNED`.
+- `root_cause_code` is **NOT** an enum in `enums.py` — owned by Module 3. Now
+  `IMPLEMENTED` as `torque.diagnosis.root_causes.RootCauseCode` (a `StrEnum`, 23
+  §3.1 members; `.value` persisted to the plain `String` column — the DB column
+  stays `String`, deliberately not a Postgres enum, so §3.1 refinement needs no
+  migration). See §8C.
 
 ---
 
@@ -544,8 +552,52 @@ not `ORM-GUARD`.
 **Not here:** `ISSUER_SPECIFIC` systemic detection (U-08); systemic rollup for
 `subscription.charged.failed` (D-073); per-decline budget increments /
 `mandate_cancelled_at` (Module 5); real NACH return code (Module 5); a real
-storefront pixel (Part D item 1); token hashing; dispatch to Module 3; a
+storefront pixel (Part D item 1); token hashing; dispatch to Module 3 (D-080); a
 `docker-compose` worker/beat service.
+
+---
+
+## 8C. Diagnosis Engine — `torque.diagnosis` — `IMPLEMENTED` (Module 3)
+
+`diagnose_case(session, case_id=...)` converts a Module-2 canonical case into a
+diagnosis and routes it. Package layout:
+
+- **`root_causes.py`** — `RootCauseCode` (the Module-3-owned §3.1 vocabulary, a
+  `StrEnum`; `.value` → the plain `String` column). `VALID_BY_LEG` (per-leg legal
+  sets), `is_hard_decline_for` (derives the PAYMENT_DEGRADATION verdict from the
+  code, D-084), `timing_hint_for` (§3.4 payday hint for the two NSF codes, D-079),
+  `LABELS` (human `root_cause_label`).
+- **`decline_codes.py`** — Razorpay decline-code → `DeclineCategory` + base
+  confidence (known 0.75 / opaque 0.4, §3.2.2). A **demo-scope** seed table, same
+  posture as the `MacCodeRegistry` seed (Decision M / Part E item 1).
+- **`classifier.py`** — pure, DB-free per-leg rules → `DiagnosisResult`
+  (`root_cause_code`, `diagnosis_confidence`, `reasoning`, `is_hard_decline?`,
+  `suggested_timing_adjustment?`). Payment & subscription share the step 1–3 path
+  (TIER_1/TIER_3 directive precedence 0.95 → decline lookup → missing-code
+  fallback); subscription adds the §3.2.4 mandate **facts** first (1.0, D-082).
+  Checkout classifies `(drop_stage, payment_method_attempted)` (every band < T);
+  B2B buckets `days_overdue × promise_keeping_rate` (established 0.8 / cold-start
+  0.4, D-084).
+- **`engine.py`** — the orchestrator: `_is_eligible` gate (INV-35), tenant-scoped
+  input gathering (rail budgets, invoices, `MerchantCounterparty`, source `Event`
+  — INV-37), one `atomic()` block that transitions the case, writes the diagnosis
+  fields (+ `context.is_hard_decline` for payment), appends the one
+  `DIAGNOSIS_COMPLETED` event, and routes on `T` (INV-36/38). Returns
+  `DiagnosisOutcome` (`NOOP` | `ROUTED_TO_PLAYBOOK` | `ESCALATED`).
+- **`tasks.py`** — `diagnose_case_task` (Celery, registered via
+  `celery_app.autodiscover_tasks([... , "torque.diagnosis"])` + explicit import).
+
+**State machine:** uses the pre-existing `DETECTED → DIAGNOSING → {PLAYBOOK_ACTIVE
+| ESCALATED_TO_HUMAN}` edges only — `state_machine.py` byte-unchanged. Handles
+both the fresh `DETECTED` entry and the §2.5-resumed `DIAGNOSING` entry (skips the
+`DETECTED` hop).
+
+**Not here:** the Module 2 → Module 3 auto-dispatch trigger (D-080 — the engine +
+task are ready, no leg enqueues them); the §5.3 first-touch MAC-code lookup at
+diagnosis time (D-083, blocked on U-08 — Module 3 *consumes* an existing
+`network_directive_tier` but extracts no MAC code); playbook selection /
+instantiation (Module 4); any retry/outreach/Temporal (Module 5); scoring
+(Module 8). No new `CaseEventType`, no state-machine edge, no `guards.py` change.
 
 ---
 
@@ -702,8 +754,10 @@ what remains is **not Module 2's job**: no `ISSUER_SPECIFIC` systemic detection
 (U-08), no systemic rollup over `subscription.charged.failed` (D-073), no
 per-decline budget increments / `mandate_cancelled_at` (Module 5), no real NACH
 return code (Module 5), no real storefront pixel (Part D item 1), no card-token
-hashing, no `Event`→Diagnosis dispatch, no code that drives
-`PLAYBOOK_ACTIVE → SYSTEMIC_HOLD` (edge legal but dormant). No diagnosis, no
-playbook runtime traversal, no channel adapters, no
-`GuardrailEngine`, no Outreach Coordinator, no reconciliation, no scoring, no
-reporting, no UI, no `MacCodeRegistry` full seed, no `root_cause_code` enum.
+hashing, no code that drives `PLAYBOOK_ACTIVE → SYSTEMIC_HOLD` (edge legal but
+dormant). **Module 3 diagnosis is now `IMPLEMENTED`** (§8C) — but with no
+automatic `Event`→Diagnosis dispatch from ingestion (D-080; the engine + task are
+ready, nothing enqueues them) and no §5.3 first-touch MAC-code lookup at diagnosis
+time (D-083, blocked on U-08). Still absent: no playbook selection or runtime
+traversal, no channel adapters, no `GuardrailEngine`, no Outreach Coordinator, no
+reconciliation, no scoring, no reporting, no UI, no `MacCodeRegistry` full seed.

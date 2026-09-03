@@ -105,6 +105,17 @@ class RevenueLeakCase(Base, TenantScoped, TimestampMixin):
     # Stored on every case from day one for calibration (Decision E).
     diagnosis_confidence: Mapped[float | None] = mapped_column(Float)
 
+    # Set by the Diagnosis Engine (Module 3 §3.4) alongside root_cause_code, a
+    # SEPARATE signal from diagnosis_confidence: the payday-cycle retry-timing
+    # hint (e.g. "next_month_end_working_day") that Module 4 §4.3 applies only
+    # when the merchant's payday_cycle_override is enabled. A symbolic label, not
+    # a computed date — the concrete fire time is Module 4/5's to derive. Blueprint
+    # Part A predates this diagnosis output (a Part-C-style Module-1 addition); it
+    # has no other persistence home (the DIAGNOSIS_COMPLETED payload schema is
+    # closed and the typed leg contexts forbid extra keys). Nullable — most root
+    # causes emit no timing hint. See D-079.
+    suggested_timing_adjustment: Mapped[str | None] = mapped_column(String(64))
+
     # Strict typed model per leg_type, validated at the ORM boundary.
     context: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
 

@@ -805,15 +805,95 @@ per-milestone history for Legs 1 & 3 + systemic detection.)*
 
 ---
 
+## Module 3 — Diagnosis Engine — COMPLETE
+
+*(One module = one implementation run = one audit. This section closes Module 3,
+built in one continuous run on top of the committed Module 2.)*
+
+- **Commit:** *(uncommitted — maintainer commits after the audit)*. HEAD at
+  implementation time: `c71c90e` ("Additional Commit" — the committed Module 2).
+- **Migration:** **0014_diagnosis_timing** (additive; one nullable column
+  `revenue_leak_case.suggested_timing_adjustment VARCHAR(64)`; no table, no enum).
+  `alembic head` → `0014`; up→down→up roundtrip green.
+- **Objective:** convert a Module-2 canonical `RevenueLeakCase` into
+  `root_cause_code` / `root_cause_label` / `diagnosis_confidence` /
+  `suggested_timing_adjustment` (and, for PAYMENT_DEGRADATION, `is_hard_decline`),
+  then route it by the `T = 0.65` confidence threshold — `DIAGNOSING →
+  PLAYBOOK_ACTIVE` (≥ T) or `DIAGNOSING → ESCALATED_TO_HUMAN` (< T, Part C item 1).
+- **Scope delivered:**
+  - **`torque.diagnosis` package** (new): `root_causes.py` (the Module-3-owned
+    `RootCauseCode` §3.1 vocabulary — 23 members, `.value` persisted to the plain
+    `String` column; per-leg valid sets; `is_hard_decline` and payday-timing
+    derivations; labels), `decline_codes.py` (Razorpay decline-code → semantic
+    category + confidence; known 0.75 / opaque 0.4), `classifier.py` (pure per-leg
+    rules → `DiagnosisResult`), `engine.py` (`diagnose_case` orchestrator:
+    eligibility, tenant-scoped input gathering, atomic persistence, confidence
+    routing), `tasks.py` (`diagnose_case_task` Celery task).
+  - **Per-leg diagnosis (§3.2):** *Payment/Subscription* share the step 1–3 path
+    — TIER_1/TIER_3 `network_directive` precedence (0.95) → decline-code lookup
+    (known 0.75 / opaque 0.4, opaque deliberately < T) → missing-code gateway
+    timeout (0.5); subscription adds the §3.2.4 mandate **facts** first
+    (`NACH_CLEARING_PENDING` / `UPI_AUTOPAY_CAP_EXHAUSTED`, 1.0, D-082) and reads
+    its decline code from the source Event (D-081). *Checkout* classifies
+    `(drop_stage, payment_method_attempted)` — every band < T, so checkout always
+    escalates. *B2B* buckets `days_overdue × promise_keeping_rate`, established 0.8
+    / cold-start 0.4 (D-084).
+  - **`is_hard_decline`** now owned and written by Module 3 (D-058 honoured;
+    D-084 derivation), only for PAYMENT_DEGRADATION, only when the verdict is not
+    `None`.
+  - **`suggested_timing_adjustment`** persisted to the new case column (D-079).
+  - **Audit:** one `DIAGNOSIS_COMPLETED` `CaseEvent` per diagnosis (existing type
+    / payload schema — **no new `CaseEventType`**), `actor = AGENT`, `reasoning`
+    populated (UI "Agent Reasoning"); the status changes ride the existing
+    `STATUS_CHANGED` events.
+- **State machine:** exercises the pre-existing `DETECTED → DIAGNOSING`,
+  `DIAGNOSING → PLAYBOOK_ACTIVE`, `DIAGNOSING → ESCALATED_TO_HUMAN` edges — **no
+  new edge, no change to `state_machine.py`**. A §2.5-resumed `DIAGNOSING` case is
+  completed without the `DETECTED` hop.
+- **Idempotency:** eligible = `DETECTED`, or `DIAGNOSING` with no `root_cause_code`
+  yet, and not superseded. Already-diagnosed / terminal / `SYSTEMIC_HOLD` /
+  superseded / missing → `NOOP`. Repeated task execution is safe.
+- **Transactional atomicity:** the whole diagnosis (status transition(s) + case
+  fields + `DIAGNOSIS_COMPLETED`) runs in one `atomic()` unit; a mid-diagnosis
+  failure rolls everything back (verified by `test_diagnosis_atomicity.py`).
+- **Tenancy:** every supporting lookup (`UPIRetryBudget`, `NACHRetryPolicy`,
+  `MerchantCounterparty`, `B2BInvoice`, the source `Event`) is `TenantScope`d to
+  `case.merchant_id` — merchant-A cases never read merchant-B evidence (verified
+  by `test_diagnosis_tenancy.py`).
+- **Decisions:** D-079 (timing column), D-080 (no auto-dispatch from Module 2),
+  D-081 (subscription decline from Event), D-082 (mandate-fact precedence), D-083
+  (consume tier, no MAC extraction), D-084 (is_hard_decline derivation + demo
+  buckets).
+- **Deviations from blueprint:** none. (One Part-C-style Module-1 schema addition
+  — the timing column — surfaced by a later module's output, D-079.)
+- **Deferred work introduced:** the Module 2 → Module 3 auto-dispatch trigger
+  (D-080); the §5.3 first-touch MAC-code lookup at diagnosis time (D-083, blocked
+  on U-08).
+- **`state_machine.py` / `guards.py`:** **both byte-unchanged vs HEAD**
+  (`git diff HEAD` empty).
+- **Tests at completion:** **585** `def test_` functions (was 537); `pytest`
+  collects and passes **687** (was 601), 0 fail / 0 skip. Module 3 adds 7 test
+  files (48 functions → 86 collected cases). `ruff` clean. `alembic upgrade head`
+  → `0014`; up→down→up roundtrip green. 1 cosmetic `StarletteDeprecationWarning`.
+- **Verification status:** complete + verified against a live Postgres
+  (docker-compose db, host 5442). `pytest` 687 green, `ruff` clean, roundtrip
+  green, `state_machine.py` / `guards.py` diffs empty, migration `0014` applies.
+- **Recommended commit message:**
+  `Module 3: diagnosis engine — root-cause classification, confidence routing, is_hard_decline`
+
+---
+
 ## What comes next
 
-**Module 2 — Signal Ingestion — COMPLETE.** All four legs ingest reliably and
-idempotently into canonical cases; the §2.4 cross-leg Merge is bidirectional;
-§2.5 `NETWORK_WIDE` systemic detection + hold/resume are live. Next is
-**Module 3 — Diagnosis Engine** (root-cause classification, the `root_cause_code`
-enum, `DIAGNOSING → PLAYBOOK_ACTIVE` vs `DIAGNOSING → ESCALATED_TO_HUMAN`
-routing). Do not start it without an approved scope.
+**Module 3 — Diagnosis Engine — COMPLETE.** Cases are classified to a
+`root_cause_code` with a calibrated-from-day-one `diagnosis_confidence`, and
+routed `DIAGNOSING → PLAYBOOK_ACTIVE` (≥ T) or `→ ESCALATED_TO_HUMAN` (< T). Next
+is **Module 4 — Policy & Playbook Engine** (root cause → bounded action graph;
+it reads `suggested_timing_adjustment` and consumes the `PLAYBOOK_ACTIVE` cases
+Module 3 routes). Do not start it without an approved scope.
 
-Deferred Module-2 refinements that do **not** block Module 3: `ISSUER_SPECIFIC`
-systemic detection (U-08); systemic rollup over subscription failures (D-073); a
-real storefront pixel for Leg 2 (Part D item 1); a compose worker/beat service.
+Deferred items that do **not** block Module 4: the Module 2 → Module 3
+auto-dispatch trigger (D-080) and the §5.3 first-touch MAC lookup (D-083, blocked
+on U-08); plus the standing Module-2 refinements (`ISSUER_SPECIFIC` systemic
+detection U-08; subscription systemic rollup D-073; a real storefront pixel; a
+compose worker/beat service).

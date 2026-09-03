@@ -57,6 +57,12 @@ if it produced a design decision, a `DECISIONS.md` entry. Do not delete it.
   not in the §4 diagram, not in this list, and was **not** added by M7c. If
   Module 3's `DIAGNOSING` cases must be sweepable by a systemic breach, that edge
   needs its own proposal.
+  - **Module 3 update (2026-09-03):** Module 3 did **not** need this edge and did
+    not add it. Diagnosis holds a case in `DIAGNOSING` only transiently, inside one
+    atomic transaction that immediately routes it onward to `PLAYBOOK_ACTIVE` /
+    `ESCALATED_TO_HUMAN` — a `DIAGNOSING` case is never left parked for a systemic
+    sweep to catch. (The §2.5 sweep still only touches `DETECTED` cases.) Still
+    residual for whenever an async/durable diagnosis queue is introduced.
 
 ## U-02 — `CaseEvent.STEP_TRANSITIONED` payload shape is provisional
 
@@ -188,6 +194,12 @@ if it produced a design decision, a `DECISIONS.md` entry. Do not delete it.
   ingestion).
 - **Must implementation stop first?** Only for `ISSUER_SPECIFIC` systemic
   detection. `NETWORK_WIDE` (M7c) and everything else proceed.
+- **Module 3 update (2026-09-03):** U-08 now **also** blocks the §5.3 "first-touch"
+  MAC-code → tier lookup *at diagnosis time* (D-083). Module 3 consumes an existing
+  `network_directive_tier` (TIER_1/TIER_3 precedence) but extracts no MAC code from
+  the Event, because no MAC/issuer code is surfaced anywhere for it to read — the
+  same gap as `ISSUER_SPECIFIC`. Diagnosis proceeds via the decline-code path; the
+  first-touch lookup is unblocked when U-08 is resolved.
 
 ---
 

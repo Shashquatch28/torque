@@ -1273,6 +1273,136 @@ BY D-0NN`.
   applies to every ingested case. §2.5 is a payment-rail outage detector.
 - **Status:** IN FORCE
 
+## D-079 — `suggested_timing_adjustment` is a new case column; payday hint covers both NSF codes
+- **Milestone:** Module 3 — Diagnosis Engine
+- **Decision:** Where does the §3.4 `suggested_timing_adjustment` diagnosis output
+  persist, and which root causes emit it?
+- **Chosen:** A new nullable `revenue_leak_case.suggested_timing_adjustment`
+  `VARCHAR(64)` column (migration **0014**, additive). The Diagnosis Engine writes
+  the symbolic label `"next_month_end_working_day"` for the NSF soft-decline root
+  causes of **both** legs (`NSF_SOFT_DECLINE` for subscription — the code §3.4
+  names — **and** `ISSUER_SOFT_DECLINE_NSF` for payment: the same "insufficient
+  funds → retry after payday" situation), `None` otherwise. It is a symbolic
+  label, not a computed date — the concrete fire time is Module 4 §4.3 / Module 5.
+- **Alternatives:** put it in the `DIAGNOSIS_COMPLETED` payload (that schema is
+  closed at three keys, D-007 discipline); put it in the typed leg contexts (they
+  `extra="forbid"`, and `B2B_RECEIVABLE` has none); have Module 4 recompute it
+  (§4.3 says Module 4 *reads* it *from the diagnosis*, so it must be persisted).
+- **Reasoning:** §3.4 says the value is *stored* as a signal *separate from*
+  `diagnosis_confidence`; the parallel with the existing `root_cause_code` /
+  `diagnosis_confidence` case columns (also diagnosis outputs) makes a case column
+  the obvious minimum home. This is a Part-C-style addition to Module 1's schema.
+- **Consequence:** one additive column; `git diff` of `state_machine.py` /
+  `guards.py` stays empty; schema-introspection subset checks (`<=`) unaffected.
+- **Status:** IN FORCE
+
+## D-080 — Module 3 is not auto-dispatched from Module 2 ingestion (orchestration deferral)
+- **Milestone:** Module 3 — Diagnosis Engine
+- **Decision:** Does §2.7's "dispatch to Module 3 (Diagnosis)" get wired into the
+  Module 2 ingestion legs in this run?
+- **Chosen:** **No.** The Diagnosis Engine is delivered as an independently
+  invocable surface — `diagnose_case(session, case_id)` + the `diagnose_case_task`
+  Celery task — but no ingestion leg enqueues it. The cross-module *trigger* is an
+  orchestration-layer concern left for later.
+- **Alternatives:** enqueue `diagnose_case_task` from each leg's case-creation path
+  (Legs 1–4) and from the §2.5 systemic-resume batch.
+- **Reasoning:** In eager test mode an inline enqueue runs diagnosis synchronously
+  *inside* ingestion, which would flip a freshly-created case out of `DETECTED`
+  and break Module 2's tested post-ingestion contract (30+ tests assert
+  `status == DETECTED`). The project's own §2.5 resume path already establishes
+  the pattern "move a case to a queued state, let a separate worker complete it"
+  (it transitions to `DIAGNOSING` without running diagnosis inline). Wiring the
+  trigger is not required for the engine to be complete and correct.
+- **Consequence:** Module 2 stays byte-stable except the additive celery
+  registration; the engine handles both entry states (`DETECTED` fresh cases and
+  §2.5-resumed `DIAGNOSING` cases). The auto-dispatch trigger is tracked in
+  `DEFERRED.md` under the orchestration layer.
+- **Status:** IN FORCE
+
+## D-081 — Subscription decline code is read from the source Event, not the typed context
+- **Milestone:** Module 3 — Diagnosis Engine
+- **Decision:** Where does the Diagnosis Engine read the `decline_code` for a
+  `SUBSCRIPTION_FAILURE` case, given `SubscriptionFailureContext` has no such field?
+- **Chosen:** From the case's **source `Event`** — `payment.entity.error_code` in
+  `Event.raw_payload`, read through the tenant scope. `PaymentDegradationContext`
+  *does* carry `decline_code` (ingestion copies it there), so the payment leg reads
+  it from the context; the subscription context deliberately stores only mandate
+  identity (`mandate_id, mandate_type, billing_cycle, subscription_id`).
+- **Alternatives:** add a `decline_code` field to `SubscriptionFailureContext`
+  (widens a locked typed context for a value already present on the Event);
+  copy it into the context at ingestion (a Module 2 change outside this scope).
+- **Reasoning:** the raw signal is already persisted verbatim on the Event; reading
+  it there needs no schema change and no Module 2 edit, and the tenant-scoped read
+  keeps isolation intact.
+- **Status:** IN FORCE
+
+## D-082 — §3.2.4 mandate-type facts take highest precedence in subscription diagnosis
+- **Milestone:** Module 3 — Diagnosis Engine
+- **Decision:** In what order are the subscription rules applied — the §3.2.4
+  mandate facts (NACH `PENDING_CLEARING` → `NACH_CLEARING_PENDING`; UPI AutoPay
+  `mandate_cancelled_at` set → `UPI_AUTOPAY_CAP_EXHAUSTED`, both confidence 1.0)
+  vs. the §3.2.1 network-directive precedence and §3.2.2 decline-code lookup?
+- **Chosen:** The mandate facts are checked **first** (highest precedence), then
+  the network directive, then the decline code, then the missing-code fallback.
+- **Alternatives:** apply them last, following the literal §3.2 step numbering (1
+  network directive, 2 decline code, 3 missing, 4 mandate facts).
+- **Reasoning:** §3.2.4 calls these "a fact, not an inference" at confidence 1.0
+  (a still-clearing NACH batch hasn't actually failed; a cancelled UPI mandate is
+  terminal). They are rail-specific and cannot collide with a card MAC tier (a
+  UPI/NACH mandate carries no Mastercard/Visa directive), so ordering them first
+  changes no real outcome — it only guarantees the definitive fact wins. The
+  clearing status / cancellation are looked up (tenant-scoped) from
+  `NACHRetryPolicy` / `UPIRetryBudget`; note a `subscription.charged.failed` seeds
+  NACH as `RETURNED` (D-072), so the pending-fact branch fires only when a policy
+  row is independently in `PENDING_CLEARING`.
+- **Status:** IN FORCE
+
+## D-083 — Module 3 consumes `network_directive_tier` but does not extract MAC codes
+- **Milestone:** Module 3 — Diagnosis Engine
+- **Decision:** Does the Diagnosis Engine perform the §5.3 "first-touch" MAC-code →
+  tier lookup from raw payloads when a case has no `network_directive_tier` yet?
+- **Chosen:** **No.** Module 3 *consumes* `network_directive_tier` when it is
+  already populated on the case (giving TIER_1/TIER_3 precedence per §3.2.1) but
+  does **not** extract a raw MAC code from the Event payload and does not call the
+  `MacCodeRegistry`. Cases without a tier take the decline-code path.
+- **Alternatives:** implement §5.3's "Module 3 at diagnosis time, whichever sees
+  the code first" MAC lookup here.
+- **Reasoning:** no MAC code is surfaced anywhere for Module 3 to look up —
+  ingestion stores the coarse Razorpay `error_code` as `decline_code`, not a
+  network decline-advice code, and issuer/BIN/acquirer/route extraction is the
+  deferred U-08. Building MAC extraction now would invent the very
+  issuer/network-extraction the project has explicitly deferred. `network_directive`
+  precedence is still honoured wherever a tier *is* present (e.g. set by a future
+  Module 2 enhancement or a test via `apply_network_directive`).
+- **Consequence:** the §5.3 first-touch MAC lookup at diagnosis time is tracked in
+  `DEFERRED.md`; it is unblocked only when U-08 is resolved.
+- **Status:** IN FORCE
+
+## D-084 — `is_hard_decline` derived from root cause; B2B buckets are demo-scope thresholds
+- **Milestone:** Module 3 — Diagnosis Engine
+- **Decision:** How is `is_hard_decline` (D-058, Module-3-owned) computed, and how
+  are the B2B risk buckets drawn from `days_overdue × promise_keeping_rate`?
+- **Chosen:** `is_hard_decline` is **derived from the PAYMENT_DEGRADATION
+  `root_cause_code`**: `True` for card-expired / fraud-suspected /
+  instrument-not-recurring; `False` for the NSF / other-soft / gateway-timeout
+  codes; `None` (no verdict) for `UNKNOWN_LOW_CONFIDENCE`. It is written only for
+  PAYMENT_DEGRADATION cases (the only leg whose context carries the field), only
+  when the verdict is not `None`. B2B bucketing: an **established** counterparty
+  (≥3 invoices on record for the merchant **and** a `promise_keeping_rate`) →
+  confidence 0.8, bucketed by `days_overdue × (1 − promise_keeping_rate)` with a
+  `≥90`-day `DISPUTE_SUSPECTED` coarse fallback; **cold-start** → confidence 0.4,
+  bucketed on `days_overdue` alone (`UNKNOWN_RECEIVABLE_RISK` if none). The known
+  decline-code seed table (`decline_codes.py`) is likewise demo-scope.
+- **Alternatives:** store an independent hard/soft classifier separate from the
+  root cause (two sources of truth for the same fact).
+- **Reasoning:** the root cause already encodes the hard/soft nature; deriving
+  keeps a single source of truth. §3.2 explicitly frames B2B bucketing and the
+  decline-code table as rule-based demo-scope lookups Module 3 "owns future
+  refinement" of; the specific thresholds/strings mirror the `MacCodeRegistry`
+  seed's "architecture locked, mapping is a pre-production checklist" posture
+  (Decision M / Part E item 1).
+- **Status:** IN FORCE
+
 ---
 
 ## Notes not recorded as decisions

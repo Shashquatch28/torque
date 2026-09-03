@@ -95,21 +95,38 @@ Legend: 🔧 build (planned) · 📋 design-only for demo · 🔮 roadmap / out 
   `state_machine.py` (U-01 #3, D-066) as a **legal but dormant** edge. **Driving
   it** (a sweep that includes active playbook runs) + mid-run recovery semantics
   is Module 5 — M7c produces no `PLAYBOOK_ACTIVE` case.
-- 🔧 **Dispatch to Module 3** — an ingestion-created case is left in `DETECTED`
-  (or `DIAGNOSING` after systemic resolution); nothing hands it to Diagnosis yet.
+- 🔧 **Dispatch to Module 3 (the auto-trigger)** — the Module 3 engine + task
+  exist and are invocable, but no ingestion leg enqueues `diagnose_case_task`; an
+  ingestion-created case is left in `DETECTED` (or `DIAGNOSING` after systemic
+  resolution) for a separate orchestration step to pick up (D-080, moved here from
+  "Dispatch to Module 3"). Wiring the enqueue is an orchestration-layer concern.
 - 🔧 **A `docker-compose` Celery worker/beat service** — M7b/M7c ship the dev
   commands (`... worker`, `... beat`) and eager-mode tests only.
 
-## Module 3 — Diagnosis Engine
+## Module 3 — Diagnosis Engine — ✅ COMPLETE
 
-- 🔧 The **`root_cause_code` enum** (Module 3 owns it — deliberately NOT in
-  `enums.py`; `RevenueLeakCase.root_cause_code` is a plain `String`).
-- 🔧 Per-leg rule-based classification, confidence bands, decline-code lookup
-  table, mandate-type overrides.
-- 🔧 `DIAGNOSING → PLAYBOOK_ACTIVE` vs `DIAGNOSING → ESCALATED_TO_HUMAN` routing
+Built in the Module 3 run (`torque.diagnosis`). The following are now **DONE**:
+- ✅ The **`root_cause_code` vocabulary** — `RootCauseCode` in
+  `torque.diagnosis.root_causes` (Module 3 owns it; `RevenueLeakCase.root_cause_code`
+  stays a plain `String`, `.value` persisted).
+- ✅ Per-leg rule-based classification, confidence bands, decline-code lookup
+  table (`decline_codes.py`), §3.2.4 mandate-type fact overrides.
+- ✅ `DIAGNOSING → PLAYBOOK_ACTIVE` vs `DIAGNOSING → ESCALATED_TO_HUMAN` routing
   on `PolicyConfig.diagnosis_confidence_threshold` (0.65).
-- 🔧 `suggested_timing_adjustment` (payday-cycle heuristic) emission.
-- 🔧 Writing `DIAGNOSIS_COMPLETED` `CaseEvent`s.
+- ✅ `suggested_timing_adjustment` (payday-cycle heuristic) emission → new case
+  column (migration 0014).
+- ✅ Writing `DIAGNOSIS_COMPLETED` `CaseEvent`s; `is_hard_decline` set (D-058).
+
+Still deferred within Module 3's area:
+- 🔧 **The §5.3 first-touch MAC-code → tier lookup at diagnosis time** (D-083).
+  Module 3 *consumes* an existing `network_directive_tier` but does not extract a
+  raw MAC code from the Event or call `MacCodeRegistry` — no MAC code is surfaced
+  for it to look up, and issuer/network extraction is U-08. Unblocked only when
+  U-08 is resolved.
+- 🔮 §3.1 root-cause taxonomy refinement (the enum is the "operative demo set";
+  "Module 3 owns future refinement"). The demo decline-code / B2B-bucket seed
+  tables are pre-production-checklist data, same posture as `MacCodeRegistry`
+  (Decision M / Part E item 1).
 
 ## Module 4 — Policy & Playbook Engine (runtime)
 

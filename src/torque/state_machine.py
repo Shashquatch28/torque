@@ -20,10 +20,14 @@ case reaches `PLAYBOOK_ACTIVE` until Module 5 exists. Resume is the existing
 `SYSTEMIC_HOLD -> DIAGNOSING` (§3: "re-queued for diagnosis in a batch"); there is
 deliberately NO `SYSTEMIC_HOLD -> PLAYBOOK_ACTIVE` restoration edge.
 
-NOT YET ADDED — flagged, pending confirmation before the owning module is built:
-* `DETECTED -> CANCELLED`, `DIAGNOSING -> CANCELLED` — required by Module 7
-  §7.1.4 (payment arrives before diagnosis finishes). Not in the Section 4
-  diagram.
+`DETECTED -> CANCELLED` and `DIAGNOSING -> CANCELLED` were ADDED in Module 7 (U-01
+#1/#2, approved): Blueprint §7.1.4 — a customer self-pays before Torque finishes
+diagnosing, so reconciliation closes the case `CANCELLED` /
+`recovery_type = SELF_RECOVERED`. Executed by `transition_case` with the existing
+guard architecture (no `guards.py` change — `RevenueLeakCase.status` has no
+`before_flush` guard; `CANCELLED` is already in `TERMINAL_STATUSES`). The §4
+diagram already carries the same `customer self-paid -> CANCELLED` transition out
+of `PLAYBOOK_ACTIVE`.
 """
 
 from __future__ import annotations
@@ -40,9 +44,17 @@ from torque.models.revenue_leak_case import RevenueLeakCase
 
 # Base transitions from the Section 4 diagram (+ Part C item 1).
 _TRANSITIONS: dict[CaseStatus, set[CaseStatus]] = {
-    CaseStatus.DETECTED: {CaseStatus.SYSTEMIC_HOLD, CaseStatus.DIAGNOSING},
+    CaseStatus.DETECTED: {
+        CaseStatus.SYSTEMIC_HOLD,
+        CaseStatus.DIAGNOSING,
+        CaseStatus.CANCELLED,  # U-01 #1 — Module 7 §7.1.4: customer self-paid pre-diagnosis
+    },
     CaseStatus.SYSTEMIC_HOLD: {CaseStatus.DIAGNOSING},
-    CaseStatus.DIAGNOSING: {CaseStatus.PLAYBOOK_ACTIVE, CaseStatus.ESCALATED_TO_HUMAN},
+    CaseStatus.DIAGNOSING: {
+        CaseStatus.PLAYBOOK_ACTIVE,
+        CaseStatus.ESCALATED_TO_HUMAN,
+        CaseStatus.CANCELLED,  # U-01 #2 — Module 7 §7.1.4: customer self-paid mid-diagnosis
+    },
     CaseStatus.PLAYBOOK_ACTIVE: {
         CaseStatus.RECOVERED,
         CaseStatus.PARTIALLY_RECOVERED,

@@ -45,6 +45,8 @@ from torque.ingestion.tasks import (
     resolve_subscription_buffered_event_task,
 )
 from torque.models import Event, Merchant
+from torque.reconciliation.reconcile import RECONCILE_EVENT_TYPES
+from torque.reconciliation.tasks import reconcile_event_task
 from torque.security.razorpay_signature import verify_razorpay_signature
 
 router = APIRouter()
@@ -142,5 +144,12 @@ async def razorpay_webhook(
     elif event.type == INVOICE_OVERDUE:
         # §2.3: `invoice.overdue` needs no buffer — dispatch immediately.
         ingest_invoice_task.apply_async((str(event.event_id),))
+    elif event.type in RECONCILE_EVENT_TYPES:
+        # Module 7 §7.3 — a verified success signal (`payment.captured`,
+        # `subscription.charged`, `payment_link.paid` / `.partially_paid` /
+        # `.expired` / `.cancelled`) is handed to reconciliation. No buffer: the
+        # engine is correct whenever it runs (no case yet → NO_MATCH; a case
+        # present → recover / cancel), and it is idempotent on `Event.processed`.
+        reconcile_event_task.apply_async((str(event.event_id),))
 
     return _ok()

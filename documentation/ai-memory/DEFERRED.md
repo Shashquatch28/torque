@@ -240,21 +240,41 @@ Still deferred within Module 6's area:
   entries, `escalation_resolution`, `HUMAN_RESOLVED` — Module 10 (Q-I). Module 6
   only routes cases *into* the queue.
 
-## Module 7 — Payment Reconciliation & Attribution
+## Module 7 — Payment Reconciliation & Attribution — ✅ COMPLETE
 
-- 🔧 Matching `payment.captured` / `subscription.charged` / `payment_link.paid` to
-  open cases: direct `PaymentLink` match → `AGENT_ASSISTED`, `credit_weight=1.0`;
-  indirect `(merchant, counterparty, amount)` match + 24h action window
-  (`PolicyConfig.attribution_window_hours`); multi-case proportional split;
-  no-match → `CANCELLED` / `SELF_RECOVERED`.
-- 🔧 Writing `RevenueLeakCase.recovery_type` / `recovered_amount` via
-  `guards.module7_writer(session)` (the context manager exists; no caller).
-- 🔧 `credit_weight` re-splitting on `ActionCase` at reconciliation.
-- 🔧 Case closure (`RECOVERED` / `PARTIALLY_RECOVERED`, `B2BInvoice.outstanding_amount`
-  decrement) + `PAYMENT_RECONCILED` `CaseEvent`.
-- 🔧 State-machine edges `DETECTED → CANCELLED`, `DIAGNOSING → CANCELLED` (not in
-  `state_machine.py` — `UNRESOLVED.md` #1).
-- 🔧 Webhook-driven `PaymentLink.status` / `amount_paid` / `paid_at` transitions.
+Built in the Module 7 run (`torque.reconciliation` package, no migration). Now
+**DONE**:
+- ✅ Matching `payment.captured` / `subscription.charged` / `payment_link.paid` /
+  `.partially_paid` to open cases (§7.1): direct `PaymentLink` →
+  `AGENT_ASSISTED` / weight 1.0; indirect `(merchant, counterparty, amount)` +
+  24h `Action` window (`PolicyConfig.attribution_window_hours`) → `AGENT_ASSISTED`
+  / `SELF_RECOVERED`; merged-set proportional `credit_weight` re-split; non-merged
+  multi-match → `AMBIGUOUS`; no-match → `DETECTED/DIAGNOSING → CANCELLED` /
+  `SELF_RECOVERED` (§7.1.4).
+- ✅ Writing `RevenueLeakCase.recovery_type` / `recovered_amount` via
+  `guards.module7_writer` (INV-53).
+- ✅ `ActionCase.credit_weight` re-split at reconciliation (§7.1.3, INV-50/12).
+- ✅ Case closure — `RECOVERED` (full) / B2B `PARTIALLY_RECOVERED` with
+  oldest-first invoice waterfall + `amount_at_risk` = `Σ outstanding` (INV-55) +
+  the two-hop final settlement — and `PAYMENT_RECONCILED` `CaseEvent`.
+- ✅ State-machine edges `DETECTED → CANCELLED`, `DIAGNOSING → CANCELLED`
+  (D-103, U-01 fully resolved).
+- ✅ Webhook-driven `PaymentLink.status` / `amount_paid` / `paid_at` from
+  `payment_link.*` (incl. `expired` / `cancelled` → row status only,
+  `LINK_UPDATED`); a row is created for an unknown link carrying a
+  `notes.torque_case_id`.
+- ✅ Wired into `torque.api.webhooks` dispatch (D-104), no buffer;
+  `human_queue.remove_for_case` on close (D-107).
+
+Still deferred within Module 7's area:
+- 🔧 **`GENERATE_PAYMENT_LINK` execution** (Module 5) still doesn't *create*
+  `PaymentLink` rows — the §7.1.1 direct path lights up fully only once it does.
+  Module 7 already updates existing rows and creates one from a Torque case ref.
+- 🔧 **`WRITTEN_OFF`** — the `ESCALATED_TO_HUMAN → WRITTEN_OFF` close is a
+  human-only outcome (Module 10); Module 7 drives only
+  `ESCALATED_TO_HUMAN → {RECOVERED, PARTIALLY_RECOVERED}` on a payment.
+- 🔧 A `(merchant_id, counterparty_id)` composite index on `revenue_leak_case` —
+  not added (demo scale; D-108).
 
 ## Module 8 — Recovery Scoring Model
 

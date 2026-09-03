@@ -227,6 +227,48 @@ def checkout_abandoned_body(
     return json.dumps(body).encode()
 
 
+def razorpay_payment_link_body(
+    *,
+    event: str = "payment_link.paid",
+    link_id: str = "plink_M7001",
+    amount_paise: int = 49900,
+    amount_paid_paise: int | None = None,
+    status: str | None = None,
+    torque_case_id: str | None = None,
+    reference_id: str | None = None,
+    contact: str | None = "+919810007001",
+    email: str | None = "payer@example.com",
+) -> bytes:
+    """A Razorpay `payment_link.*` webhook body (Module 7 reconciliation feed)."""
+    short = event.split(".", 1)[1]
+    entity: dict = {
+        "id": link_id,
+        "amount": amount_paise,
+        "amount_paid": amount_paid_paise if amount_paid_paise is not None else amount_paise,
+        "status": status or short,
+    }
+    if torque_case_id is not None:
+        entity["notes"] = {"torque_case_id": torque_case_id}
+    if reference_id is not None:
+        entity["reference_id"] = reference_id
+    cust: dict = {}
+    if contact is not None:
+        cust["contact"] = contact
+    if email is not None:
+        cust["email"] = email
+    if cust:
+        entity["customer"] = cust
+    body = {
+        "entity": "event",
+        "account_id": "acc_RZP",
+        "event": event,
+        "contains": ["payment_link"],
+        "payload": {"payment_link": {"entity": entity}},
+        "created_at": 1_760_000_000,
+    }
+    return json.dumps(body).encode()
+
+
 def razorpay_invoice_body(
     *,
     invoice_id: str = "inv_M2001",
@@ -301,6 +343,7 @@ def make_api_client(db, monkeypatch):
         sub_spy = MagicMock(name="resolve_subscription_buffered_event_task.apply_async")
         checkout_spy = MagicMock(name="create_checkout_case_task.apply_async")
         invoice_spy = MagicMock(name="ingest_invoice_task.apply_async")
+        reconcile_spy = MagicMock(name="reconcile_event_task.apply_async")
         if patch_enqueue:
             monkeypatch.setattr(
                 "torque.ingestion.tasks.resolve_buffered_event_task.apply_async", spy
@@ -314,6 +357,9 @@ def make_api_client(db, monkeypatch):
             )
             monkeypatch.setattr(
                 "torque.ingestion.tasks.ingest_invoice_task.apply_async", invoice_spy
+            )
+            monkeypatch.setattr(
+                "torque.reconciliation.tasks.reconcile_event_task.apply_async", reconcile_spy
             )
         settings = Settings(
             razorpay_webhook_secret_test=WEBHOOK_TEST_SECRET if with_secrets else None,
@@ -329,6 +375,7 @@ def make_api_client(db, monkeypatch):
         client.subscription_enqueue = sub_spy
         client.checkout_enqueue = checkout_spy
         client.invoice_enqueue = invoice_spy
+        client.reconcile_enqueue = reconcile_spy
         created.append(client)
         return client
 

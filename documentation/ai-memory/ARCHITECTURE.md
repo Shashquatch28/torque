@@ -25,7 +25,7 @@ Do not describe `PLANNED` / `DEFERRED` behaviour as if it exists.
 | 4 — Policy & Playbook Engine | root cause → bounded action graph; playbook authoring/validation (validation part `IMPLEMENTED` in M4) | **`IMPLEMENTED` (Module 4 complete)** — `torque.policy` package: the eleven-playbook §4.1 catalog (ORM-seeded, D-085), root-cause→playbook selection, version-pinned `PlaybookRun` instantiation for `PLAYBOOK_ACTIVE` cases (no-playbook/disabled → `ESCALATED_TO_HUMAN`, D-086), pure graph-reading traversal rules, payday-override policy gate (§4.3), `multi_case_template` contract (§4.4). Runtime execution/timing/guardrails/Temporal are Module 5. See §8D |
 | 5 — Execution / Orchestration | runtime graph execution, retry-budget enforcement, atomic Action+CaseEvent write, timing/allowed-hours/payday, durable driver | **`IMPLEMENTED` (Module 5 complete)** — `torque.execution`: the §5.6 **Postgres-polling** driver (`scheduled_job` + 10 s/60 s beat pollers, `FOR UPDATE SKIP LOCKED`) chosen over Temporal (D-090); `execute_due_job` runs the §5.1 loop (guardrails §5.2 → executor stub §5.4 → atomic Action+CaseEvent → `STEP_TRANSITIONED` → advance `active_step_id`); timing D-025; Card/UPI/NACH consumption; U-02 settled (D-091). Real channel adapters + Outreach Coordinator + WhatsApp gate are Module 6 (D-092). See §8E |
 | 6 — Compliance & Cross-Leg Guardrail Engine | `GuardrailEngine.check()`, Outreach Coordinator, escalation ceiling, human queue | **`IMPLEMENTED` (Module 6 complete)** — `torque.coordination` package: the `GuardrailEngine` facade (§6.2, returns the four-way `GuardDecision` — D-097); the Outreach Coordinator (4h cross-leg quiet period, live merge in the poll batch, defer, open-conversation — Part A §5); the full WhatsApp gate (opt-in + approved UTILITY template + open-conversation suspend); §6.3 escalation-ceiling → `ESCALATED_TO_HUMAN` in the runner tick; the persistent `human_queue` table (migration 0016) + three feeders. `priority()` is the Module 8 seam (D-098). See §8F |
-| 7 — Reconciliation & Attribution | match payments → cases, `AGENT_ASSISTED` vs `SELF_RECOVERED`, write `credit_weight` | `PLANNED` |
+| 7 — Reconciliation & Attribution | match payments → cases, `AGENT_ASSISTED` vs `SELF_RECOVERED`, write `credit_weight` | **`IMPLEMENTED` (Module 7 complete)** — `torque.reconciliation`: `reconcile_event()` matches a verified success `Event` (§7.1: direct `PaymentLink` → indirect `(merchant, cp, amount)` → merged-set re-split / `AMBIGUOUS` → `DETECTED/DIAGNOSING → CANCELLED` self-pay); closes cases (§7.2: `RECOVERED` / B2B `PARTIALLY_RECOVERED` with invoice waterfall) + `PAYMENT_RECONCILED`; `recovery_type` / `recovered_amount` via `module7_writer`. Wired into `webhooks.py` (D-104). **`state_machine.py` gained the two U-01 edges** (D-103); no migration. See §8G |
 | 8 — Recovery Scoring | `(probability × amount) ÷ cost`, cold-start lookup | `PLANNED` |
 | 9 — Reporting & Measurement | ₹ recovered, incrementality lift + CI, exception list | `PLANNED` |
 | 10 — UI/UX | merchant dashboard, agent console, demo surface | `PLANNED` |
@@ -760,15 +760,61 @@ acyclic.
 
 ---
 
-## 9. Attribution model — `IMPLEMENTED` (schema + invariant), `PLANNED` (computation)
+## 9. Attribution model — `IMPLEMENTED`
 
 - `ActionCase(action_id, case_id, is_primary, credit_weight)` — universal (≥1 per
   Action). Σ `credit_weight` == 1.00000 exact, guard-enforced.
-- **`PLANNED`**: Module 7 matching logic (`PaymentLink` direct match →
-  `AGENT_ASSISTED`; indirect amount match + 24h action window; multi-case
-  proportional split; no-match → `CANCELLED`/`SELF_RECOVERED`); writing
-  `RevenueLeakCase.recovery_type` / `recovered_amount` (guarded by
-  `module7_writer(session)` — the context manager exists, no caller does).
+- **Module 7 (`IMPLEMENTED`, §8G):** `reconcile_event` writes
+  `RevenueLeakCase.recovery_type` / `recovered_amount` inside `module7_writer`
+  (INV-06, held open across every flush); direct `PaymentLink` →
+  `AGENT_ASSISTED` / weight 1.0; indirect `(merchant, cp, amount)` match + 24h
+  `Action` window → `AGENT_ASSISTED` else `SELF_RECOVERED`; a merged-outreach set
+  re-splits the shared `Action`'s `ActionCase.credit_weight` ∝ `amount_at_risk`
+  (INV-50/INV-12); a non-merged multi-match → `AMBIGUOUS`; no open match + a
+  `DETECTED`/`DIAGNOSING` case → `CANCELLED` / `SELF_RECOVERED`.
+
+---
+
+## 8G. Reconciliation & Attribution — `torque.reconciliation` — `IMPLEMENTED` (Module 7)
+
+Consumes verified success `Event`s from Module 2's pipeline (§7.3 — no webhook
+path of its own; wired into `webhooks.py` dispatch, D-104).
+
+- **`reconcile.py`** — `reconcile_event(session, *, event_id, now=None)` →
+  `ReconcileOutcome` (`RECOVERED` / `PARTIALLY_RECOVERED` / `MULTI_RECOVERED` /
+  `AMBIGUOUS_RECOVERED` / `SELF_PAID_CANCELLED` / `LINK_UPDATED` / `NO_MATCH` /
+  `NOOP`). One transaction; idempotent on `Event.processed`; matched case rows
+  `SELECT … FOR UPDATE`; tenant-scoped throughout. `RECONCILE_EVENT_TYPES` =
+  `payment.captured` / `subscription.charged` / `payment_link.paid` /
+  `.partially_paid` / `.expired` / `.cancelled`.
+  - §7.1.1 direct — `payment_link.*` updates the `PaymentLink` row
+    (`status` / `amount_paid` / `paid_at`); a `paid` / `partially_paid` for a
+    Torque link → its `case_id`, `AGENT_ASSISTED`. Unknown link + a
+    `notes.torque_case_id` → row created; without one → indirect.
+  - §7.1.2 indirect — one open case (`PLAYBOOK_ACTIVE` / `ESCALATED_TO_HUMAN`, or
+    B2B `PARTIALLY_RECOVERED`) matching `(merchant_id, counterparty_id, amount)`;
+    `AGENT_ASSISTED` iff a non-blocked `Action` (any `ActionCase`) executed within
+    `PolicyConfig.attribution_window_hours` (24h), else `SELF_RECOVERED` (D-105).
+  - §7.1.3 merged — cases sharing one `Action`, or a set whose combined
+    `amount_at_risk` a lump payment settles → re-split
+    `ActionCase.credit_weight` ∝ `amount_at_risk`, recover all `AGENT_ASSISTED`.
+    Non-merged multi-match → `AMBIGUOUS`, attribute to the latest-actioned case,
+    leave the rest open (D-105).
+  - §7.1.4 — no open match; a `DETECTED` / `DIAGNOSING` case for
+    `(merchant, cp, amount)` → `CANCELLED` / `SELF_RECOVERED` (D-103).
+  - §7.2 closure — full → `RECOVERED`, `recovered_amount = amount_at_risk`,
+    `closed_at`; B2B partial → invoices waterfalled oldest-`due_date`-first,
+    `PARTIALLY_RECOVERED` (open), `amount_at_risk` ← `Σ outstanding` (INV-33);
+    a final B2B settlement two-hops `PARTIALLY_RECOVERED → PLAYBOOK_ACTIVE →
+    RECOVERED` (D-106). Each close writes `PAYMENT_RECONCILED` and calls
+    `human_queue.remove_for_case` (D-107).
+- **`payloads.py`** — `payment_link.*` extractors. **`tasks.py`** —
+  `reconcile_event_task`.
+- **`state_machine.py`** — Module 7 added `DETECTED → CANCELLED` and
+  `DIAGNOSING → CANCELLED` (D-103, the two U-01 edges; docstring updated).
+  `guards.py` byte-unchanged.
+- **New helpers:** `ingestion.identity.find_counterparty` (match-only),
+  `coordination.human_queue.remove_for_case`. **No migration.**
 
 ---
 

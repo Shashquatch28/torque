@@ -20,6 +20,25 @@ from torque.db.scoped import TenantScope
 from torque.models import Counterparty, MerchantCounterparty
 
 
+def find_counterparty(
+    session: Session, *, phone: str | None, email: str | None
+) -> Counterparty | None:
+    """Match-only counterparty lookup (exact `phone` first, then exact `email`).
+    Returns `None` when neither matches — used by Module 7 reconciliation, which
+    must **not** create an identity for an inbound payment signal."""
+    if phone:
+        cp = session.scalars(
+            select(Counterparty).where(Counterparty.phone == phone)
+        ).first()
+        if cp is not None:
+            return cp
+    if email:
+        return session.scalars(
+            select(Counterparty).where(Counterparty.email == email)
+        ).first()
+    return None
+
+
 def resolve_counterparty(
     session: Session,
     *,

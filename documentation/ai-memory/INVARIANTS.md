@@ -657,6 +657,59 @@ violation**.
   `validate_merchant_playbook_config` → `_check_escalation_ceiling`).
 - **Tests:** `tests/test_module6_validation.py`.
 
+## INV-52 — Reconciliation of one `Event` is atomic and idempotent (Module 7)
+- **Domain:** `torque.reconciliation.reconcile.reconcile_event`.
+- **Invariant:** the whole reconciliation of one success `Event` — the case
+  status transition(s), the `recovery_type` / `recovered_amount` / `closed_at`
+  writes, any `B2BInvoice.outstanding_amount` decrement, any
+  `ActionCase.credit_weight` re-split, the `PAYMENT_RECONCILED` `CaseEvent`, the
+  human-queue removal, and `Event.processed = True` — commit together or not at
+  all (the Celery task's `session_scope`). A re-run on a `processed` `Event`, a
+  missing `Event`, or a non-reconciliation type is a `NOOP` with no writes
+  (idempotent under Celery redelivery). A second distinct payment for an
+  already-terminal case is a `NO_MATCH` (no second close, no duplicate
+  `PAYMENT_RECONCILED`).
+- **Enforcement:** `HELPER` — the single transactional entry point; the
+  `Event.processed` / terminal-status gates.
+- **Tests:** `tests/test_module7_idempotency.py`.
+
+## INV-53 — `recovery_type` / `recovered_amount` are written only by Module 7, inside `module7_writer` (Module 7 realises INV-06)
+- **Domain:** `revenue_leak_case.recovery_type`, `.recovered_amount`.
+- **Invariant:** reconciliation is the sole writer; every flush that carries the
+  change happens inside `guards.module7_writer(session)` (the context is held
+  open across the transition + event + queue flushes, not just the assignment).
+  `AGENT_ASSISTED` requires a non-blocked `Action` for the case within
+  `PolicyConfig.attribution_window_hours`; a direct `PaymentLink` match is always
+  `AGENT_ASSISTED`; a §7.1.4 pre-diagnosis close is always `SELF_RECOVERED`.
+- **Enforcement:** `ORM-GUARD` (`_guard_case` — `OwnershipViolation` outside
+  `module7_writer`) + `HELPER` (reconcile holds the context).
+- **Tests:** `tests/test_module7_ownership.py`, `tests/test_module7_reconcile_*`.
+
+## INV-54 — Recovery never double-closes a case under concurrency (Module 7)
+- **Domain:** `torque.reconciliation.reconcile` case matching.
+- **Invariant:** every candidate `RevenueLeakCase` row a reconciliation may close
+  is read `SELECT … FOR UPDATE`, so two workers reconciling different payments
+  for the same case serialise — the first closes it, the second's match then
+  sees a terminal case and no-ops. Exactly one `RECOVERED` transition and one
+  `PAYMENT_RECONCILED` per case per recovery.
+- **Enforcement:** `DB` (`FOR UPDATE` row locks) + `HELPER` (terminal-status
+  skip).
+- **Tests:** `tests/test_module7_idempotency.py::test_two_workers_race_one_recovery`
+  (two real connections).
+
+## INV-55 — B2B `amount_at_risk` tracks `Σ B2BInvoice.outstanding_amount` (Module 7 maintains INV-33)
+- **Domain:** `revenue_leak_case.amount_at_risk` (B2B) / `b2b_invoice.outstanding_amount`.
+- **Invariant:** a partial B2B payment is applied to the case's invoices
+  oldest-`due_date`-first (`FOR UPDATE`), and `case.amount_at_risk` is set to the
+  new `Σ outstanding` in the same transaction; `case.recovered_amount`
+  accumulates the payments. When `Σ outstanding` reaches 0 the case is
+  `RECOVERED` (a two-hop through `PLAYBOOK_ACTIVE` if it was already
+  `PARTIALLY_RECOVERED`, both edges legal for B2B) and `recovered_amount` equals
+  the full original balance.
+- **Enforcement:** `HELPER` + `DB-CONSTRAINT` (`b2b_invoice` amount CHECKs,
+  `outstanding_amount <= original_amount`, `>= 0`).
+- **Tests:** `tests/test_module7_case_closure.py`.
+
 ---
 
 ## Invariants that are PLANNED (not yet enforced anywhere)
@@ -674,6 +727,6 @@ violation**.
   on issuer extraction — U-08). Driving `PLAYBOOK_ACTIVE → SYSTEMIC_HOLD` (edge
   legal since M7c) + mid-run recovery is a Module 5 blueprint gap (F-4).
 - `PlaybookRun.status` transition legality (still enum + assignment only).
-- `recovery_type` derivation rules (Module 7).
+- `recovery_type` derivation rules: **IMPLEMENTED in Module 7** (INV-52/53/54).
 - The Module 8 `(probability × amount_at_risk) ÷ cost` score — Module 6's
-  `priority()` is the seam (D-098).
+  `priority()` is the seam (D-098); Module 7 consumes no score.

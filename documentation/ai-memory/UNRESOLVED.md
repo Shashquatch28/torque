@@ -15,6 +15,16 @@ if it produced a design decision, a `DECISIONS.md` entry. Do not delete it.
 
 ## U-01 — Three `RevenueLeakCase.status` state-machine edges are not defined
 
+- **FULLY RESOLVED.** Edge 3 in M7c (D-066); **edges 1 & 2 in Module 7
+  (2026-09-04, D-103).** `DETECTED → CANCELLED` and `DIAGNOSING → CANCELLED` were
+  added to `_TRANSITIONS` (approved; the exact diff was reported before the
+  change and shown in the Module 7 verification report). Blueprint §7.1.4 — a
+  customer self-pays before Torque can act; reconciliation closes the case
+  `CANCELLED` / `recovery_type = SELF_RECOVERED`, trigger `"customer_self_paid"`,
+  a `STATUS_CHANGED` + a `PAYMENT_RECONCILED` `CaseEvent`. No `guards.py` change
+  (`RevenueLeakCase.status` has no `before_flush` guard); `CANCELLED` was already
+  in `TERMINAL_STATUSES`. *(Original context kept below.)*
+
 - **Question:** Should these transitions be legal, and with what
   trigger/guarding?
   1. `DETECTED → CANCELLED`
@@ -234,8 +244,18 @@ dormant** edge (approved; diff shown in the M7c verification report). Executed b
 trigger `"systemic_network_wide"`, `STATUS_CHANGED` emitted. M7c drives it from
 no code path (it produces no `PLAYBOOK_ACTIVE` case); Module 5 owns driving it +
 mid-run recovery. Resume is the existing `SYSTEMIC_HOLD → DIAGNOSING`. See
-`DECISIONS.md` D-066. **U-01 edges 1–2 (`DETECTED/DIAGNOSING → CANCELLED`) stay
-open — Module 7.**
+`DECISIONS.md` D-066.
+
+### U-01 #1 & #2 (`DETECTED/DIAGNOSING → CANCELLED`) — RESOLVED 2026-09-04 (Module 7)
+
+Added to `_TRANSITIONS[DETECTED]` / `_TRANSITIONS[DIAGNOSING]` in
+`state_machine.py` (approved; the exact diff was reported before the edit and
+shown in the Module 7 verification report). Blueprint §7.1.4 — a customer
+self-pays before Torque finishes diagnosing; `torque.reconciliation` closes the
+pre-diagnosis case `CANCELLED` / `recovery_type = SELF_RECOVERED`, trigger
+`"customer_self_paid"`, with a `STATUS_CHANGED` + a `PAYMENT_RECONCILED`
+`CaseEvent`. No `guards.py` change; `CANCELLED` was already in
+`TERMINAL_STATUSES`. See `DECISIONS.md` **D-103**. **U-01 is now fully resolved.**
 
 ### U-07 (inbound half) — RESOLVED 2026-09-02 (M7b)
 

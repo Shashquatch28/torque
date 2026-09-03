@@ -1168,19 +1168,126 @@ implements exactly that scope.)*
 
 ---
 
+## Module 7 — Payment Reconciliation & Attribution — COMPLETE
+
+*(One module = one run = one audit. Built on committed Module 6 `9345ce9`.
+Implemented directly from the blueprint per the Module 7 execution rules — no
+separate proposal/approval cycle; the one required `state_machine.py` change was
+reported before it was made.)*
+
+- **Commit:** *(uncommitted — maintainer commits after review)*. HEAD at
+  implementation time: **`9345ce9`** (committed Module 6).
+- **Migration:** **none.** `recovery_type` / `recovered_amount` / `closed_at`
+  (M1), `PaymentLink` (M6a), `B2BInvoice` (M1), and the `PAYMENT_RECONCILED`
+  `CaseEventType` (M1) already exist. `alembic head` stays `0016_human_queue`;
+  roundtrip green.
+- **Load-bearing files:** `models/guards.py` **byte-unchanged**
+  (`git diff HEAD` empty). **`state_machine.py` changed** — exactly the two U-01
+  edges + docstring (D-103): `CaseStatus.CANCELLED` added to
+  `_TRANSITIONS[DETECTED]` and `_TRANSITIONS[DIAGNOSING]`. Blueprint §7.1.4
+  requires it; U-01 assigns it to Module 7; no `guards.py` change is needed
+  (`RevenueLeakCase.status` has no `before_flush` guard; `CANCELLED` was already
+  in `TERMINAL_STATUSES`). The exact diff was reported before the edit.
+- **New package `torque.reconciliation`** (D-108):
+  - **`reconcile.py`** — `reconcile_event(session, *, event_id, now=None)` →
+    `ReconcileOutcome`. The §7.1 matcher (first rule wins):
+    1. **Direct via `PaymentLink`** — a `payment_link.paid` / `.partially_paid`
+       for a link Torque holds a row for → that link's `case_id`,
+       `AGENT_ASSISTED`. `payment_link.*` also drives the link row's
+       `status` / `amount_paid` / `paid_at` (Blueprint line 398). An unknown link
+       with a `notes.torque_case_id` → row created; without one → falls through
+       to indirect.
+    2. **Indirect** — `payment.captured` / `subscription.charged`, exactly one
+       open case matching `(merchant_id, counterparty_id, amount)` → attribute;
+       `AGENT_ASSISTED` iff a non-blocked `Action` executed for the case within
+       `PolicyConfig.attribution_window_hours` (24h), else `SELF_RECOVERED`
+       (D-105).
+    3. **Multiple matches** — share one merged-outreach `Action` (§4.4) →
+       re-split its `ActionCase.credit_weight` ∝ `amount_at_risk` and recover all
+       (`AGENT_ASSISTED`, `MULTI_RECOVERED`); a lump payment settling the
+       *combined* `amount_at_risk` of such a set is also detected. Not merged →
+       attribute to the most-recently-actioned case as `AMBIGUOUS`, leave the
+       rest open (D-105).
+    4. **No open match** — a `DETECTED` / `DIAGNOSING` case for the same
+       `(merchant, counterparty, amount)` → customer self-paid before Torque
+       acted → `CANCELLED` / `SELF_RECOVERED` (§7.1.4, needs D-103); else
+       `NO_MATCH`.
+    Closure (§7.2): full → `RECOVERED`, `recovered_amount = amount_at_risk`,
+    `closed_at`; B2B partial → invoices waterfalled oldest-first,
+    `PARTIALLY_RECOVERED`, `amount_at_risk` follows `Σ outstanding` (INV-33), case
+    stays open; a final B2B settlement two-hops
+    `PARTIALLY_RECOVERED → PLAYBOOK_ACTIVE → RECOVERED` (D-106). Every close
+    writes a `PAYMENT_RECONCILED` `CaseEvent` and removes any human-queue entry
+    (D-107).
+  - **`payloads.py`** — `payment_link.*` extractors (id, status, amount_paid,
+    `notes.torque_case_id`, customer contact). `payment.*` / `subscription.*`
+    fields reuse `torque.ingestion.payloads`.
+  - **`tasks.py`** — `reconcile_event_task` (one `session_scope`, delegates,
+    idempotent).
+- **Wiring (D-104):** `torque.api.webhooks` dispatches `reconcile_event_task` for
+  `payment.captured` / `subscription.charged` / `payment_link.*` right after the
+  `Event` write (no buffer — the engine is correct whenever it runs and
+  idempotent on `Event.processed`). `celery_app` autodiscovers
+  `torque.reconciliation`. `conftest.make_api_client` gains a
+  `reconcile_enqueue` spy.
+- **New helpers:** `torque.ingestion.identity.find_counterparty` (match-only, no
+  create — reconciliation must not invent an identity);
+  `torque.coordination.human_queue.remove_for_case`.
+- **Guarantees preserved:** one `Event`'s whole reconciliation is one transaction;
+  `recovery_type` / `recovered_amount` written only inside
+  `guards.module7_writer` (INV-06, held open across every flush that carries the
+  change); matched case rows are `SELECT … FOR UPDATE` (no double-close under
+  concurrency); `PAYMENT_RECONCILED` atomic with the close; re-run on a
+  `processed` `Event` is `NOOP`; every lookup tenant-scoped (a merchant-B case is
+  never reconciled by a merchant-A payment).
+- **Decisions:** D-103 (state-machine edges + reporting), D-104 (webhook wiring,
+  no buffer), D-105 (matchability / 24h window / AMBIGUOUS tie-break), D-106 (B2B
+  waterfall + two-hop settlement), D-107 (human-queue removal on close), D-108
+  (package + zero migrations).
+- **Deviations from blueprint:** none in behaviour. §7.1 leaves several rules
+  implicit (which statuses are "open", the AMBIGUOUS case, how a partially-paid
+  B2B case reaches `RECOVERED`) — D-105 / D-106 fill them conservatively.
+- **Deferred introduced / still deferred:** Module 5's `GENERATE_PAYMENT_LINK`
+  execution still doesn't *create* `PaymentLink` rows, so the §7.1.1 direct path
+  lights up fully only once it does (Module 7 already updates rows from
+  `payment_link.*` and creates one when the payload carries a Torque case ref);
+  Module 8 scoring; `LOG_PROMISE`; real channel adapters; `WRITTEN_OFF` (a
+  human-only `ESCALATED_TO_HUMAN` outcome — Module 10); Agent Console +
+  `escalation_resolution` + `HUMAN_RESOLVED` (Module 10).
+- **Tests at completion:** **772** `def test_` functions (was 737); `pytest`
+  collects and passes **900** (was 865), 0 fail / 0 skip. Module 7 adds 7 test
+  files (32 functions): direct / indirect / multi / nomatch / case-closure /
+  idempotency-&-concurrency (two real connections) / webhook integration. Three
+  pre-existing state-machine tests inverted (they asserted the U-01 edges were
+  *not* legal); `test_schema_introspection` gains Module 7 assertions;
+  `conftest` gains a `payment_link` body builder + the reconcile spy. `ruff`
+  clean. `alembic head` `0016`; roundtrip green. 1 cosmetic
+  `StarletteDeprecationWarning` (pre-existing).
+- **Verification status:** complete + verified against a live Postgres. `pytest`
+  900 green, `ruff` clean, roundtrip green, `alembic head` `0016`,
+  `git diff HEAD -- models/guards.py` empty, `state_machine.py` diff = the two
+  approved edges only, two-connection concurrency test green.
+- **Recommended commit message:**
+  `Module 7: payment reconciliation & attribution — match, attribute, close; DETECTED/DIAGNOSING→CANCELLED (U-01)`
+
+---
+
 ## What comes next
 
-**Module 6 — Compliance & Cross-Leg Guardrail Engine — COMPLETE.** The
-`GuardrailEngine` facade is the one interface Module 5 consults; the Outreach
-Coordinator (4h cross-leg quiet period, live merge, defer, open-conversation),
-the full WhatsApp gate, the §6.3 escalation ceiling, and the persistent human
-queue are all live. Next is **Module 7 — Payment Reconciliation & Attribution**
-(match `payment.captured` / `subscription.charged` / `payment_link.paid` to open
-cases; `AGENT_ASSISTED` vs `SELF_RECOVERED`; `credit_weight` re-split; case
-closure + `PAYMENT_RECONCILED`; the `DETECTED/DIAGNOSING → CANCELLED` edges,
-U-01). Do not start it without an approved scope.
+**Module 7 — Payment Reconciliation & Attribution — COMPLETE.** Verified success
+signals now close cases correctly: direct `PaymentLink` attribution, indirect
+`(merchant, counterparty, amount)` matching with the 24h `AGENT_ASSISTED` window,
+merged-set `credit_weight` re-split, B2B partial waterfalls, and the §7.1.4
+self-paid `CANCELLED` path (U-01 fully resolved). Next is **Module 8 — Recovery
+Scoring Model** — implement `(probability × amount_at_risk) ÷ cost` as a live
+function (the Decision F cold-start table + `promise_keeping_rate` warm-start,
+capped 0.5×–1.3×), cost from `ChannelRateCard`, recompute on
+creation/diagnosis/daily. It replaces the `torque.coordination.outreach_coordinator.
+priority()` placeholder through that seam (D-098). Do not start without an
+approved scope.
 
-Deferred items that do **not** block Module 7: Module 8 scoring (the `priority()`
-seam awaits it); `LOG_PROMISE` execution; real channel adapters; the earlier
-inter-module dispatch triggers (D-080 / D-088 / D-093); the §5.3 first-touch MAC
-lookup (D-083, U-08); a real Temporal engine (D-090); cross-stratum merge.
+Deferred items that do **not** block Module 8: `LOG_PROMISE` execution; real
+channel adapters; the earlier inter-module dispatch triggers (D-080 / D-088 /
+D-093); the §5.3 first-touch MAC lookup (D-083, U-08); a real Temporal engine
+(D-090); cross-stratum merge; Module 10 (Agent Console, `WRITTEN_OFF`,
+`escalation_resolution`, `HUMAN_RESOLVED`).

@@ -137,18 +137,18 @@ def test_diagnosing_to_systemic_hold_still_illegal():
         )
 
 
-def test_detected_to_cancelled_still_illegal():
-    with pytest.raises(IllegalTransitionError):
-        assert_transition(
-            CaseStatus.DETECTED, CaseStatus.CANCELLED, LegType.PAYMENT_DEGRADATION
-        )
+def test_detected_to_cancelled_is_legal():
+    # Module 7 §7.1.4 (U-01 #1) — a customer self-pays before Torque diagnoses.
+    assert_transition(
+        CaseStatus.DETECTED, CaseStatus.CANCELLED, LegType.PAYMENT_DEGRADATION
+    )
 
 
-def test_diagnosing_to_cancelled_still_illegal():
-    with pytest.raises(IllegalTransitionError):
-        assert_transition(
-            CaseStatus.DIAGNOSING, CaseStatus.CANCELLED, LegType.PAYMENT_DEGRADATION
-        )
+def test_diagnosing_to_cancelled_is_legal():
+    # Module 7 §7.1.4 (U-01 #2) — a customer self-pays mid-diagnosis.
+    assert_transition(
+        CaseStatus.DIAGNOSING, CaseStatus.CANCELLED, LegType.PAYMENT_DEGRADATION
+    )
 
 
 def test_transition_case_executes_playbook_active_to_systemic_hold(

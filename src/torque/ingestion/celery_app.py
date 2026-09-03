@@ -32,7 +32,13 @@ celery_app.conf.update(
     timezone="UTC",
 )
 celery_app.autodiscover_tasks(
-    ["torque.ingestion", "torque.diagnosis", "torque.policy", "torque.execution"]
+    [
+        "torque.ingestion",
+        "torque.diagnosis",
+        "torque.policy",
+        "torque.execution",
+        "torque.reconciliation",
+    ]
 )
 
 # Repeatable beat jobs. §2.5 systemic detection (60s), plus the Module 5 §5.6
@@ -62,3 +68,4 @@ from torque.diagnosis import tasks as _diagnosis_tasks  # noqa: E402,F401
 from torque.execution import tasks as _execution_tasks  # noqa: E402,F401
 from torque.ingestion import tasks as _tasks  # noqa: E402,F401
 from torque.policy import tasks as _policy_tasks  # noqa: E402,F401
+from torque.reconciliation import tasks as _reconciliation_tasks  # noqa: E402,F401

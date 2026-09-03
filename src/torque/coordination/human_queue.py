@@ -104,6 +104,22 @@ def list_for_merchant(
     return list(session.scalars(stmt).all())
 
 
+def remove_for_case(session: Session, case: RevenueLeakCase) -> bool:
+    """Drop the human-queue entry for `case`, if any. Returns whether a row was
+    removed. Called by Module 7 when reconciliation closes a case
+    (`RECOVERED` / `CANCELLED`) — a resolved case no longer needs a human. This
+    is a queue-consistency concern, not Agent Console behaviour (Module 10)."""
+    scope = TenantScope(session, case.merchant_id)
+    entry = session.scalars(
+        scope.select(HumanQueueEntry).where(HumanQueueEntry.case_id == case.case_id)
+    ).first()
+    if entry is None:
+        return False
+    scope.delete(entry)
+    session.flush()
+    return True
+
+
 def sweep_escalated_to_human(
     session: Session, merchant_id: str, *, now: datetime | None = None
 ) -> list[HumanQueueEntry]:
@@ -155,6 +171,7 @@ __all__ = [
     "HumanQueueReason",
     "enqueue",
     "list_for_merchant",
+    "remove_for_case",
     "route_broken_promise",
     "sweep_escalated_to_human",
 ]

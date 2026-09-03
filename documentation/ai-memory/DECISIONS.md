@@ -1827,6 +1827,133 @@ BY D-0NN`.
   and with two real DB connections.
 - **Status:** IN FORCE
 
+## D-103 — `DETECTED/DIAGNOSING → CANCELLED` added; reconciliation is the only driver
+- **Milestone:** Module 7 — Payment Reconciliation & Attribution
+- **Decision:** Resolve U-01 #1/#2 — the two pre-playbook `→ CANCELLED` edges §7.1.4
+  needs, and confirm they need no `guards.py` change.
+- **Chosen:** Add exactly `CaseStatus.CANCELLED` to `_TRANSITIONS[DETECTED]` and
+  `_TRANSITIONS[DIAGNOSING]` in `src/torque/state_machine.py`, and replace the
+  docstring's "NOT YET ADDED" block with a note that Module 7 added them. The
+  exact diff was **reported before the edit** (per the Module 7 execution rule) and
+  shown again in the verification report. `guards.py` is **not** touched —
+  `RevenueLeakCase.status` has no `before_flush` guard; `transition_case` /
+  `assert_transition` is the enforcement point, and `CANCELLED` was already in
+  `TERMINAL_STATUSES`. Only `torque.reconciliation` ever drives these edges,
+  trigger `"customer_self_paid"`, writing a `STATUS_CHANGED` + a
+  `PAYMENT_RECONCILED` `CaseEvent`. Attribution is always `SELF_RECOVERED` (no
+  playbook ran).
+- **Alternatives:** a `guards.py` flush guard on `status` (a larger change; the
+  existing helper-enforced model already works); a new `CaseEventType` for the
+  self-pay (violates D-007's closed vocabulary — `STATUS_CHANGED` +
+  `PAYMENT_RECONCILED` already say it).
+- **Reasoning:** §7.1.4 is explicit; U-01 assigns these to Module 7. The §4
+  diagram already carries the same customer-self-paid `→ CANCELLED` transition out
+  of `PLAYBOOK_ACTIVE`.
+- **Consequence:** `git diff HEAD -- src/torque/state_machine.py` contains exactly
+  the two edges + the docstring; `guards.py` diff empty. Three pre-existing
+  state-machine tests were inverted (they had asserted the edges were *not* legal).
+- **Status:** IN FORCE — resolves `UNRESOLVED.md` U-01 (fully).
+
+## D-104 — Reconciliation is wired into Module 2's webhook dispatch, not deferred
+- **Milestone:** Module 7
+- **Decision:** Does the `payment.captured` / `subscription.charged` /
+  `payment_link.*` → Module 7 trigger get wired now, or left as an
+  orchestration-layer deferral like D-080 / D-088 / D-093?
+- **Chosen:** **Wired now.** `torque.api.webhooks` dispatches `reconcile_event_task`
+  for `RECONCILE_EVENT_TYPES` immediately after the `Event` write — the same
+  pattern as the M7b buffer / M7c systemic / Leg-4 invoice dispatch. **No buffer,
+  no countdown:** `reconcile_event` is correct whenever it runs (no case yet →
+  `NO_MATCH`; a case present → recover / cancel) and is idempotent on
+  `Event.processed`.
+- **Alternatives:** deferral (D-080 pattern) — but §7.3 explicitly frames Module 7
+  as "a consumer of already-verified `Event` rows from Module 2's pipeline", and
+  unlike Modules 3/4/5 there is no downstream module whose tested resting state a
+  reconcile dispatch could disturb (Module 7 is the last consumer).
+- **Consequence:** `conftest.make_api_client` patches
+  `reconcile_event_task.apply_async` (spy `client.reconcile_enqueue`);
+  `celery_app` autodiscovers `torque.reconciliation`. A same-session self-recovery
+  is still handled by the M7b/M8 buffers (no case is created), and reconcile then
+  finds nothing → `NO_MATCH`.
+- **Status:** IN FORCE
+
+## D-105 — Matchability, the AGENT_ASSISTED window, and the AMBIGUOUS tie-break
+- **Milestone:** Module 7
+- **Decision:** Fill the three places §7.1 leaves implicit.
+- **Chosen:**
+  - **Which cases match (§7.1.2):** open = `PLAYBOOK_ACTIVE`, `ESCALATED_TO_HUMAN`,
+    and (B2B only) `PARTIALLY_RECOVERED`; non-superseded. Amount: non-B2B requires
+    `amount == amount_at_risk` (a debit either went through or it didn't); B2B
+    also allows a partial (`0 < amount < amount_at_risk`). `PAUSED` and
+    `SYSTEMIC_HOLD` cases are **not** matched (nothing produces `PAUSED` yet;
+    `SYSTEMIC_HOLD` outreach is suppressed by design). The §7.1.4 self-paid
+    path targets `DETECTED` / `DIAGNOSING` with `amount == amount_at_risk`.
+  - **AGENT_ASSISTED vs SELF_RECOVERED (§7.1.2):** `AGENT_ASSISTED` iff a
+    non-blocked `Action` exists for the case (via any `ActionCase` row) with
+    `executed_at` within `PolicyConfig.attribution_window_hours` (24h) of the
+    reconciliation. A direct `PaymentLink` match (§7.1.1) is always
+    `AGENT_ASSISTED`; a §7.1.4 pre-diagnosis close is always `SELF_RECOVERED`.
+  - **Multiple non-merged matches → AMBIGUOUS:** attribute the payment to the
+    case with the latest executed `Action` (tie-break latest `opened_at`), mark
+    it `RECOVERED` with `recovery_type = AMBIGUOUS`, and leave the others open.
+    A merged-outreach set (cases sharing one `Action`, §7.1.3) is instead
+    recovered together as `AGENT_ASSISTED` with the `ActionCase.credit_weight`
+    re-split ∝ `amount_at_risk`.
+- **Reasoning:** each is the conservative reading that closes cases correctly
+  without over-attributing; `AMBIGUOUS` is a Blueprint §4 `RecoveryType` value
+  §7.1 does not otherwise place.
+- **Status:** IN FORCE
+
+## D-106 — B2B partial waterfalls oldest-first; a final settlement two-hops to RECOVERED
+- **Milestone:** Module 7
+- **Decision:** How a partial B2B payment lands, and how a `PARTIALLY_RECOVERED`
+  B2B case ever reaches `RECOVERED` (the state machine has no
+  `PARTIALLY_RECOVERED → RECOVERED` edge — only R4's `→ PLAYBOOK_ACTIVE`).
+- **Chosen:** A partial payment is applied to the case's `B2BInvoice` rows
+  **oldest `due_date` first**, decrementing `outstanding_amount`;
+  `case.amount_at_risk` is set to the new `Σ outstanding` (INV-33) and
+  `case.recovered_amount` accumulates. If outstanding remains → the case
+  transitions to (or stays) `PARTIALLY_RECOVERED` and stays open. If a payment
+  clears the last balance and the case is already `PARTIALLY_RECOVERED`, Module 7
+  performs the **two-hop `PARTIALLY_RECOVERED → PLAYBOOK_ACTIVE → RECOVERED`**
+  (both edges legal for B2B), trigger `"reconciliation_final_settlement"` then
+  `"payment_reconciled"`, in one transaction. `recovered_amount` on a fully
+  recovered case equals the full original balance.
+- **Alternatives:** add a `PARTIALLY_RECOVERED → RECOVERED` state-machine edge
+  (not in the §4 diagram, not sanctioned by R4 — rejected); match a specific
+  invoice by amount (the oldest-first waterfall is simpler and standard AR
+  practice).
+- **Status:** IN FORCE
+
+## D-107 — Module 7 removes a closed case's human-queue entry
+- **Milestone:** Module 7
+- **Decision:** When reconciliation closes a case that is in the Module 6 human
+  queue, what happens to the queue entry?
+- **Chosen:** Module 7 calls `human_queue.remove_for_case(session, case)` on a
+  `RECOVERED` / `CANCELLED` close (not on a B2B `PARTIALLY_RECOVERED` — the case
+  stays open). A resolved case does not need a human. This is queue-consistency,
+  not Agent Console behaviour (Module 10 — Q-I): Module 7 never writes
+  `escalation_resolution` or `HUMAN_RESOLVED`.
+- **Alternatives:** leave the stale entry (a human would open a closed case);
+  a Module 10 sweep (later, and would leave the queue transiently wrong).
+- **Status:** IN FORCE
+
+## D-108 — Module 7 is a new `torque.reconciliation` package; zero migrations
+- **Milestone:** Module 7
+- **Decision:** Package placement and schema footprint.
+- **Chosen:** A new top-level package `torque.reconciliation` (`reconcile.py`
+  engine, `payloads.py` `payment_link.*` extractors, `tasks.py` Celery task),
+  parallel to `torque.ingestion` / `diagnosis` / `policy` / `execution` /
+  `coordination`. **No migration:** `recovery_type` / `recovered_amount` /
+  `closed_at` (M1), `PaymentLink` (M6a), `B2BInvoice` (M1) and the
+  `PAYMENT_RECONCILED` `CaseEventType` (M1) already exist. `find_counterparty`
+  (a no-create match) added to `torque.ingestion.identity`;
+  `human_queue.remove_for_case` added to `torque.coordination`.
+- **Reasoning:** consistent layout; the blueprint's Module 7 needs no new
+  entity. A composite `(merchant_id, counterparty_id)` index on
+  `revenue_leak_case` was considered and **not** added (demo scale; D-053's
+  precedent only adds an index the blueprint names).
+- **Status:** IN FORCE
+
 ---
 
 ## Notes not recorded as decisions

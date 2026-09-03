@@ -390,9 +390,17 @@ def test_m7c_state_machine_has_exactly_the_approved_edge():
 
     assert CaseStatus.SYSTEMIC_HOLD in _TRANSITIONS[CaseStatus.PLAYBOOK_ACTIVE]
     assert _TRANSITIONS[CaseStatus.SYSTEMIC_HOLD] == {CaseStatus.DIAGNOSING}
-    # the withheld edges are still withheld
+    # M7c did not add DIAGNOSING -> SYSTEMIC_HOLD; that is still withheld.
     assert CaseStatus.SYSTEMIC_HOLD not in _TRANSITIONS[CaseStatus.DIAGNOSING]
-    assert CaseStatus.CANCELLED not in _TRANSITIONS[CaseStatus.DETECTED]
+
+
+def test_module7_added_detected_and_diagnosing_to_cancelled():
+    # Module 7 §7.1.4 (U-01 #1/#2) — customer self-paid before Torque could act.
+    from torque.enums import CaseStatus
+    from torque.state_machine import _TRANSITIONS
+
+    assert CaseStatus.CANCELLED in _TRANSITIONS[CaseStatus.DETECTED]
+    assert CaseStatus.CANCELLED in _TRANSITIONS[CaseStatus.DIAGNOSING]
 
 
 # --- Milestone 8 structural invariants ---------------------------------
@@ -479,3 +487,37 @@ def test_module6_is_one_migration_no_new_enum_no_new_case_event_type(engine):
     assert "human_queue" in tables
     # no speculative Module 7+ tables
     assert not {"escalation_resolution", "agent_queue_claim"} & tables
+
+
+# --- Module 7 structural invariants (no migration) ----------------------
+
+
+def test_module7_is_logic_only_no_schema_change(engine):
+    """Reconciliation & attribution is pure logic over columns built in Module 1
+    (`recovery_type`, `recovered_amount`, `closed_at`), `PaymentLink` (M6a) and
+    `B2BInvoice` (M1). No new table, no new enum, no new `CaseEventType`."""
+    from torque.enums import CaseEventType, RecoveryType
+
+    tables = set(inspect(engine).get_table_names())
+    assert {"payment_link", "b2b_invoice", "revenue_leak_case", "event"} <= tables
+    assert not {"reconciliation", "payment_match", "recovery"} & tables
+    assert len(list(CaseEventType)) == 10  # PAYMENT_RECONCILED already existed
+    assert {r.value for r in RecoveryType} == {"AGENT_ASSISTED", "SELF_RECOVERED", "AMBIGUOUS"}
+
+
+def test_module7_added_self_paid_cancel_edges_only():
+    """Module 7 touched `state_machine.py` for exactly the two U-01 edges — no
+    other transition set changed, `CANCELLED` was already terminal."""
+    from torque.enums import CaseStatus
+    from torque.state_machine import _TRANSITIONS, TERMINAL_STATUSES
+
+    assert CaseStatus.CANCELLED in _TRANSITIONS[CaseStatus.DETECTED]
+    assert CaseStatus.CANCELLED in _TRANSITIONS[CaseStatus.DIAGNOSING]
+    assert CaseStatus.CANCELLED in TERMINAL_STATUSES
+    # PLAYBOOK_ACTIVE / ESCALATED_TO_HUMAN recovery edges were already present
+    assert {CaseStatus.RECOVERED, CaseStatus.PARTIALLY_RECOVERED, CaseStatus.CANCELLED} <= (
+        _TRANSITIONS[CaseStatus.PLAYBOOK_ACTIVE]
+    )
+    assert {CaseStatus.RECOVERED, CaseStatus.PARTIALLY_RECOVERED} <= (
+        _TRANSITIONS[CaseStatus.ESCALATED_TO_HUMAN]
+    )

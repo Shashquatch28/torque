@@ -128,18 +128,38 @@ Still deferred within Module 3's area:
   tables are pre-production-checklist data, same posture as `MacCodeRegistry`
   (Decision M / Part E item 1).
 
-## Module 4 — Policy & Playbook Engine (runtime)
+## Module 4 — Policy & Playbook Engine — ✅ COMPLETE (runtime)
 
-- 🔧 The **playbook catalog** — concrete `Playbook` rows per `root_cause_code`
-  (`PLAYBOOK_NSF_RETRY`, `PLAYBOOK_REQUEST_NEW_INSTRUMENT`, …). None are seeded.
-- 🔧 **`PlaybookRun` instantiation** — selecting a playbook, creating the run,
-  version pinning at runtime.
-- 🔧 `active_step_id` advancement / graph traversal.
-- 🔧 `step_timing_semantics` execution (offset from previous step's completion;
-  defer to next `allowed_hours` window; never fire early/skip).
-- 🔧 `payday_cycle_override_enabled` runtime substitution.
-- 🔧 `multi_case_template` / `multi_case_context` rendering.
-- 🔧 Action-specific `params` schemas (deferred from M4's graph validation).
+Built in the Module 4 run (`torque.policy`). Now **DONE**:
+- ✅ The **playbook catalog** — the eleven §4.1 `Playbook` rows, ORM-seeded via
+  `torque.policy.catalog.seed_catalog` (D-085), one per non-trivial root cause.
+- ✅ **`PlaybookRun` instantiation** — `activate_case`: selection, version pinning
+  at creation (INV-39), `active_step_id = entry`, `status = RUNNING`; no-playbook /
+  disabled → `ESCALATED_TO_HUMAN` (D-086).
+- ✅ The **rules for reading** the graph — `torque.policy.traversal` (`entry_step_id`,
+  `next_step_id`, `is_terminal`, `node`, `step_template`).
+- ✅ **`payday_cycle_override_enabled`** *policy gate* — `torque.policy.payday`
+  (D-087); reads the merchant flag and returns whether/what to apply.
+- ✅ **`multi_case_template`** contract — `step_template(node, multi_case)` returns
+  the multi template or the single template + a defer signal (§4.4).
+
+Still deferred (these are **Module 5**, the execution half — not Module 4's job):
+- 🔧 Runtime graph-traversal **execution** — actually advancing `active_step_id`
+  through the DB as actions fire (Module 4 provides the pure rules; Module 5 drives
+  them).
+- 🔧 `step_timing_semantics` **execution** / fire-time computation — offset from the
+  previous step's completion, defer to the next `allowed_hours` window, never fire
+  early/skip (D-025 assigns this to Module 5).
+- 🔧 The payday-cycle **runtime substitution** — computing the payday-adjusted fire
+  time from the signal Module 4's policy gate approves (§4.3, Module 5).
+- 🔧 `multi_case_context` **rendering** — interpolating both cases' amounts via
+  `ActionCase` at send time (Module 5/6 Outreach Coordinator).
+- 🔧 Action-specific `params` **schemas** — still deferred; the blueprint keeps
+  `ActionTemplate.params` freeform (decision E) and assigns execution-time param
+  validation to Module 5.
+- 🔧 The **Module 3 → Module 4 auto-dispatch trigger** (D-088) — the engine + task
+  are ready and invocable, but no diagnosis-completion code enqueues
+  `activate_case_task`; the cross-module trigger is an orchestration-layer concern.
 
 ## Module 5 — Execution / Orchestration
 

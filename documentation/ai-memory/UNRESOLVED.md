@@ -79,6 +79,11 @@ if it produced a design decision, a `DECISIONS.md` entry. Do not delete it.
   actually needs to record (e.g. timing, the node's `action_id`, retry counters).
 - **Must implementation stop first?** No — but Module 5 should revise this schema
   deliberately (with a `DECISIONS.md` entry) rather than assume it is final.
+- **Module 4 update (2026-09-03):** Module 4 did **not** touch this. It writes no
+  `STEP_TRANSITIONED` events — `PlaybookRun` instantiation is a status-neutral act
+  (the case is already `PLAYBOOK_ACTIVE`) and Module 4 provides only the pure
+  *rules for reading* a graph (`torque.policy.traversal`), never advancing
+  `active_step_id`. The provisional shape is preserved for Module 5 to settle.
 
 ## U-03 — Tier 1 vs Tier 3 MAC precedence
 

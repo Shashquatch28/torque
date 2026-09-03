@@ -89,6 +89,13 @@ class PlaybookNotFoundError(TorqueError):
     published `playbook` version to validate the override against."""
 
 
+class PlaybookGraphError(TorqueError):
+    """A runtime graph-reading helper (`torque.policy.traversal`) was asked for a
+    node/edge that does not exist in an already-validated `steps_graph` — a
+    programming error, never malformed data (the graph cleared save-time
+    validation)."""
+
+
 # --- Action / ActionCase (Blueprint Section 3 / Section 2.3) ---------------
 
 

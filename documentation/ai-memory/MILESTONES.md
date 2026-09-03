@@ -883,17 +883,87 @@ built in one continuous run on top of the committed Module 2.)*
 
 ---
 
+## Module 4 — Policy & Playbook Engine — COMPLETE
+
+*(One module = one run = one audit. Closes the runtime half of Module 4; the M4
+definition contract — versioned `Playbook`, `MerchantPlaybookConfig`,
+`PlaybookRun` schema, save-time validation — was already committed.)*
+
+- **Commit:** *(uncommitted — maintainer commits after the audit)*. HEAD at
+  implementation time: the committed Module 3.
+- **Migration:** **none.** No schema change — the catalog seeds through the ORM
+  (D-085), the payday flag lives in `Merchant.risk_appetite_config` (D-087), and
+  `multi_case_template` lives in step `params`. `alembic head` stays `0014`.
+- **Objective:** take a diagnosed `PLAYBOOK_ACTIVE` case, select the eligible
+  §4.1 catalog playbook, resolve merchant availability, and instantiate a
+  version-pinned `PlaybookRun` at the graph's entry step — the runtime contract
+  Module 5 executes. "Module 4's contract ends at 'here is a valid graph and the
+  rules for reading it'" (§4).
+- **Scope delivered (new `torque.policy` package):**
+  - **Catalog (§4.1):** `catalog.py` — the eleven playbooks (slugs, leg/mandate
+    discriminators, concrete `steps_graph` outreach/retry ladders, template
+    `stopping_rules`), `seed_catalog` inserting them ORM-validated (D-085). UPI
+    AutoPay playbook `max_attempts = 3` (≤3 save-time rule intact).
+  - **Selection (§4.1):** `selection.py` — `select_playbook_id(leg, root_cause,
+    mandate_type)`. Subscription NSF is rail-specific (CARD/UPI_AUTOPAY/NACH);
+    `INSTRUMENT_NOT_RECURRING_CAPABLE` maps per leg; network directive is *not* a
+    separate input (Module 3 already folded it into the root cause). "Trivial"
+    causes → `None`.
+  - **Run instantiation:** `engine.activate_case` — eligibility (PLAYBOOK_ACTIVE,
+    non-superseded), idempotency (one live run per case, D-089), pin the latest
+    version, `active_step_id = entry`, `status = RUNNING`, all atomic. No-playbook
+    / disabled → `ESCALATED_TO_HUMAN` (D-086). No CaseEvent for run creation
+    (D-089).
+  - **Version pinning (D-021/D-024):** composite-FK pin; a later version never
+    alters an in-flight run; effective rules resolve off the pinned base (D-089).
+  - **Effective config:** `resolve_effective_stopping_rules` — merchant override
+    deep-merged onto the pinned version's rules (reuses `torque.playbooks`).
+  - **Traversal rules (§4):** `traversal.py` — pure `entry_step_id` /
+    `next_step_id` / `is_terminal` / `node` / `step_template`. No DB, no clock, no
+    `active_step_id` mutation, no action execution (all Module 5).
+  - **Payday policy (§4.3):** `payday.py` — the override *gate* (`Merchant`
+    config, default true); the fire-time *computation* stays Module 5 (D-025).
+  - **Multi-case (§4.4):** `step_template(node, multi_case)` returns the
+    `multi_case_template` when merged, else the single template + a `defer` signal
+    (→ Module 5 `OUTREACH_COORDINATOR_DEFERRED`, never a silent drop). Reuses the
+    existing `ActionCase` attribution — no second model.
+  - **`tasks.py`:** `activate_case_task` (Celery), registered in `celery_app`.
+- **State machine:** uses the pre-existing `PLAYBOOK_ACTIVE → ESCALATED_TO_HUMAN`
+  edge for the no-playbook/disabled route; run creation itself needs no
+  transition (case already `PLAYBOOK_ACTIVE`). **No new edge, no change to
+  `state_machine.py`.**
+- **Decisions:** D-085 (ORM-seeded catalog), D-086 (no-playbook → escalate),
+  D-087 (payday flag in `risk_appetite_config`), D-088 (no auto-dispatch), D-089
+  (no run-created event / one-live-run idempotency / pinned-base rules).
+- **Deviations from blueprint:** none.
+- **Deferred work introduced:** the Module 3 → Module 4 auto-dispatch trigger
+  (D-088); runtime traversal execution, timing computation, guardrail
+  enforcement, Temporal (all Module 5).
+- **`state_machine.py` / `guards.py`:** **both byte-unchanged vs HEAD**
+  (`git diff HEAD` empty).
+- **Tests at completion:** **632** `def test_` functions (was 585); `pytest`
+  collects and passes **754** (was 687), 0 fail / 0 skip. Module 4 adds 8 test
+  files (47 functions → 67 collected cases). `ruff` clean. `alembic head` `0014`
+  (no migration); roundtrip green.
+- **Verification status:** complete + verified against a live Postgres
+  (docker-compose db, host 5442). `pytest` 754 green, `ruff` clean, roundtrip
+  green, `state_machine.py` / `guards.py` diffs empty, no migration created.
+- **Recommended commit message:**
+  `Module 4: policy & playbook engine — catalog, selection, version-pinned run instantiation`
+
+---
+
 ## What comes next
 
-**Module 3 — Diagnosis Engine — COMPLETE.** Cases are classified to a
-`root_cause_code` with a calibrated-from-day-one `diagnosis_confidence`, and
-routed `DIAGNOSING → PLAYBOOK_ACTIVE` (≥ T) or `→ ESCALATED_TO_HUMAN` (< T). Next
-is **Module 4 — Policy & Playbook Engine** (root cause → bounded action graph;
-it reads `suggested_timing_adjustment` and consumes the `PLAYBOOK_ACTIVE` cases
-Module 3 routes). Do not start it without an approved scope.
+**Module 4 — Policy & Playbook Engine — COMPLETE.** Diagnosed `PLAYBOOK_ACTIVE`
+cases now select a catalog playbook and get a version-pinned `PlaybookRun` at
+their entry step (or escalate when no automated playbook applies). Next is
+**Module 5 — Execution / Orchestration** (the Temporal workflow per run: runtime
+graph traversal driving `active_step_id`, timing computation incl. the payday
+substitution + `allowed_hours` deferral, guardrail checks immediately before each
+action, the atomic `Action` + `CaseEvent` write, and settling U-02's
+`STEP_TRANSITIONED` payload). Do not start it without an approved scope.
 
-Deferred items that do **not** block Module 4: the Module 2 → Module 3
-auto-dispatch trigger (D-080) and the §5.3 first-touch MAC lookup (D-083, blocked
-on U-08); plus the standing Module-2 refinements (`ISSUER_SPECIFIC` systemic
-detection U-08; subscription systemic rollup D-073; a real storefront pixel; a
-compose worker/beat service).
+Deferred items that do **not** block Module 5: the Module 3 → Module 4 (D-088)
+and Module 2 → Module 3 (D-080) auto-dispatch triggers; the §5.3 first-touch MAC
+lookup (D-083, blocked on U-08); the standing Module-2 refinements.

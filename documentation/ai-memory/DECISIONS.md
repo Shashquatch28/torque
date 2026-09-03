@@ -1403,6 +1403,111 @@ BY D-0NN`.
   (Decision M / Part E item 1).
 - **Status:** IN FORCE
 
+## D-085 — The playbook catalog is seeded through the ORM, not an Alembic data migration
+- **Milestone:** Module 4 — Policy & Playbook Engine
+- **Decision:** How are the eleven §4.1 catalog playbooks persisted?
+- **Chosen:** An application-level `torque.policy.catalog.seed_catalog(session)`
+  that inserts each `PlaybookIdentity` + version-1 `Playbook` **through the ORM**,
+  so the `before_flush` guard validates every `steps_graph` / `stopping_rules`
+  (incl. the UPI ≤3 ceiling) exactly as it would a hand-authored playbook.
+  Idempotent (re-seed inserts nothing; never forks a version 2). The catalog data
+  (slugs, leg/mandate discriminators, graphs, rules) lives in `catalog.py` as the
+  single source of truth.
+- **Alternatives:** an Alembic data migration with raw-SQL INSERTs of the JSON.
+- **Reasoning:** a raw-SQL migration bypasses the ORM guard — a malformed catalog
+  graph could ship unvalidated, contradicting §4.2's "catch a bad playbook before
+  it can ever run". Seeding is not schema; no migration was created for Module 4.
+- **Consequence:** deploy/demo/test calls `seed_catalog`. `MacCodeRegistry`
+  (migration-seeded, 0006) stays as-is — it has no graph to validate.
+- **Status:** IN FORCE
+
+## D-086 — A PLAYBOOK_ACTIVE case with no eligible playbook escalates to human
+- **Milestone:** Module 4 — Policy & Playbook Engine
+- **Decision:** What does Module 4 do with a `PLAYBOOK_ACTIVE` case whose
+  `root_cause_code` has no catalog playbook (§4.1's "non-trivial" wording leaves
+  the fraud hard-stop, UPI cap-exhausted, NACH clearing-pending, dispute, and
+  subscription card-expired causes deliberately unmapped), or whose merchant has
+  **disabled** the matching playbook?
+- **Chosen:** Route it `PLAYBOOK_ACTIVE → ESCALATED_TO_HUMAN` via the **existing
+  legal** state-machine edge, writing the normal `STATUS_CHANGED` event (distinct
+  `ActivationOutcome.ESCALATED_NO_PLAYBOOK` / `ESCALATED_DISABLED` for
+  observability). No `PlaybookRun` is created; the case is never left stuck in
+  `PLAYBOOK_ACTIVE`.
+- **Alternatives:** invent a playbook for every ≥T root cause (contradicts §4.1
+  "non-trivial"); leave the case parked (a permanent limbo); a new state/edge
+  (the edge already exists — no change to `state_machine.py`).
+- **Reasoning:** §4.1 explicitly gives "one playbook per **non-trivial**
+  root_cause_code" — some causes have none by design, and a human is the correct
+  handler (close the fraud case, contact the dispute, wait on the clearing). The
+  `PLAYBOOK_ACTIVE → ESCALATED_TO_HUMAN` edge is legal (Section 4) and not
+  exclusively Module 6's ceiling-escalation. Module 3 routes all ≥T causes to
+  `PLAYBOOK_ACTIVE`; this is the faithful, safe disposition of the ones with no
+  automation.
+- **Consequence:** fraud-suspected, UPI cap-exhausted, NACH clearing-pending,
+  dispute-suspected, and subscription card-expired cases escalate. If a future
+  refinement adds a playbook (e.g. mandate-renewal for card-expired), the mapping
+  in `selection.py` changes and they stop escalating — no state-machine change.
+- **Status:** IN FORCE
+
+## D-087 — `payday_cycle_override_enabled` lives in `Merchant.risk_appetite_config`
+- **Milestone:** Module 4 — Policy & Playbook Engine
+- **Decision:** Where does the §4.3 merchant payday-override flag (default `true`)
+  live, and who applies the suggestion?
+- **Chosen:** In the existing `Merchant.risk_appetite_config` JSONB under key
+  `payday_cycle_override_enabled` (default `True` when absent) — no schema change.
+  `torque.policy.payday` owns the **policy gate** (`payday_override_enabled`,
+  `effective_timing_adjustment`): it returns the case's
+  `suggested_timing_adjustment` iff the flag is on, else `None`. The actual
+  fire-time computation is Module 5 (D-025).
+- **Alternatives:** a dedicated `Merchant` column; a `MerchantPlaybookConfig`
+  field.
+- **Reasoning:** `risk_appetite_config` is documented as the "default max attempts
+  / escalation ceiling, etc." bag — a per-merchant policy flag is exactly that.
+  The blueprint frames the override as a **runtime substitution** at Module 5's
+  timing step, so Module 4 stores nothing extra and only gates the signal.
+- **Status:** IN FORCE
+
+## D-088 — Module 4 is not auto-dispatched from Module 3 (orchestration deferral)
+- **Milestone:** Module 4 — Policy & Playbook Engine
+- **Decision:** Does diagnosis completion automatically enqueue activation?
+- **Chosen:** **No** — mirrors D-080. `activate_case` + `activate_case_task` are
+  the finished, independently-invocable Module 4 surface, but no Module 3 code
+  enqueues them. The cross-module trigger is an orchestration-layer concern.
+- **Alternatives:** enqueue `activate_case_task` at the end of `diagnose_case`.
+- **Reasoning:** an inline eager enqueue would run activation synchronously inside
+  diagnosis and change Module 3's tested post-diagnosis contract (cases end
+  `PLAYBOOK_ACTIVE`, no run yet). Same reasoning as Module 2 → Module 3 (D-080).
+- **Consequence:** tracked in `DEFERRED.md` under the orchestration layer.
+- **Status:** IN FORCE
+
+## D-089 — Run creation writes no CaseEvent; one live run per case; effective rules off the pinned base
+- **Milestone:** Module 4 — Policy & Playbook Engine
+- **Decision:** Three run-instantiation specifics: does creating a `PlaybookRun`
+  write a `CaseEvent`? what makes activation idempotent? which base do effective
+  stopping rules merge onto?
+- **Chosen:**
+  * **No CaseEvent for run creation.** The case is already `PLAYBOOK_ACTIVE`
+    (Module 3), so there is no status change, and §4's closed `CaseEvent`
+    vocabulary has no "run created" / "playbook selected" type — inventing one
+    would violate D-007/D-076. (`STEP_TRANSITIONED` is Module 5's, U-02.) A
+    no-playbook/disabled **escalation** does change status → a normal
+    `STATUS_CHANGED`.
+  * **Idempotency = one live run per case, app-enforced.** `activate_case` is a
+    no-op if a `RUNNING`/`PAUSED` run already exists for the case; a terminal run
+    (`COMPLETED`/`CANCELLED`/…) does not block a fresh activation. No new DB
+    constraint — a case legitimately has multiple runs over its lifetime.
+  * **Effective rules merge the merchant override onto the run's PINNED version's
+    base** (`resolve_effective_stopping_rules`), reflecting the current override
+    (`enabled` gates availability at creation, not resolution — D-023). Save-time
+    validation still keys off the latest version (D-023); runtime resolution keys
+    off the pinned one, so a run's rules stay coherent with its pinned graph.
+- **Alternatives:** a synthetic run-created event; a UNIQUE(case_id) partial
+  index; merging onto the latest version at runtime (would let a new publish shift
+  an in-flight run's rules).
+- **Reasoning:** keeps the audit vocabulary closed, the schema untouched, and
+  version pinning meaningful for rules as well as graph.
+- **Status:** IN FORCE
+
 ---
 
 ## Notes not recorded as decisions

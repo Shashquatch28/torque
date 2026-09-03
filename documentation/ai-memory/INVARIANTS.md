@@ -494,6 +494,51 @@ violation**.
 - **Enforcement:** `HELPER` — `_apply_result` reads `_diagnosis_confidence_threshold()`.
 - **Tests:** `tests/test_diagnosis_routing.py`.
 
+## INV-39 — A run pins its playbook version at creation and never re-resolves it (Module 4)
+- **Domain:** `torque.policy.activate_case` + `resolve_effective_stopping_rules`.
+- **Invariant:** `activate_case` writes `(playbook_id, playbook_version)` = the
+  latest catalog version at creation time; a later `version + 1` never alters an
+  existing run (composite FK, D-024). Effective stopping rules resolve the merchant
+  override onto the run's **pinned** version's base, so a run's graph *and* rules
+  stay coherent across a mid-flight publish (D-089).
+- **Enforcement:** `SCHEMA` (composite FK, INV of M4 definition) + `HELPER`
+  (`_latest_version` reads MAX at creation; `resolve_effective_stopping_rules`
+  loads the pinned row).
+- **Tests:** `tests/test_module4_versioning.py`.
+
+## INV-40 — At most one live PlaybookRun per case; activation is idempotent (Module 4)
+- **Domain:** `torque.policy.activate_case`.
+- **Invariant:** activation is a no-op when the case already has a `RUNNING` or
+  `PAUSED` run — no duplicate live run is ever created for a case. A terminal run
+  does not block a fresh activation (a case may have several runs over its life).
+  Repeated task execution / redelivery is therefore safe.
+- **Enforcement:** `HELPER` — the `_live_run` gate (no DB UNIQUE constraint, by
+  design — D-089).
+- **Tests:** `tests/test_module4_activation.py`, `tests/test_module4_task.py`.
+
+## INV-41 — A PLAYBOOK_ACTIVE case is never left without a run or an escalation (Module 4)
+- **Domain:** `torque.policy.activate_case`.
+- **Invariant:** for an eligible `PLAYBOOK_ACTIVE` case, activation always reaches
+  a terminal disposition — either a `PlaybookRun` (RUN_CREATED) or
+  `PLAYBOOK_ACTIVE → ESCALATED_TO_HUMAN` via the existing legal edge when no
+  catalog playbook applies or the merchant disabled it (D-086). The case is never
+  parked in `PLAYBOOK_ACTIVE` with no run, and no new state/edge is invented. The
+  escalation is a normal `STATUS_CHANGED` (no run-created event type — D-089).
+- **Enforcement:** `HELPER` — `activate_case` branches; `transition_case` enforces
+  the legal edge.
+- **Tests:** `tests/test_module4_activation.py`.
+
+## INV-42 — Every catalog playbook is valid and reachable (Module 4)
+- **Domain:** `torque.policy.catalog`.
+- **Invariant:** every one of the eleven catalog `steps_graph`/`stopping_rules`
+  clears the same save-time validation as any playbook (ORM-seeded, D-085), and
+  every catalog playbook is the selection target of at least one legal
+  `(leg, root_cause[, mandate])` — nothing in the catalog is dead, nothing
+  malformed can seed.
+- **Enforcement:** `ORM-GUARD` (`before_flush` validates each graph at seed) +
+  `HELPER` (selection map).
+- **Tests:** `tests/test_module4_catalog.py`, `tests/test_module4_selection.py`.
+
 ---
 
 ## Invariants that are PLANNED (not yet enforced anywhere)

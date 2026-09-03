@@ -22,7 +22,7 @@ Do not describe `PLANNED` / `DEFERRED` behaviour as if it exists.
 | 1 — Core Data Model | shared case object, tenancy, PII/DPDP, event sourcing, retry-rail compliance entities | `IMPLEMENTED` (M1–M6b) |
 | 2 — Signal Ingestion | webhook intake, signature verify, idempotency, out-of-order buffer, cross-leg dedup, systemic detection job | **`IMPLEMENTED` (Module 2 complete)** — all four legs: Leg 1 `payment.failed` (90s buffer, `PAYMENT_DEGRADATION`), Leg 3 `subscription.charged.failed` (30s buffer, `SUBSCRIPTION_FAILURE`, UPI/NACH/Card rail seeding), Leg 2 `checkout.abandoned` (signed `/internal` injection endpoint, no buffer, `CHECKOUT_ABANDONMENT`), Leg 4 `invoice.overdue` (no buffer, `B2BInvoice` + §3 grouping, `B2B_RECEIVABLE`); **bidirectional** §2.4 cross-leg Merge; §2.5 `NETWORK_WIDE` systemic detection + hold/resume + §2.7 hold-on-ingest across all legs; `PLAYBOOK_ACTIVE→SYSTEMIC_HOLD` edge added (dormant). Celery/Redis broker-only + Celery beat. Remaining *refinements* (not blockers): `ISSUER_SPECIFIC` detection (U-08); systemic rollup over subscription failures (D-073); a real storefront pixel (Part D item 1); dispatch to Module 3 |
 | 3 — Diagnosis Engine | root-cause classification + confidence; owns `root_cause_code` enum | **`IMPLEMENTED` (Module 3 complete)** — `torque.diagnosis` package: rule-based per-leg classification (§3.2), `T = 0.65` confidence routing to `PLAYBOOK_ACTIVE`/`ESCALATED_TO_HUMAN` (§3.3), `is_hard_decline` set here (D-058/D-084), `suggested_timing_adjustment` (§3.4, new col), one `DIAGNOSIS_COMPLETED` event per case, idempotent + atomic + tenant-scoped. Auto-dispatch from Module 2 (D-080) and §5.3 first-touch MAC lookup (D-083) deferred. See §8C |
-| 4 — Policy & Playbook Engine | root cause → bounded action graph; playbook authoring/validation (validation part `IMPLEMENTED` in M4) | `PLANNED` (runtime) |
+| 4 — Policy & Playbook Engine | root cause → bounded action graph; playbook authoring/validation (validation part `IMPLEMENTED` in M4) | **`IMPLEMENTED` (Module 4 complete)** — `torque.policy` package: the eleven-playbook §4.1 catalog (ORM-seeded, D-085), root-cause→playbook selection, version-pinned `PlaybookRun` instantiation for `PLAYBOOK_ACTIVE` cases (no-playbook/disabled → `ESCALATED_TO_HUMAN`, D-086), pure graph-reading traversal rules, payday-override policy gate (§4.3), `multi_case_template` contract (§4.4). Runtime execution/timing/guardrails/Temporal are Module 5. See §8D |
 | 5 — Execution / Orchestration | channel adapters, retry-budget enforcement, atomic Action+CaseEvent write (primitive `IMPLEMENTED` in M5), Temporal workflow | `PLANNED` (runtime) |
 | 6 — Compliance & Cross-Leg Guardrail Engine | `GuardrailEngine.check()`, Outreach Coordinator, escalation ceiling, human queue | `PLANNED` |
 | 7 — Reconciliation & Attribution | match payments → cases, `AGENT_ASSISTED` vs `SELF_RECOVERED`, write `credit_weight` | `PLANNED` |
@@ -596,8 +596,56 @@ both the fresh `DETECTED` entry and the §2.5-resumed `DIAGNOSING` entry (skips 
 task are ready, no leg enqueues them); the §5.3 first-touch MAC-code lookup at
 diagnosis time (D-083, blocked on U-08 — Module 3 *consumes* an existing
 `network_directive_tier` but extracts no MAC code); playbook selection /
-instantiation (Module 4); any retry/outreach/Temporal (Module 5); scoring
+instantiation (Module 4, now §8D); any retry/outreach/Temporal (Module 5); scoring
 (Module 8). No new `CaseEventType`, no state-machine edge, no `guards.py` change.
+
+---
+
+## 8D. Policy & Playbook Engine — `torque.policy` — `IMPLEMENTED` (Module 4)
+
+Runtime layer over the `torque.playbooks` authoring contract. `activate_case(
+session, case_id=...)` turns a diagnosed `PLAYBOOK_ACTIVE` case into a
+version-pinned `PlaybookRun` (or an escalation). Package layout:
+
+- **`catalog.py`** — the eleven §4.1 playbooks (slugs, `leg_type`/`mandate_type`
+  discriminators, concrete `steps_graph` outreach/retry ladders, template
+  `stopping_rules`). `seed_catalog(session)` inserts them **through the ORM** so
+  the `before_flush` guard validates every graph + the UPI ≤3 ceiling (D-085,
+  idempotent). Application-seeded, **not** a migration.
+- **`selection.py`** — `select_playbook_id(leg_type, root_cause_code,
+  mandate_type)`. Subscription `NSF_SOFT_DECLINE` is rail-specific;
+  `INSTRUMENT_NOT_RECURRING_CAPABLE` maps per leg; the "trivial" §4.1 causes →
+  `None`. Network-directive tier is *not* re-read (Module 3 folded it into the
+  root cause).
+- **`engine.py`** — `activate_case` / `ActivationOutcome` (NOOP / RUN_CREATED /
+  ESCALATED_NO_PLAYBOOK / ESCALATED_DISABLED): eligibility (PLAYBOOK_ACTIVE,
+  non-superseded, INV-41), one-live-run idempotency (INV-40, D-089), pin latest
+  version (INV-39), `active_step_id = entry`, `status = RUNNING`, all in one
+  `atomic()`; no-playbook / merchant-disabled → `PLAYBOOK_ACTIVE →
+  ESCALATED_TO_HUMAN` (D-086). Run creation writes **no** CaseEvent (D-089).
+  `resolve_effective_stopping_rules(session, run)` deep-merges the merchant
+  override onto the run's **pinned** version's base (D-089).
+- **`traversal.py`** — the pure "rules for reading" a graph: `entry_step_id`,
+  `next_step_id(graph, step, outcome)`, `is_terminal`, `node`, `step_template`
+  (§4.4 single vs `multi_case_template` + defer signal). No DB, no clock, no
+  `active_step_id` mutation, no action execution — all Module 5.
+- **`payday.py`** — the §4.3 policy gate: `payday_override_enabled(merchant)`
+  (from `Merchant.risk_appetite_config`, default true, D-087) and
+  `effective_timing_adjustment(case, merchant)`. The fire-time computation is
+  Module 5 (D-025).
+- **`tasks.py`** — `activate_case_task` (Celery), registered in `celery_app`.
+
+**State machine:** uses only the pre-existing `PLAYBOOK_ACTIVE →
+ESCALATED_TO_HUMAN` edge (no-playbook/disabled); run creation needs no transition
+(case already `PLAYBOOK_ACTIVE`). `state_machine.py` byte-unchanged.
+
+**Not here:** the Module 3 → Module 4 auto-dispatch trigger (D-088 — engine +
+task ready, nothing enqueues them); runtime graph traversal execution / advancing
+`active_step_id`; timing/fire-time computation (D-025); the payday-date and
+`allowed_hours` deferral math; guardrail enforcement (budgets, quiet hours);
+`Action` writes; the Temporal workflow; settling U-02's `STEP_TRANSITIONED`
+payload — all Module 5. No new `CaseEventType`, no state-machine edge, no
+`guards.py` change, no migration.
 
 ---
 
@@ -758,6 +806,12 @@ hashing, no code that drives `PLAYBOOK_ACTIVE → SYSTEMIC_HOLD` (edge legal but
 dormant). **Module 3 diagnosis is now `IMPLEMENTED`** (§8C) — but with no
 automatic `Event`→Diagnosis dispatch from ingestion (D-080; the engine + task are
 ready, nothing enqueues them) and no §5.3 first-touch MAC-code lookup at diagnosis
-time (D-083, blocked on U-08). Still absent: no playbook selection or runtime
-traversal, no channel adapters, no `GuardrailEngine`, no Outreach Coordinator, no
-reconciliation, no scoring, no reporting, no UI, no `MacCodeRegistry` full seed.
+time (D-083, blocked on U-08). **Module 4 policy & playbook engine is now
+`IMPLEMENTED`** (§8D) — the §4.1 catalog, selection, and version-pinned
+`PlaybookRun` instantiation — but with no automatic Diagnosis→Activation dispatch
+(D-088) and no runtime execution: no graph *traversal execution* / `active_step_id`
+advancement, no timing/fire-time computation (D-025), no channel adapters, no
+`PlaybookRun` Temporal workflow. Still absent: no `GuardrailEngine` enforcement, no
+Outreach Coordinator, no reconciliation, no scoring, no reporting, no UI, no
+`MacCodeRegistry` full seed, no code that drives `PLAYBOOK_ACTIVE → SYSTEMIC_HOLD`
+(edge legal but dormant).

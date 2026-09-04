@@ -25,6 +25,14 @@ dependencies = [
     # outcomes.
     "celery>=5.4",
     "redis>=5",
+    # AI Phase 7 (Shadow ML, observational only — never consulted by any
+    # authoritative decision path): a lightweight, CPU-only baseline
+    # classifier (LogisticRegression) + its feature-dict vectorizer. Chosen
+    # over the Blueprint's own future-production XGBoost+SHAP suggestion
+    # because that suggestion is gated on 500+ resolved cases and nothing
+    # close to that volume exists yet (documentation/ai-memory/DECISIONS.md).
+    # No GPU, no external model API, no vector database.
+    "scikit-learn>=1.4",
 ]
 
 [project.optional-dependencies]

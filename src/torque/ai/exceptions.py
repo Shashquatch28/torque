@@ -46,3 +46,30 @@ class NarrativeGenerationError(AIError):
     this failure — it is read separately and first, and nothing about its
     own success or content depends on generation succeeding afterward.
     """
+
+
+class ShadowMLError(AIError):
+    """Base class for every Phase 7 (`torque.ai.shadow`) shadow-ML error."""
+
+
+class InsufficientTrainingDataError(ShadowMLError):
+    """Raised when a shadow model is asked to fit on zero labeled examples.
+
+    A small-but-nonzero labeled set is never rejected this way — it is
+    fit and reported with an explicit `insufficient_data` /
+    `limitations` note on the resulting `ShadowTrainingReport` instead (see
+    `torque.ai.shadow.training`). This exception fires only for the
+    genuinely-empty case, where there is nothing to fit at all.
+    """
+
+
+class ModelNotFittedError(ShadowMLError):
+    """`ShadowModel.predict_proba` was called before `.fit(...)`."""
+
+
+class FeatureExtractionError(ShadowMLError):
+    """A case lacks the diagnostic facts a `ShadowFeatureVector` requires
+    (no recorded diagnosis yet, or no `DIAGNOSIS_COMPLETED` event despite
+    one). Raised by `torque.ai.shadow.features.extract_features` — never
+    silently substituted with a fabricated/default feature vector.
+    """

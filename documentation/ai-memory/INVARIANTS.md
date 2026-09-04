@@ -1067,6 +1067,68 @@ violation**.
 
 ---
 
+## INV-65 — Shadow-ML predictions are structurally incapable of influencing authoritative Torque state, and features are leakage-free by construction (AI Phase 7)
+
+- **Domain:** `src/torque/ai/shadow/*` (branch `ai-layer`, not yet on
+  `main`).
+- **Invariant:**
+  1. **No mutation-capable import, no write-shaped call.** `torque.ai.
+     shadow.*` inherits, unmodified, the same forbidden-import list and
+     write-call substring sweep INV-60 already establishes for the whole
+     `torque.ai` package (`tests/test_ai_boundary.py`'s file discovery is a
+     recursive `rglob("*.py")` over `src/torque/ai/`, so the `shadow/`
+     subpackage was covered automatically with zero test-file change).
+  2. **A shadow prediction is never consumed by anything that decides.**
+     No `torque.ai.shadow` symbol is imported by `torque.coordination.
+     outreach_coordinator.priority`, `torque.coordination.human_queue`,
+     `torque.policy.*`, `torque.diagnosis.*`, `torque.execution.*`,
+     `torque.coordination.guardrail_engine`, or `torque.state_machine` —
+     structurally impossible in the reverse direction too, since none of
+     those modules are permitted to import `torque.ai` at all (the
+     boundary is one-directional both ways: `torque.ai` cannot import
+     them, and by separate convention nothing in the deterministic core
+     imports `torque.ai`).
+  3. **`ShadowPrediction` and `ShadowTrainingReport` cannot be constructed
+     without their non-authoritative caveat attached.** Both DTOs
+     (`torque.ai.shadow.schemas`) carry non-optional `disclaimer` (a fixed
+     `SHADOW_DISCLAIMER` constant, never LLM-authored, never omitted) and
+     sample-size fields (`n_training_cases` / `n_total_cases`+`n_train`+
+     `n_test`) — Pydantic itself rejects a construction missing them.
+  4. **Feature extraction never reads a post-outcome field.**
+     `ShadowFeatureVector` (`torque.ai.shadow.schemas`) has no field named
+     `recovery_type`, `recovered_amount`, `recovery_score`,
+     `recovery_score_breakdown`, `escalation_resolution`, `closed_at`, or
+     `status` — structurally absent, not merely unused
+     (`tests/test_ai_shadow_features.py::
+     test_shadow_feature_vector_has_no_post_outcome_fields`). Every field
+     that *is* present is computed as of a single, explicit cutoff (the
+     case's own `DIAGNOSIS_COMPLETED` event timestamp), never a later
+     time — see D-147 for the full reasoning and D-148 for the B2B
+     `amount_at_risk` leakage fix this phase found and closed.
+  5. **Training/evaluation is read-only and tenant-scoped.**
+     `torque.ai.shadow.features.build_shadow_dataset` reads exclusively
+     through `torque.db.scoped.TenantScope`, one merchant at a time
+     (D-150); no `session.add`/`.delete`/`.commit` exists anywhere in
+     `torque.ai.shadow.{features,training,scoring}` — proven both by the
+     same substring sweep as item 1 and by a `db.new`/`.dirty`/`.deleted`
+     empty-check after every `train_and_evaluate_shadow_model`/
+     `score_case` call in `tests/test_ai_shadow_{training,scoring}.py`.
+  6. **No persistence, no migration.** No database table exists for a
+     fitted model, a training run, or a prediction; `alembic heads` is
+     unchanged at `0018_escalation_resolution` by this phase (D-149).
+- **Enforcement:** `TEST` (`tests/test_ai_boundary.py`'s import-graph and
+  write-call-substring checks, covering `shadow/*` automatically) + `TEST`
+  (`tests/test_ai_shadow_features.py`'s schema-field-set and leakage-
+  regression tests) + `TEST` (`tests/test_ai_shadow_{training,scoring}.py`'s
+  no-write proofs) + `HELPER` (`torque.db.scoped.TenantScope`, reused
+  unmodified).
+- **Tests:** `tests/test_ai_boundary.py`, `tests/test_ai_shadow_labels.py`,
+  `tests/test_ai_shadow_features.py`, `tests/test_ai_shadow_model.py`,
+  `tests/test_ai_shadow_evaluation.py`, `tests/test_ai_shadow_training.py`,
+  `tests/test_ai_shadow_scoring.py`.
+
+---
+
 ## Invariants that are PLANNED (not yet enforced anywhere)
 
 - Pre-debit ≥24h gap actually blocking a retry: **IMPLEMENTED in Module 5**

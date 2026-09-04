@@ -2774,6 +2774,168 @@ explicitly-assigned §10.8 human-resolution write path.)*
 
 ---
 
+## AI Phase 7 — Shadow ML — COMPLETE
+
+- **Branch:** `ai-layer`. **Not on `main`.**
+- **Verified before starting:** `git status`/`git branch --show-current`
+  confirmed `ai-layer`, clean tree on top of the Phase 6 commit. Read the
+  full `src/torque/ai/` package (Phases 0-6), the Phase 5 evaluation
+  implementation/tests, the Phase 6 API + Agent Console integration, and
+  the deterministic scoring/diagnosis/reconciliation modules this phase is
+  forbidden from importing but needed to understand (`torque.state_machine.
+  is_terminal`/`TERMINAL_STATUSES`, `torque.scoring.score._days_since_
+  failure`, `torque.reporting.incrementality._RECOVERED_STATUSES`,
+  `torque.models.guards.tier_rank`) — all to determine what an authoritative,
+  non-leaking feature representation legitimately looks like, exactly as
+  the task's own audit-first instruction required.
+- **Objective:** the smallest production-quality shadow-ML architecture
+  that lets Torque build a model-ready feature representation from
+  authoritative historical case data, train/evaluate a deliberately simple
+  baseline model, generate shadow predictions, evaluate whether the model
+  carries useful signal, and stay extensible — while remaining structurally
+  incapable of influencing any Torque decision.
+- **Files created:**
+  - `src/torque/ai/shadow/__init__.py` — package boundary statement.
+  - `src/torque/ai/shadow/labels.py` — `is_training_eligible`,
+    `recovered_label` (local mirrors of `torque.state_machine.is_terminal`
+    and `torque.reporting.incrementality._RECOVERED_STATUSES`, cross-tested).
+  - `src/torque/ai/shadow/schemas.py` — `ShadowFeatureVector`,
+    `ShadowTrainingExample`, `ShadowPrediction`, `ShadowClassificationMetrics`,
+    `ShadowTrainingReport`, `FEATURE_SCHEMA_VERSION`, `SHADOW_DISCLAIMER`.
+  - `src/torque/ai/shadow/features.py` — `extract_features`,
+    `build_shadow_dataset` (DB-touching, `TenantScope`d, the disjoint
+    narrower read path from `gather_case_evidence` — see D-147/D-148).
+  - `src/torque/ai/shadow/model.py` — `ShadowModel` (ABC),
+    `LogisticRegressionShadowModel` (see D-146).
+  - `src/torque/ai/shadow/evaluation.py` — `compute_classification_metrics`,
+    `majority_class_baseline_proba`.
+  - `src/torque/ai/shadow/training.py` — `temporal_train_test_split`,
+    `train_and_evaluate_shadow_model`.
+  - `src/torque/ai/shadow/scoring.py` — `score_case`.
+  - `tests/ai_shadow_cases.py` — real-domain-data test builders (mirrors
+    `tests/ai_eval_cases.py`'s pattern).
+  - `tests/test_ai_shadow_labels.py` (5 tests), `tests/test_ai_shadow_
+    features.py` (16), `tests/test_ai_shadow_model.py` (10), `tests/
+    test_ai_shadow_evaluation.py` (7), `tests/test_ai_shadow_training.py`
+    (10), `tests/test_ai_shadow_scoring.py` (6) — **54 tests total**.
+- **Files modified:**
+  - `src/torque/ai/exceptions.py` — `ShadowMLError`, `InsufficientTraining
+    DataError`, `ModelNotFittedError`, `FeatureExtractionError` (all
+    subclass `AIError`; additive only, the three existing exceptions
+    byte-unchanged).
+  - `pyproject.toml` — `scikit-learn>=1.4` added to `[project.dependencies]`
+    with an inline justification comment (see D-146); `uv.lock` updated
+    (`uv sync --extra dev`).
+  - `documentation/ai-memory/{AI_BLUEPRINT.md, DECISIONS.md, INVARIANTS.md}`
+    — this entry, D-146..D-150, and INV-65.
+- **Architecture:**
+  ```
+  build_shadow_dataset()        (TenantScope-read, terminal+diagnosed cases)
+          v
+  temporal_train_test_split()   (sorted by diagnosis-completion cutoff)
+          v
+  ShadowModel.fit(train)         (LogisticRegressionShadowModel, pure)
+          v
+  compute_classification_metrics(test) + majority_class_baseline_proba(train)
+          v
+  ShadowTrainingReport   (target/features/split/metrics/limitations/disclaimer)
+
+  score_case(case_id, fitted_model)  ->  ShadowPrediction
+      (n_training_cases + disclaimer always present)
+  ```
+- **Target:** `recovered = status in {RECOVERED, CANCELLED}` — byte-identical
+  to Module 9b's own intent-to-treat definition
+  (`torque.reporting.incrementality._RECOVERED_STATUSES`), mirrored locally
+  in `torque.ai.shadow.labels` and cross-tested against both that constant
+  and the real `torque.state_machine.is_terminal`
+  (`tests/test_ai_shadow_labels.py`).
+- **Features:** exactly the Blueprint §8.4 named set (`leg_type,
+  root_cause_code, diagnosis_confidence, amount_at_risk, days_since_failure,
+  promise_keeping_rate, risk_score, network_directive.tier, mandate_type`),
+  each computed as of the case's own `DIAGNOSIS_COMPLETED` event timestamp
+  — see D-147 for the full temporal-cutoff reasoning and D-148 for the B2B
+  `amount_at_risk` leakage fix. A repo-wide audit during this phase found
+  `MerchantCounterparty.risk_score` has **zero writers anywhere in the
+  codebase** (always `None`/missing in practice) and `promise_keeping_rate`
+  is a static, seed-only value with no in-life writer either — both
+  reported honestly rather than assumed to carry signal they don't.
+- **Dataset scale — measured, not assumed:** `torque.demo.seed.seed_demo`
+  produces **7 terminal cases** for `acc_demo` (5 `RECOVERED`, 1
+  `CANCELLED`, 1 `EXHAUSTED`), of which **6 are eligible** for the labeled
+  population (the `CANCELLED` case self-recovered before diagnosis ran,
+  §7.1.4/D-058, so it has no diagnosis fields to build a feature vector
+  from — correctly excluded, not a bug) — the one-click scenario injectors
+  add zero more terminal cases (every scenario ends open or blocked, never
+  resolved). Measured live: `train_and_evaluate_shadow_model(acc_demo)` ->
+  `n_total_cases=6, n_train=5, n_test=1,
+  class_distribution={"recovered":5,"not_recovered":1}`, `test_metrics`
+  (accuracy/precision/recall/F1 all `1.0` on the single held-out case,
+  `roc_auc=null` — undefined with one test example, reported as `null` not
+  fabricated), `baseline_metrics` identical to `test_metrics` on this
+  one-example split (no real lift measurable at this scale),
+  `insufficient_data=true`. Every `ShadowTrainingReport` this phase
+  produces against real data reports `insufficient_data=True` with an
+  explicit `limitations` entry stating the exact count and why it is too
+  small — never a fabricated confident number.
+- **Model:** `sklearn.linear_model.LogisticRegression` over a
+  `DictVectorizer`-encoded feature dict — a documented departure from
+  `AI_BLUEPRINT.md` §10's own prior **RECOMMENDED** (not `LOCKED`)
+  XGBoost + SHAP suggestion, justified by the measured 7-case dataset scale
+  against that suggestion's own 500-case gate. See D-146. `scikit-learn`
+  is the first ML dependency this program has added; no `numpy`/`pandas`/
+  `xgboost`/`shap`/vector-database dependency exists.
+- **Persistence / API / UI:** none. No migration (`alembic heads` unchanged
+  at `0018_escalation_resolution`), no FastAPI route, no
+  `src/torque/ui/static/*` change — per the task's own explicit instruction
+  to stay backend/evaluation-only unless the blueprint required otherwise
+  (it does not). See D-149.
+- **Deliberately not built** (per the task's explicit scope): any API
+  endpoint or UI surface for `ShadowTrainingReport`/`ShadowPrediction`; any
+  model persistence; a real (network-backed) model API; cross-merchant
+  pooled training (D-150); XGBoost/SHAP; embeddings; a vector database; any
+  demo-seed-data redesign to manufacture more labeled cases; consumption of
+  any shadow prediction by `priority()`, `human_queue.priority`, playbook
+  selection, diagnosis, guardrails, or execution.
+- **`state_machine.py` / `guards.py` / `narrative.py::_validate_citations` /
+  `tests/test_ai_boundary.py`:** all byte-unchanged vs. the Phase 6 commit
+  (`git diff` empty for each; `test_ai_boundary.py` needed **zero** edits —
+  its `AI_PACKAGE.rglob("*.py")` file discovery picked up the new `shadow/`
+  subpackage automatically and it passed unmodified).
+- **Tests at completion:** the 6 new Phase 7 test files — **54** passed.
+  The `tests/test_ai_*.py` family (10 files, including the 6 new Phase 7
+  ones) — **177** passed (was 123 after Phase 6, **+54**). Full regression
+  suite — **1413** passed (was 1359 after Phase 6, **+54**), 0 failed, 0
+  skipped, the same 1 pre-existing cosmetic `StarletteDeprecationWarning`.
+  `ruff check .` clean, repository-wide. `alembic upgrade head` -> `0018`
+  (no-op — no migration); roundtrip green
+  (`tests/test_zz_migrations_roundtrip.py`, 1 passed).
+- **Verification status:** complete + verified — `uv run pytest
+  tests/test_ai_shadow_*.py -q` (54 passed), `uv run pytest tests/test_ai_*.py
+  -q` (177 passed), `uv run pytest -q` (full suite, 1413 passed), `uv run
+  ruff check .` (clean, repository-wide), `uv run alembic upgrade head`
+  (succeeds, no new migration; head `0018_escalation_resolution`), `uv run
+  alembic current`/`heads` (both `0018_escalation_resolution`), `uv run
+  pytest tests/test_zz_migrations_roundtrip.py -q` (1 passed), `git diff
+  --check` (clean — only pre-existing CRLF/LF advisories), `git diff HEAD --
+  src/torque/state_machine.py src/torque/models/guards.py` (both empty),
+  `git log main -1` (unchanged at `a0fb0f3`, confirming `main` untouched).
+- **Deviations from the literal task wording (all additive, all
+  documented):** the model choice (`LogisticRegression`, not the task's own
+  earlier-recommended XGBoost+SHAP) — D-146, explicitly authorized by the
+  task's own "choose the model based on the actual target/feature structure
+  after inspecting the repository" instruction; `network_directive_tier`
+  reconstructed from event history rather than read off the current column
+  — a stricter-than-strictly-required leakage precaution (D-147); test
+  fixtures write `CaseEvent` rows with an explicit `timestamp` rather than
+  via `append_case_event`'s server-side `now()` default, because Postgres
+  resolves `now()` to the surrounding transaction's start time (a single
+  fixed instant per test), which would make "before cutoff / after cutoff"
+  fixtures unconstructable otherwise (`tests/ai_shadow_cases.py`).
+- **Recommended commit message:**
+  `AI Phase 7: Shadow ML — src/torque/ai/shadow/ (labels, schemas, features, model, evaluation, training, scoring), LogisticRegression baseline over the exact Blueprint §8.4 feature set (D-146..D-148), backend/evaluation-only with no persistence/API/UI (D-149), single-merchant scoped (D-150), INV-65; 54 new tests, zero deterministic-core changes, no migration`
+
+---
+
 ## (historical) What came next after Module 10
 
 **Module 10 — UI/UX — COMPLETE.** Torque is now a runnable, demo-able product:

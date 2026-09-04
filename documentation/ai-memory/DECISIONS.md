@@ -3231,6 +3231,201 @@ BY D-0NN`.
 
 ---
 
+## D-146 — Shadow-ML model choice: `LogisticRegression`, a documented departure from AI_BLUEPRINT.md §10's own prior "RECOMMENDED" XGBoost + SHAP suggestion
+
+- **Milestone:** AI Phase 7 — Shadow ML (`ai-layer` branch, not `main`).
+- **Decision:** Use `sklearn.linear_model.LogisticRegression` (over a
+  `DictVectorizer`-encoded feature dict) as the one baseline shadow model,
+  rather than the XGBoost + SHAP combination `AI_BLUEPRINT.md` §10 named
+  before this phase was implemented.
+- **Reasoning:** that prior suggestion was written against the Blueprint
+  §8.4 *future-production* model, itself explicitly gated on 500+ resolved
+  cases — and was marked **RECOMMENDED**, not **LOCKED**, precisely because
+  no maintainer sign-off had happened yet. A direct, repo-wide audit run
+  during this phase found the seeded demo dataset (`torque.demo.seed.
+  seed_demo`) produces exactly **7 terminal cases** for its one demo
+  merchant (5 `RECOVERED`, 1 `CANCELLED`, 1 `EXHAUSTED`), of which **6 are
+  eligible for the labeled training population** — the one `CANCELLED`
+  case self-recovered *before* diagnosis ran (§7.1.4, D-058) and so has no
+  `root_cause_code`/`diagnosis_confidence` to build a feature vector from
+  — and the demo's one-click scenario injectors add zero more terminal
+  cases (every scenario ends open or blocked, never resolved). Fitting a gradient-boosted tree ensemble and
+  computing SHAP attributions on single-digit-to-low-double-digit rows would
+  be statistically meaningless and would add two heavyweight dependencies
+  (`xgboost`, `shap`, plus their own transitive footprint) to prove nothing
+  a demo could honestly claim. The Phase 7 task's own governing instructions
+  explicitly permitted this: "do NOT optimize for model sophistication," "a
+  simple scikit-learn baseline is acceptable if the dependency is
+  justified," and "choose the model based on the actual target/feature
+  structure after inspecting the repository." `LogisticRegression` is
+  deterministic (`random_state=0`), CPU-only, has directly-inspectable
+  signed per-feature coefficients (a dependency-free stand-in for
+  "explainability" at this scale), and is the same linear-model family any
+  future XGBoost+SHAP upgrade would need to be benchmarked against — nothing
+  built here is thrown away when that upgrade happens.
+- **Alternatives considered:** XGBoost + SHAP as originally suggested —
+  rejected for the reasons above. A hand-rolled logistic regression (no new
+  dependency at all) — rejected: scikit-learn's implementation is
+  numerically battle-tested, keeps the code short, and the task text itself
+  anticipated and permitted exactly this dependency. A rule-based / purely
+  frequency-based scorer with no model-fitting step at all — rejected: it
+  would not exercise "train/evaluate a baseline model" as the task
+  literally asked, and would not be extensible toward the named future
+  upgrade path the way a `ShadowModel` interface + a real (if simple) fit
+  step is.
+- **Consequence:** `scikit-learn>=1.4` was added to `pyproject.toml`'s
+  `[project.dependencies]` (not a new extras group — matching the
+  `celery`/`redis` precedent of adding a subsystem's one real dependency
+  directly, D-057). No `numpy`/`pandas`/`xgboost`/`shap`/vector-database
+  dependency was added. `torque.ai.shadow.model.ShadowModel` (an `ABC` with
+  `fit`/`predict_proba`/`model_id`/`is_fitted`) is the seam a future,
+  more sophisticated model implementation plugs into without any caller
+  changing — mirrors `torque.ai.providers.base.LLMProvider`'s own shape
+  (D-142). A training set containing only one outcome class (a real
+  possibility at this scale) falls back to an explicit constant predictor
+  rather than letting `sklearn.linear_model.LogisticRegression.fit` raise.
+- **Status:** IN FORCE.
+
+## D-147 — Shadow-ML feature temporal cutoff: every feature computed as of the case's own `DIAGNOSIS_COMPLETED` event, never `closed_at` or a live column's final value
+
+- **Milestone:** AI Phase 7 — Shadow ML (`ai-layer` branch, not `main`).
+- **Decision:** `torque.ai.shadow.features.extract_features` computes every
+  Blueprint §8.4 feature as of a single, explicit cutoff — the timestamp of
+  `case`'s own `DIAGNOSIS_COMPLETED` `CaseEvent` — never as of "now," the
+  case's `closed_at`, or a mutable column's present-day value.
+- **Reasoning:** `root_cause_code`/`diagnosis_confidence` do not exist
+  before diagnosis completes, so diagnosis-completion time is the earliest
+  point at which a real prediction could ever be made; anchoring every
+  other feature to that same instant is what makes a feature vector
+  computed for training (on an already-closed case) comparable to one
+  computed for live scoring (on a still-open case) — the same inputs would
+  be available at the same relative point in either case. Anchoring to
+  `closed_at` instead would make `days_since_failure` measure "how long
+  until this case was resolved" — a quantity correlated with the very
+  outcome being predicted, not a legitimate predictive feature. `root_cause_
+  code`/`diagnosis_confidence` themselves need no event-time reconstruction
+  because diagnosis happens **at most once** per case (INV-35) and is never
+  revised afterward (their current row value already *is* their value as of
+  diagnosis time) — but `network_directive_tier` genuinely can change after
+  diagnosis (the tier only ratchets tighter, INV-05, and a new directive can
+  arrive at any point in the case's active life), so it is reconstructed
+  from `NETWORK_DIRECTIVE_RECEIVED` events with `timestamp <= cutoff`
+  (most-restrictive wins, via the existing `torque.models.guards.tier_rank`)
+  rather than read off the case's current, possibly-later-tightened column.
+- **Alternatives considered:** anchoring to "now" at scoring time and to
+  `closed_at` at training time (two different reference points) — rejected,
+  this is exactly the inconsistency that would make a model's training
+  distribution not match its live-inference distribution. Reading
+  `network_directive_tier` directly off the current row for simplicity —
+  rejected as a genuine, avoidable leakage vector once the ratchet
+  semantics were understood; the event-time reconstruction was a small
+  enough addition to implement properly rather than document as an accepted
+  gap.
+- **Consequence:** `ShadowFeatureVector.as_of` is carried as explicit
+  metadata on every feature vector (used for the temporal train/test split,
+  §D-149) — never itself fed to the model. A case with a recorded
+  `diagnosis_confidence` but no discoverable `DIAGNOSIS_COMPLETED` event
+  (should not happen given INV-35/36, but never assumed) raises
+  `FeatureExtractionError` rather than silently defaulting the cutoff.
+- **Status:** IN FORCE.
+
+## D-148 — B2B `amount_at_risk` leakage fix: `Σ B2BInvoice.original_amount`, never the live, Module-7-decremented `RevenueLeakCase.amount_at_risk`
+
+- **Milestone:** AI Phase 7 — Shadow ML (`ai-layer` branch, not `main`).
+- **Decision:** For `B2B_RECEIVABLE` cases, `extract_features` computes
+  `amount_at_risk` as the sum of each attached `B2BInvoice.original_amount`
+  — never `RevenueLeakCase.amount_at_risk` directly.
+- **Reasoning:** INV-55 has Module 7 actively decrement `RevenueLeakCase.
+  amount_at_risk` as B2B invoices are paid off, down to (near) zero for a
+  fully-`RECOVERED` case. Reading that live column for a closed B2B case
+  would hand the model the answer to the very question it is being asked
+  to predict. `B2BInvoice.original_amount` is set once, at invoice
+  ingestion, and is never mutated by reconciliation (only `outstanding_
+  amount` is) — it is the correct, pre-outcome analogue of "amount at
+  risk" for this one leg type.
+- **Alternatives considered:** reading `RevenueLeakCase.amount_at_risk`
+  uniformly across all leg types for code simplicity — rejected, a direct,
+  named leakage vector once the B2B recovery mechanics were understood
+  (confirmed by a regression test,
+  `tests/test_ai_shadow_features.py::
+  test_b2b_amount_at_risk_uses_original_invoice_total_not_live_case_column`).
+  Snapshotting `amount_at_risk` at diagnosis time via a `CaseEvent` payload
+  — rejected as unnecessary: no locked `CaseEvent` payload schema carries
+  this value at diagnosis time, and adding one would be a schema change
+  this phase's own instructions did not authorize and did not need, given
+  `B2BInvoice.original_amount` already exists and is already immutable.
+- **Consequence:** every non-B2B leg type still reads `RevenueLeakCase.
+  amount_at_risk` directly (confirmed safe — Module 7 never writes that
+  column for those legs, only `recovery_type`/`recovered_amount`, INV-06).
+- **Status:** IN FORCE.
+
+## D-149 — Shadow ML stays backend/evaluation-only: no API route, no UI surface, no persistence, no migration
+
+- **Milestone:** AI Phase 7 — Shadow ML (`ai-layer` branch, not `main`).
+- **Decision:** Phase 7 adds no FastAPI route, no change to `src/torque/
+  ui/static/*`, no new database table, and no Alembic migration.
+  `torque.ai.shadow.training.train_and_evaluate_shadow_model` and
+  `torque.ai.shadow.scoring.score_case` have no caller outside their own
+  test suites, by design.
+- **Reasoning:** the Phase 7 task's own governing instructions were
+  explicit: "Do not integrate shadow predictions into the existing
+  user-facing Agent Console yet unless the blueprint explicitly requires a
+  safe observational display" (it does not) and "Prefer an in-memory /
+  evaluation-oriented architecture for this phase" with persistence added
+  "only if the existing blueprint explicitly requires it" (it does not).
+  Building a route or a persisted model artifact now would be scope this
+  phase was not asked for and could not justify against a 7-case dataset.
+- **Alternatives considered:** a read-only `GET /ai/{merchant_id}/shadow/
+  train` or `.../cases/{case_id}/shadow-predict` route, mirroring Phase 6's
+  `torque.api.ai` — deferred, not rejected outright: nothing about this
+  decision precludes a future phase adding one once the blueprint or a
+  maintainer explicitly asks. A `shadow_model_run`/`shadow_prediction`
+  table to persist fitted models and their predictions — rejected per the
+  STOP condition in this phase's own instructions ("the blueprint requires
+  persistent model storage not already accounted for" -> stop and ask); no
+  such requirement exists.
+- **Consequence:** `alembic heads` is unchanged at `0018_escalation_
+  resolution`. A caller who wants a shadow prediction today must construct
+  a `ShadowModel`, fit it via `train_and_evaluate_shadow_model` (or
+  directly), and call `score_case` itself — there is no "the current
+  shadow model" any request reaches for automatically. Model-serving
+  across requests is explicitly deferred, not silently assumed.
+- **Status:** IN FORCE.
+
+## D-150 — Shadow-ML training/evaluation population is single-merchant (tenant-scoped); cross-merchant training is out of scope
+
+- **Milestone:** AI Phase 7 — Shadow ML (`ai-layer` branch, not `main`).
+- **Decision:** `torque.ai.shadow.features.build_shadow_dataset` and every
+  function built on top of it take one `merchant_id` and read only that
+  merchant's cases, via `torque.db.scoped.TenantScope` — exactly the same
+  posture every other `torque.ai` capability (Phases 1–6) already
+  establishes. No function in this phase trains or evaluates across
+  multiple merchants' data at once.
+- **Reasoning:** consistency with the rest of the package (INV-01, and
+  every `torque.ai` invariant from INV-60 onward) was judged more important
+  than the extra labeled rows a pooled, cross-merchant dataset might offer
+  at this scale — especially since nothing in the Blueprint or the Phase 7
+  task asked for pooled training, and Module 9b's own one narrow,
+  reviewed cross-merchant SUTVA read (a bounded, tenant-scoped-both-ways
+  exception, INV-58's Module 9b extension) is explicitly not a precedent
+  the AI layer inherits automatically for unrelated purposes.
+- **Alternatives considered:** pooling all merchants' terminal, diagnosed
+  cases into one shared training set to partially compensate for the
+  7-case-per-merchant scarcity — rejected as a genuinely different
+  architectural decision (what does "recovered" mean when generalized
+  across differently-behaved merchants? does a shared model leak one
+  merchant's patterns into another's predictions, even in aggregate?) that
+  this phase's own STOP conditions ("a significant architectural decision
+  is required...") counsel against making unilaterally.
+- **Consequence:** every `ShadowTrainingReport`/`ShadowPrediction` is
+  scoped to, and reports statistics for, exactly one merchant. A future
+  phase that wants pooled/cross-merchant training needs its own explicit
+  decision and maintainer sign-off, not an assumption inherited from this
+  one.
+- **Status:** IN FORCE.
+
+---
+
 ## Notes not recorded as decisions
 
 - The **Git-history incident of 2026-09-02** (a bad commit briefly on `main`,

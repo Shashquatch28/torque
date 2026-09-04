@@ -59,7 +59,7 @@ Phase 3 — Retrieval / precedent engine                  COMPLETE
 Phase 4 — LLM case explanation                           COMPLETE
 Phase 5 — Faithfulness / evaluation                        COMPLETE
 Phase 6 — Agent Console integration                         COMPLETE
-Phase 7 — Shadow ML                                          NOT STARTED
+Phase 7 — Shadow ML                                          COMPLETE
 Phase 8 — Hardening                                           NOT STARTED
 Phase 9 — Demo polish                                          NOT STARTED
 ```
@@ -79,7 +79,12 @@ consumer of the AI package from outside it — plus `tests/test_ai_api.py`,
 and the Agent Console's own AI surface in `src/torque/ui/static/{torque.js,
 torque.css}` (an "Explain this case" button, a citation-grounded narrative
 panel, and click-to-locate citation navigation into the existing `CaseEvent`
-audit trail). The package's public capabilities are:
+audit trail). **Since Phase 7, `src/torque/ai/shadow/`** —
+`labels.py`, `schemas.py`, `features.py`, `model.py`, `evaluation.py`,
+`training.py`, `scoring.py` — plus its test suite
+(`tests/test_ai_shadow_{labels,features,model,evaluation,training,
+scoring}.py`, `tests/ai_shadow_cases.py`). The package's public capabilities
+are:
 `torque.ai.evidence.gather_case_evidence` (a read-only function projecting
 one case's authoritative Torque state into typed, redacted,
 citation-referenced DTOs); `torque.ai.citations.resolve_citation` /
@@ -95,13 +100,26 @@ turn Phase 4's pass/fail citation gate into measured statistics —
 `EvaluationReport`); and now `GET /ai/{merchant_id}/cases/{case_id}/explain`
 — the first place any of the above is reachable by anything other than its
 own test suite, gated by `AISettings.enabled` (`503` when off), read-only,
-tenant-scoped, and rendered by the Agent Console. There is still no
-embedding, no vector search, no real (network-backed) LLM provider, no
-LLM-as-judge, and no shadow ML model. See the Phase 6 completion report for
-the exact, unimplemented list.
+tenant-scoped, and rendered by the Agent Console. **Since Phase 7:**
+`torque.ai.shadow.features.extract_features` / `build_shadow_dataset` (a
+read-only, tenant-scoped, deliberately narrower feature-extraction path
+than `gather_case_evidence` -- see this section's leakage boundary below);
+`torque.ai.shadow.model.ShadowModel` / `LogisticRegressionShadowModel` (a
+replaceable model interface + one CPU-only baseline, pure, no I/O);
+`torque.ai.shadow.evaluation.compute_classification_metrics` /
+`majority_class_baseline_proba` (deterministic classification metrics + a
+majority-class baseline comparison); `torque.ai.shadow.training.
+train_and_evaluate_shadow_model` (dataset -> temporal split -> fit ->
+evaluate -> `ShadowTrainingReport`, honest about small-sample-size
+limitations); and `torque.ai.shadow.scoring.score_case` (score one case
+with an already-fitted model -> `ShadowPrediction`, always carrying a
+non-optional `disclaimer` + `n_training_cases`). There is still no
+embedding, no vector search, no real (network-backed) LLM provider, and no
+LLM-as-judge. Phase 7 is backend/evaluation-only, per its own governing
+task -- no new API route, no UI surface, no persistence, no migration.
 
-No phase beyond 0-6 is marked complete merely because its architecture is
-documented below — everything from Phase 7 onward in this file is a plan,
+No phase beyond 0-7 is marked complete merely because its architecture is
+documented below -- everything from Phase 8 onward in this file is a plan,
 not a report of what exists.
 
 ---
@@ -199,7 +217,7 @@ Enforced, not merely stated:
 |---|---|---|
 | Case state transitions | `torque.state_machine.transition_case` | AI never calls it; forbidden import |
 | Diagnosis | `torque.diagnosis.*` | AI reads the *result* (`root_cause_code`, `diagnosis_confidence`) off the case row; never computes or influences a diagnosis |
-| Recovery scoring | `torque.scoring.score.*` | AI reads the *result* (`recovery_score`, `recovery_score_breakdown`) off the case row; the future shadow model (Phase 7) computes its own, separate, never-consumed number |
+| Recovery scoring | `torque.scoring.score.*` | AI reads the *result* (`recovery_score`, `recovery_score_breakdown`) off the case row; the Phase 7 shadow model (`torque.ai.shadow`) computes its own, separate, never-consumed probability — see §10a |
 | Guardrails | `torque.coordination.guardrail_engine.GuardrailEngine` | AI never calls it; reads only the *outcome* of a guardrail decision via `Action.outcome`/`block_reason` |
 | Action execution | `torque.execution.*` | AI never calls it; forbidden import |
 | Playbook selection | `torque.policy.*` | AI never calls it; forbidden import |
@@ -219,13 +237,14 @@ Enforced, not merely stated:
                             v
                      torque.ai  (this package)
       +----------------------------------------------------+
-      |  IMPLEMENTED (Phase 0-5):                            |
+      |  IMPLEMENTED (Phase 0-7):                            |
       |    exceptions.py  config.py  schemas.py  evidence.py  |
       |    citations.py  retrieval.py  prompts.py               |
       |    providers/{base,mock_provider}.py  narrative.py       |
-      |    evaluation.py                                           |
-      |  NOT YET BUILT (Phase 7+):                            |
-      |    shadow/  providers/ (a real provider)                |
+      |    evaluation.py  shadow/{labels,schemas,features,        |
+      |    model,evaluation,training,scoring}.py                    |
+      |  NOT YET BUILT (Phase 8+):                            |
+      |    providers/ (a real provider)                        |
       +----------------------------------------------------+
                             |
                             | structured, citation-grounded CaseNarrative
@@ -261,7 +280,18 @@ src/torque/ai/
 ├── providers/                    IMPLEMENTED (Phase 4) — LLMProvider (ABC), MockProvider (only concrete impl)
 ├── narrative.py                    IMPLEMENTED (Phase 4) — explain_case()
 ├── evaluation.py                     IMPLEMENTED (Phase 5) — evaluate_narrative(), evaluate_retrieval_precision()
-└── shadow/                             NOT BUILT (Phase 7)
+└── shadow/                             IMPLEMENTED (Phase 7) — see §10a
+    ├── labels.py       — is_training_eligible(), recovered_label()
+    ├── schemas.py       — ShadowFeatureVector, ShadowTrainingExample,
+    │                      ShadowPrediction, ShadowClassificationMetrics,
+    │                      ShadowTrainingReport
+    ├── features.py       — extract_features(), build_shadow_dataset()
+    ├── model.py           — ShadowModel (ABC), LogisticRegressionShadowModel
+    ├── evaluation.py       — compute_classification_metrics(),
+    │                         majority_class_baseline_proba()
+    ├── training.py          — temporal_train_test_split(),
+    │                          train_and_evaluate_shadow_model()
+    └── scoring.py             — score_case()
 ```
 
 ## 7. Read-Only Evidence Architecture & Citation Model
@@ -286,12 +316,11 @@ not read):
 `CaseEvent` are included in evidence because the evidence interface is for
 *narrative/explanation* use (explaining a case, including an
 already-resolved one, is a legitimate reviewer need). **This is a
-deliberately different, and deliberately wider, allowlist than any future
-shadow-ML feature-extraction path must use** — see §11's leakage boundary.
-No shadow-ML feature extractor exists yet; when it is built (Phase 7) it
-must read a separate, narrower function, never `gather_case_evidence`
-itself, so the leakage boundary is a file/function boundary, not a runtime
-flag.
+deliberately different, and deliberately wider, allowlist than the
+shadow-ML feature-extraction path uses** — see §11's leakage boundary.
+`torque.ai.shadow.features.extract_features` (Phase 7) reads a separate,
+narrower function, never `gather_case_evidence` itself, so the leakage
+boundary is a file/function boundary, not a runtime flag — see §10a.
 
 **Missing evidence (implemented).** `CaseEvidence.evidence_gaps` is an
 explicit list of plain-English statements ("No diagnosis has been recorded
@@ -897,20 +926,159 @@ standing, enforced fact rather than a one-time observation: it strips
 `//`/`/* */` comments from all three files and asserts none of these
 strings survive in what's left.
 
-## 10. Planned Shadow ML Architecture — **NOT BUILT** (Phase 7)
+## 10a. Shadow ML Architecture — **IMPLEMENTED** (Phase 7)
 
-**RECOMMENDED**, not yet implemented, and explicitly gated behind Phase 6
-landing first (it has no dependency on retrieval/LLM work technically, but
-sequencing it after keeps the riskier, more novel narrative-generation work
-reviewed first). Target: binary `recovered` (`status in {RECOVERED,
-CANCELLED}`, matching Module 9b's own intent-to-treat definition exactly).
-Features: **exactly** the Blueprint §8.4 named set, read through a
-*separate, narrower* feature-extraction function that never shares code with
-`gather_case_evidence` (§11). Model: XGBoost + SHAP, per Decision F / §8.4.
-**Never consumed by `priority()`, `human_queue.priority`, playbook
-selection, diagnosis, or execution** — purely observational, with a
-required, non-optional `n_training_cases` + `disclaimer` field in its output
-schema so the UI cannot render a number without the caveat attached.
+**Objective, delivered:** the smallest production-quality shadow-ML
+architecture that lets Torque construct a model-ready feature
+representation from authoritative historical case data, train/evaluate a
+deliberately simple baseline model, generate shadow predictions, evaluate
+whether the model has useful predictive signal, and stay extensible to a
+better model later -- while remaining structurally incapable of
+influencing any Torque decision. See INV-65 for the enforced invariant and
+`documentation/ai-memory/DECISIONS.md` D-146..D-150 for the individual
+design decisions this section summarizes.
+
+**Target -- locked, matches Module 9b exactly.** `recovered = status in
+{RECOVERED, CANCELLED}` as of a case's terminal status -- byte-identical to
+`torque.reporting.incrementality._RECOVERED_STATUSES`, the same
+intent-to-treat definition Module 9b's own incrementality measurement
+already uses, mirrored locally in `torque.ai.shadow.labels` (never
+imported, since `torque.reporting` is not itself forbidden but reusing a
+private, non-`__all__` name across modules is not this codebase's
+convention -- see D-146). A case is only ever labeled once it has reached a
+terminal status (`torque.ai.shadow.labels.is_training_eligible`, itself a
+local mirror of `torque.state_machine.is_terminal`, cross-tested against
+the real function in `tests/test_ai_shadow_labels.py`, the same
+"documented duplication" discipline `torque.ai.retrieval` already
+established for Phase 3).
+
+**Features -- exactly the Blueprint §8.4 named set**, read through
+`torque.ai.shadow.features.extract_features` -- a function that shares
+zero code with `torque.ai.evidence.gather_case_evidence` and never reads
+any post-outcome field (`recovery_type`, `recovered_amount`,
+`recovery_score`, `recovery_score_breakdown`, `escalation_resolution`,
+`closed_at`, or `status` itself are structurally absent from
+`ShadowFeatureVector` -- not merely unused, `tests/test_ai_shadow_
+features.py::test_shadow_feature_vector_has_no_post_outcome_fields` proves
+this at the schema level). Every field is computed **as of a single,
+explicit cutoff** -- the case's own `DIAGNOSIS_COMPLETED` event timestamp,
+the earliest point a real prediction could ever be made (since
+`root_cause_code`/`diagnosis_confidence` do not exist before then):
+
+| §8.4 feature | Source | Leakage handling |
+|---|---|---|
+| `leg_type` | `RevenueLeakCase.leg_type` | fixed at creation, never mutated |
+| `root_cause_code` | `RevenueLeakCase.root_cause_code` | written once (INV-35), safe to read off the current row |
+| `diagnosis_confidence` | `RevenueLeakCase.diagnosis_confidence` | same as above |
+| `amount_at_risk` | `RevenueLeakCase.amount_at_risk`, **except** `B2B_RECEIVABLE` -> `Σ B2BInvoice.original_amount` | Module 7 decrements the live column as B2B invoices are paid (INV-55) -- for a closed, fully-recovered B2B case the live value is a direct outcome leak; `original_amount` is immutable |
+| `days_since_failure` | `(diagnosis-completion timestamp − opened_at)` in days | measured to the cutoff, never to `closed_at` (which would encode total resolution duration -- itself correlated with outcome) |
+| `promise_keeping_rate` | `MerchantCounterparty.promise_keeping_rate` | as of this writing a static, seed-only field with no in-life writer anywhere in the codebase (verified by a full-repo audit during Phase 7) -- no cutoff-aware reconstruction needed or possible |
+| `risk_score` | `MerchantCounterparty.risk_score` | **has zero writers anywhere in the codebase today** -- always `None`/missing in practice; handled by the model's missing-value imputation + indicator (see below), not hidden |
+| `network_directive.tier` | reconstructed from `NETWORK_DIRECTIVE_RECEIVED` events with `timestamp <= cutoff`, most-restrictive wins (`torque.models.guards.tier_rank`) | the live column can tighten *after* diagnosis but before closure (INV-05) -- using the final value would leak; `tests/test_ai_shadow_features.py::test_network_directive_tier_is_reconstructed_as_of_diagnosis_not_final_value` proves a later, stricter directive is excluded |
+| `mandate_type` | the case's own typed `context["mandate_type"]` (`SUBSCRIPTION_FAILURE` only) | set once at creation, never mutated; `None` for every other leg |
+
+No PII field is read (the extractor never queries `Counterparty` at all,
+same posture as `torque.ai.evidence`); content-substring-swept in
+`tests/test_ai_shadow_features.py::test_features_never_carry_
+counterparty_pii`.
+
+**Dataset scale -- measured, not assumed.** The seeded demo dataset
+(`torque.demo.seed.seed_demo`) produces **7 terminal cases** for its one
+demo merchant (5 `RECOVERED`, 1 `CANCELLED`, 1 `EXHAUSTED`), of which
+**6 are eligible for the labeled training population** -- `build_shadow_
+dataset` correctly excludes the one `CANCELLED` case, which self-recovered
+*before* diagnosis ever ran (the §7.1.4 pre-diagnosis self-pay path, D-058)
+and therefore has no `root_cause_code`/`diagnosis_confidence` to build a
+Blueprint §8.4 feature vector from -- a real, observed instance of the
+"terminal but never diagnosed" exclusion this phase's own eligibility rule
+was designed to handle, not a bug. Measured live against `acc_demo`:
+`train_and_evaluate_shadow_model` reports `n_total_cases=6`, `n_train=5`,
+`n_test=1`, `class_distribution={"recovered": 5, "not_recovered": 1}`.
+Nowhere near the Blueprint §8.4 future-production model's own 500-case
+gate, and the demo's one-click scenario injectors (`torque.demo.
+scenarios`) add zero further terminal cases (every scenario ends open or
+blocked, never resolved). This is reported honestly, not hidden: every
+`ShadowTrainingReport` this phase produces carries an `insufficient_data`
+flag and a `limitations` list that says so in plain language whenever the
+total labeled population is below `MIN_CASES_FOR_MEANINGFUL_EVALUATION =
+30` (a common statistical rule-of-thumb floor, not a Torque-specific
+number) -- which is unconditionally true against the current seed data
+(measured test-split accuracy/precision/recall/F1 all `1.0` on the single
+held-out case, ROC-AUC undefined with only one test example -- reported as
+`null`, never fabricated; the majority-class baseline scores identically
+on this one-example split, so no real lift can be claimed at this scale).
+
+**Model -- a deliberate, documented departure from this section's own prior
+"RECOMMENDED" (not `LOCKED`) XGBoost + SHAP suggestion.** That suggestion
+was written against the Blueprint §8.4 *future-production* model, itself
+explicitly gated on 500+ resolved cases -- nothing close to that volume
+exists. Fitting a gradient-boosted ensemble and computing SHAP values on
+single-digit-to-low-double-digit rows would be statistically meaningless
+and would add two heavyweight dependencies for a demo that cannot exercise
+either honestly. Chosen instead: `sklearn.linear_model.LogisticRegression`
+over a `DictVectorizer`-encoded feature dict (mixed numeric + open-
+vocabulary categorical fields, e.g. `root_cause_code`, with unseen
+categories at prediction time contributing nothing rather than raising).
+Deterministic (`random_state=0`); missing numeric values are imputed to
+the training-set mean with a companion `_missing` indicator column (so
+"no `risk_score` on file" is itself a learnable signal, not silently
+zeroed); a training set containing only one outcome class (a real
+possibility at this scale) falls back to a constant predictor rather than
+letting `sklearn` raise. `scikit-learn>=1.4` was added to
+`[project.dependencies]` (justified in the dependency comment in
+`pyproject.toml` and in D-146) -- the first ML dependency this program has
+ever added; no `numpy`/`pandas`/`xgboost`/`shap`/vector-database dependency
+exists. See D-146 for the full model-choice reasoning.
+
+**Training / evaluation** (`torque.ai.shadow.training.
+train_and_evaluate_shadow_model`): build the labeled dataset for one
+merchant (`torque.ai.shadow.features.build_shadow_dataset`, tenant-scoped)
+-> a **temporal** split (sorted by each example's diagnosis-completion
+cutoff, earliest -> train, most recent -> test; never a random shuffle,
+which would let the model "see the future" relative to some test rows) ->
+fit `LogisticRegressionShadowModel` on train -> `torque.ai.shadow.
+evaluation.compute_classification_metrics` (accuracy/precision/recall/F1/
+ROC-AUC, every metric `None` rather than fabricated when mathematically
+undefined for the sample, e.g. ROC-AUC with only one true class present)
+against test, **plus** a majority-class baseline fit on the same train
+split and scored the same way, for direct comparison (the Phase 7 task's
+own explicit instruction: "do not report impressive-looking metrics
+without checking ... baseline performance"). Below `MIN_CASES_FOR_SPLIT =
+4` total labeled cases, no held-out split is attempted at all -- the model
+is fit on everything available and `test_metrics`/`baseline_metrics` are
+both `None`, with a `limitations` entry saying exactly that.
+
+**Prediction** (`torque.ai.shadow.scoring.score_case`): scores one case
+(open or closed, so long as it has been diagnosed) with an already-fitted,
+injected `ShadowModel` -- mirrors `torque.ai.narrative.explain_case`'s
+dependency-injection shape, but stays synchronous (no I/O-bound step to
+justify `async`). Returns a `ShadowPrediction` DTO that **always** carries
+`n_training_cases` and `disclaimer` (a fixed `SHADOW_DISCLAIMER` constant,
+never LLM-authored, never omitted) as non-optional fields -- exactly the
+requirement this section's own prior draft named, so a caller cannot
+construct or render a probability without the caveat physically attached.
+
+**Persistence -- none, by design.** No new table, no migration (`alembic
+heads` stays `0018_escalation_resolution`, confirmed unchanged by this
+phase). A fitted model lives only for the lifetime of the caller that
+trained it; there is no "the current shadow model" a future request reaches
+for on its own. Model-serving/persistence across requests is explicitly
+out of scope for Phase 7 -- a future decision, not silently assumed here.
+
+**API / UI -- none.** Per the Phase 7 task's own instruction ("do not
+integrate shadow predictions into the existing user-facing Agent Console
+yet unless the blueprint explicitly requires a safe observational display"
+-- it does not), Phase 7 stays backend/evaluation-only. No new FastAPI
+route, no change to `src/torque/ui/static/*`.
+
+**Never consumed by anything that decides.** `torque.ai.shadow.*` is never
+imported by `priority()`, `human_queue.priority`, playbook selection,
+diagnosis, guardrails, or execution -- proven the same way as every other
+`torque.ai` boundary claim: `tests/test_ai_boundary.py`'s import-graph and
+write-call-substring checks cover `src/torque/ai/shadow/*.py`
+automatically (the file discovery is a recursive `rglob("*.py")`, no test
+change was needed), and every training/scoring test asserts
+`db.new`/`.dirty`/`.deleted` are empty after the call.
 
 ## 11. Security Model
 
@@ -980,12 +1148,16 @@ Planned, **NOT YET BUILT**:
   enforcement mechanism, exactly as before. This decision is still open,
   not resolved by Phase 6.
 
-**Leakage boundary (documented now, enforced by file separation once Phase 7
-exists).** `gather_case_evidence` deliberately returns post-outcome fields
-(§7). A future shadow-ML feature extractor must read a disjoint, narrower
-function reading only the Blueprint §8.4 field set — this is a design
-commitment recorded here so Phase 7 cannot silently reuse the wider
-evidence function and reintroduce leakage.
+**Leakage boundary -- enforced, not merely documented, as of Phase 7.**
+`gather_case_evidence` deliberately returns post-outcome fields (§7).
+`torque.ai.shadow.features.extract_features` (Phase 7) is a disjoint,
+narrower function reading only the Blueprint §8.4 field set -- it shares
+zero code with `gather_case_evidence`, and `ShadowFeatureVector` cannot
+even represent `recovery_type`/`recovered_amount`/`recovery_score`/
+`recovery_score_breakdown`/`escalation_resolution`/`closed_at`/`status`
+(structurally absent fields, not merely unused ones -- proved by
+`tests/test_ai_shadow_features.py::test_shadow_feature_vector_has_no_
+post_outcome_fields`). See §10a for the full field-by-field leakage audit.
 
 ## 12. Prompt-Injection Model — **Implemented, Phase 4**
 
@@ -1076,7 +1248,7 @@ Implemented and tested (Phase 1-4, extended Phase 6):
 | 4 | LLM case explanation (provider-agnostic, evidence-grounded, citation-bearing) | **COMPLETE** |
 | 5 | Faithfulness / evaluation harness (validates generated citations via Phase 2's `resolve_citation`) | **COMPLETE** |
 | 6 | Agent Console integration (new read-only API route + UI panel) | **COMPLETE** |
-| 7 | Shadow ML model (observational only) | NOT STARTED |
+| 7 | Shadow ML model (observational only) | **COMPLETE** |
 | 8 | Hardening (adversarial + failure-mode testing) | NOT STARTED |
 | 9 | Demo polish + documentation | NOT STARTED |
 
@@ -1098,9 +1270,10 @@ Phase 5 (faithfulness evaluation)   |    (consumes Phase 2's resolve_citation
    |                                |     to exist before generation, not after)
 Phase 6 (Agent Console integration) |    (complete — explain_case's first
    |                                |     real caller: one API route + panel)
-   |  <- YOU ARE HERE (complete)    |
-Phase 7 (shadow ML) -- depends only on Phase 1, mergeable in parallel with 3-6
    |
+Phase 7 (shadow ML) -- depended only on Phase 1, built after Phase 6
+   |                    per the sequencing note above (complete)
+   |  <- YOU ARE HERE (complete)
 Phase 8 (hardening) -- depends on everything above
    |
 Phase 9 (demo polish)
@@ -1175,23 +1348,69 @@ recomputation); and — enforced as a standing fact, not a one-time
 observation — no documentation/blueprint label survives outside a source
 comment in `index.html`, `torque.js`, or `torque.css`.
 
+**(Phase 7, `tests/test_ai_shadow_{labels,features,model,evaluation,
+training,scoring}.py`, 54 tests):** the terminal-status/recovered-label
+mirror cross-checked against the real `torque.state_machine.is_terminal`
+and `torque.reporting.incrementality._RECOVERED_STATUSES`; deterministic
+feature generation (repeated extraction is byte-identical); feature-schema
+`extra="forbid"` rejection; a structural (schema-field-set) proof that no
+post-outcome field can ever appear in a `ShadowFeatureVector`; a
+content-substring PII sweep; tenant-isolation tests at both the
+single-case and whole-dataset level; three dedicated target-leakage
+regression tests (B2B `amount_at_risk` uses `Σ B2BInvoice.original_amount`
+not the live, Module-7-decremented case column; `network_directive_tier`
+is reconstructed as of the diagnosis cutoff and excludes a later, stricter
+directive; `days_since_failure` is measured to the diagnosis cutoff, not
+to `closed_at`); an undiagnosed-case rejection; model training,
+determinism/reproducibility (two independently-fit models agree exactly),
+`ModelNotFittedError`/`InsufficientTrainingDataError`, single-class
+degenerate-data fallback (both directions), and unseen-category/missing-
+value robustness at predict time; classification-metric correctness
+(hand-computed), empty-input and single-class (undefined ROC-AUC)
+handling, and length-mismatch rejection; majority-class baseline
+correctness; temporal-split correctness (explicitly out-of-order input,
+proving the sort — not input order — determines the split) and its
+minimum-train/test-size guarantee; zero-case, below-`MIN_CASES_FOR_SPLIT`,
+and below-`MIN_CASES_FOR_MEANINGFUL_EVALUATION` dataset-size behavior, each
+with an honest `limitations` entry; class-imbalance reporting +
+baseline-vs-model comparison on a real imbalanced split; a single-outcome-
+class dataset flagged in `limitations`; prediction-schema completeness
+(`n_training_cases`/`disclaimer` always present); cross-tenant and
+undiagnosed-case rejection at the scoring layer; and a `db.new`/`.dirty`/
+`.deleted` empty-check after both `train_and_evaluate_shadow_model` and
+`score_case` — proving neither writes anything, the same proof pattern
+`tests/test_ai_narrative.py::test_explain_case_writes_nothing` already
+established for Phase 4. Test fixtures (`tests/ai_shadow_cases.py`) build
+real, DB-backed `RevenueLeakCase`/`CaseEvent`/`B2BInvoice`/
+`MerchantCounterparty` rows through the real, schema-validated
+`torque.events.payloads.validate_payload` path — the same "real domain
+data, not a fake parallel model" discipline `tests/ai_eval_cases.py`
+established for Phase 5 — with one narrow, documented departure (an
+explicit `CaseEvent.timestamp` rather than the server-side `now()` default,
+since Postgres resolves `now()` to the surrounding transaction's start
+time, making it impossible to construct "before cutoff / after cutoff"
+fixtures inside one test transaction otherwise).
+
 Full existing regression suite re-run and green alongside every new AI test
-added since — **1359** total as of Phase 6 (was 1343 after Phase 5, **+16**:
-10 in `test_ai_api.py`, 6 in `test_module10_ui.py`).
+added since — **1413** total as of Phase 7 (was 1359 after Phase 6, **+54**,
+all in the Phase 7 test files above).
 
 Not yet built: LLM-as-judge or semantic-entailment scoring (deliberately
 deferred, no target phase — see D-144), any evaluation framework dependency
 (RAGAS or similar, explicitly out of scope per the Phase 5 task), an API
-endpoint or UI surface for `EvaluationReport` specifically (Phase 6 exposed
-`explain_case`, not `evaluate_narrative` — see §9a/§9b), adversarial testing
-against a *real* language model (only the deterministic `MockProvider` path
-has been adversarially tested — see §12's stated scope), shadow-ML
-leakage/calibration tests, a browser/e2e test harness (none exists in this
-repository; the Phase 6 task explicitly said not to introduce one — UI
-correctness is proven by static-source assertions against `torque.js` plus
-live manual verification, the same posture this whole file's "no browser
-harness" note at the top of `test_module10_ui.py` already documents) — all
-Phase 7+.
+endpoint or UI surface for `EvaluationReport` or `ShadowTrainingReport`/
+`ShadowPrediction` specifically (Phase 6 exposed `explain_case`, not
+`evaluate_narrative` — see §9a/§9b; Phase 7 stays backend/evaluation-only
+per its own task — see §10a), adversarial testing against a *real*
+language model (only the deterministic `MockProvider` path has been
+adversarially tested — see §12's stated scope), a real (network-backed)
+XGBoost/SHAP shadow model or any model-persistence mechanism (both
+explicitly deferred past the 500-resolved-case gate — see §10a/§23), a
+browser/e2e test harness (none exists in this repository; the Phase 6 task
+explicitly said not to introduce one — UI correctness is proven by
+static-source assertions against `torque.js` plus live manual
+verification, the same posture this whole file's "no browser harness" note
+at the top of `test_module10_ui.py` already documents) — all Phase 8+.
 
 ## 17. Git / Branch Strategy
 
@@ -1289,9 +1508,14 @@ count/fields directly after the manual click-through).
 | D-145 | Phase 6 integration architecture: `503` for AI-disabled (nearest fit to `health.py`'s existing readiness convention, no second flag mechanism); fixed hand-written `HTTPException.detail` strings only, never `str(exc)`; `_get_provider()` as the single provider-construction seam; `renderConsolePane`'s audit trail renders every event (not the prior `slice(-8)`) so citation navigation always has a target; the over-time bar chart is zero-padded to a 7-bar minimum using only real backend values | **LOCKED** (implemented; see `DECISIONS.md`) | Implemented |
 | D-AI-03 | Real LLM provider: Anthropic primary + local/mock fallback | **NEEDS HUMAN DECISION** (API budget/key) | Not built — deferred past Phase 4, no target phase fixed; Phase 6's `_get_provider()` is the seam that decision plugs into once made |
 | D-AI-09 | Persistence vs. stateless generation: regenerate narratives on request, no caching table | **LOCKED** (implemented — `explain_case` persists nothing; see INV-63) | Implemented |
-| D-AI-11 | Shadow-model inclusion: build, strictly observational | **RECOMMENDED** | Not built — Phase 7 |
+| D-AI-11 | Shadow-model inclusion: build, strictly observational | **LOCKED** (implemented; see `DECISIONS.md`) | Implemented |
 | D-AI-14 | Branch strategy: `ai-layer`, forked from clean `main`, no sub-branches | **LOCKED** (satisfied) | Satisfied |
-| D-AI-18 | `pyproject.toml` `ai` extras group | **DEFERRED** — not created; no dependency needed it yet (Phase 4 needed none either) | Deferred to whichever phase first needs a new dependency |
+| D-AI-18 | `pyproject.toml` `ai` extras group | **DEFERRED** — not created; `scikit-learn` was added directly to `[project.dependencies]` instead (D-146), matching the `celery`/`redis` precedent (one subsystem's dependency, not a separate extras group) | Deferred — no extras group exists; superseded in spirit by D-146's simpler choice |
+| D-146 | Shadow-ML model choice: `sklearn.linear_model.LogisticRegression`, a documented departure from this section's own prior "RECOMMENDED" XGBoost+SHAP suggestion, justified by measured dataset scale (6 eligible labeled cases, far below the Blueprint §8.4 500-case gate) | **LOCKED** (implemented; see `DECISIONS.md`) | Implemented |
+| D-147 | Feature temporal cutoff: every Blueprint §8.4 feature computed as of the case's own `DIAGNOSIS_COMPLETED` event timestamp, never `closed_at` or the live column's final value | **LOCKED** (implemented; see `DECISIONS.md`) | Implemented |
+| D-148 | B2B `amount_at_risk` leakage fix: `Σ B2BInvoice.original_amount`, never the live, Module-7-decremented `RevenueLeakCase.amount_at_risk` | **LOCKED** (implemented; see `DECISIONS.md`) | Implemented |
+| D-149 | No persistence, no API route, no UI surface for Phase 7 — backend/evaluation-only, per the Phase 7 task's own instruction | **LOCKED** (implemented; see `DECISIONS.md`) | Implemented |
+| D-150 | Training/evaluation population is single-merchant (tenant-scoped), matching every other `torque.ai` capability; cross-merchant training is out of scope, not silently assumed | **LOCKED** (implemented; see `DECISIONS.md`) | Implemented |
 
 ## 21. Risk Register
 
@@ -1309,7 +1533,12 @@ count/fields directly after the manual click-through).
 | Prompt injection against the deterministic mock path | Mitigated and tested end-to-end (fixed system message, JSON-escaped evidence, `rindex`-robust envelope parsing surviving a delimiter-embedding attempt) — **explicitly NOT validated against a real language model**, since none is integrated; real-provider adversarial testing remains an optional future lane (§12) |
 | Hallucination / unsupported-claim *rate* against the deterministic `MockProvider` path | Measured (Phase 5) — `unsupported_claim_rate = 0.000` across the 6-case evaluation set, via the deterministic lexical-overlap proxy (`_OVERLAP_THRESHOLD = 0.2`, empirically calibrated — see D-144). **Explicitly not semantic entailment** — a real model's actual hallucination rate remains unmeasured until a real provider exists (still an open, unresolved decision after Phase 6, D-AI-03) |
 | The lexical-overlap proxy misclassifying a genuinely-unsupported claim as supported, or vice versa, due to surface-level token overlap rather than true entailment | A real, tracked risk (not eliminated) — mitigated only insofar as the calibration was verified against both the real `MockProvider` output and the task's own illustrative BAD example; LLM-as-judge is the documented, deliberately-deferred mitigation with no target phase (D-144) |
-| Shadow-model overclaiming, real-provider outage/latency | Not yet applicable — no real provider exists, no shadow model exists |
+| Real-provider outage/latency | Not yet applicable — no real (network-backed) LLM provider exists |
+| **(Phase 7)** Shadow-model overclaiming / a rendered probability being mistaken for an authoritative score | Mitigated structurally — `ShadowPrediction` and `ShadowTrainingReport` both carry non-optional `disclaimer` (a fixed `SHADOW_DISCLAIMER` constant, never omittable, never LLM-authored) and `n_training_cases`/sample-size fields; no API route or UI surface exists at all yet (Phase 7 is backend-only), so there is currently no rendering surface for this risk to materialize through |
+| **(Phase 7)** Target leakage (a feature secretly encoding the outcome it predicts) | Mitigated and specifically regression-tested — three dedicated tests prove B2B `amount_at_risk` uses the immutable invoice total not the live, Module-7-decremented case column; `network_directive_tier` is reconstructed as of the diagnosis cutoff, excluding any later, stricter directive; and `days_since_failure` is measured to the diagnosis cutoff, not to case closure. `ShadowFeatureVector` structurally cannot represent any post-outcome field (schema-level proof, not just an unused-field convention) |
+| **(Phase 7)** Reporting misleadingly confident metrics from a tiny, non-representative dataset | Mitigated — every `ShadowTrainingReport` carries an `insufficient_data` flag and a `limitations` list stating the exact sample size and why it is too small, unconditionally true against the current 7-case seeded dataset; a majority-class baseline is always reported alongside the model's own metrics so a reader can judge real lift, not raw accuracy in isolation |
+| **(Phase 7)** A degenerate (single-outcome-class) training split silently producing a meaningless or crashing model | Mitigated — `LogisticRegressionShadowModel` detects a single-class fit and falls back to an explicit constant predictor rather than letting `sklearn` raise; `ShadowTrainingReport.limitations` states this happened whenever it does |
+| **(Phase 7)** A new ML dependency (`scikit-learn`) introducing supply-chain or environment risk | Mitigated by scope — one well-established, CPU-only, no-GPU, no-network-call library; no `numpy`/`pandas`/`xgboost`/`shap`/vector-database dependency was added; justified in-line in `pyproject.toml` and in D-146 |
 | **(Phase 6, new surface)** A citation id becoming an injected/arbitrary DOM selector | Mitigated — `focusCitation()` validates against a strict `^case_event:(\d+)$` pattern *before* any selector is built; a non-matching id never reaches `querySelector` at all, it falls back to a toast. Tested at the source level (`test_ui_citation_click_navigates_to_the_existing_event_timeline`); every real citation id Phase 2 ever produces is one of exactly five fixed `source_type` prefixes, none of which can contain selector metacharacters by construction |
 | **(Phase 6, new surface)** The AI API's own error responses leaking a raw provider exception, a Python module path, or a stack trace to an unauthenticated-by-this-layer caller | Mitigated — every `HTTPException.detail` in `torque.api.ai` is a fixed, hand-written string; the frontend independently never interpolates `e.message` in the AI panel either (belt-and-suspenders — a backend wording change alone cannot leak new detail through the UI). Tested both ways: `test_explain_provider_failure_maps_to_5xx_without_leaking_internals` / `test_explain_fabricated_citation_maps_to_5xx` at the API layer, `test_ui_ai_error_states_never_leak_raw_exception_text` at the UI layer |
 | **(Phase 6, new surface)** The AI endpoint becoming a de facto write path via a future careless change (e.g. someone adding a "save this narrative" button later) | Mitigated today by construction (one `GET` route, `explain_case` itself writes nothing) and proven (`test_explain_performs_no_write`) — **not** mitigated by any NEW structural gate beyond what Phases 0/4 already built; a future write feature would need its own explicit read/write boundary decision, not an assumption that this endpoint's current read-only-ness is permanent by default |
@@ -1332,9 +1561,22 @@ provider was introduced; no evaluation-results API or UI was built (Phase 5's
 `EvaluationReport` remains test-only); no new frontend framework/build step
 (the Agent Console's AI panel is the same hand-written, no-build vanilla-JS
 SPA every other view already is); no browser/e2e test harness was
-introduced; no shadow ML; no embeddings; no vector database; no demo-seed
+introduced; no embeddings; no vector database; no demo-seed
 data was redesigned or rebalanced to make the dashboard graph look better —
 the graph fix is presentation-only (§9b).
+
+**Reaffirmed after Phase 7 specifically:** no new API route or UI surface
+was added for shadow ML (backend/evaluation-only, per that task's own
+instruction — see §10a); no model persistence or migration was introduced
+(`alembic heads` unchanged at `0018_escalation_resolution`); no
+`torque.ai.shadow.*` function is called by `priority()`, `human_queue.
+priority`, playbook selection, diagnosis, guardrails, or execution — proven
+by the unmodified `tests/test_ai_boundary.py` sweeping the new subpackage
+automatically, and by a `db.new`/`.dirty`/`.deleted` empty-check after
+every training/scoring call; no demo-seed data was added, redesigned, or
+rebalanced to manufacture a larger training population — the 7-case
+scarcity is reported as a limitation, not worked around; no vector
+database, no embeddings, no real (network-backed) model API, no GPU.
 
 ## 23. Future Path Toward the 500+ Resolved-Case Learned Model
 
@@ -1348,17 +1590,29 @@ pass/fail citation gate into measured statistics (`EvaluationReport`, still
 test-only), and — new in Phase 6 — a real, working, human-facing path to
 `explain_case`: one read-only API route consumed by an Agent Console panel
 with live citation-to-audit-trail navigation, verified end to end against
-the seeded `acc_demo` dataset. Nothing is predictive yet.
+the seeded `acc_demo` dataset. **And, since Phase 7: an honestly-caveated,
+strictly observational shadow prediction** — `torque.ai.shadow.training.
+train_and_evaluate_shadow_model` trains a CPU-only `LogisticRegression`
+baseline on the 6 labeled (terminal + diagnosed) cases the seeded demo
+dataset actually contains, reports honestly that this is far too few to
+draw a real conclusion from (`insufficient_data=True`, every time, against
+today's data), and `torque.ai.shadow.scoring.score_case` can score any
+diagnosed case with the result — never consumed by anything that decides.
 `evaluate_narrative`/`EvaluationReport` still has no caller outside its own
 test suite — Phase 6 gave `explain_case` a human-facing surface, not
-`evaluate_narrative`. **Phase 7-9** (this document's roadmap) is what
-remains for a hackathon demo — an honestly-caveated shadow model,
-adversarial hardening (including the first real-provider-vs-prompt-
-injection testing this program has ever done), and demo polish. **FUTURE
-PRODUCTION** requires real channel adapters shipping, real merchant traffic
-accumulating real outcomes, a real LLM provider decision (deferred, D-AI-03
-— Phase 6's `_get_provider()` is the seam it plugs into), and crossing the
-blueprint's own 500-resolved-case threshold (Blueprint §8.4) before any
-learned signal is even considered for wiring into `priority()` — and that
-wiring, if it ever happens, is its own future, separately approved phase,
-not something this program authorizes.
+`evaluate_narrative`; Phase 7 similarly gives `ShadowTrainingReport`/
+`ShadowPrediction` no caller outside their own test suites, by design (no
+API route, no UI — see §10a). **Phase 8-9** (this document's roadmap) is
+what remains for a hackathon demo — adversarial hardening (including the
+first real-provider-vs-prompt-injection testing this program has ever
+done) and demo polish. **FUTURE PRODUCTION** requires real channel adapters
+shipping, real merchant traffic accumulating real outcomes, a real LLM
+provider decision (deferred, D-AI-03 — Phase 6's `_get_provider()` is the
+seam it plugs into), crossing the blueprint's own 500-resolved-case
+threshold (Blueprint §8.4) before the shadow model's signal is even
+considered for anything beyond observation, and — separately — before
+upgrading the model itself from `LogisticRegression` to the originally-
+suggested XGBoost+SHAP now has enough data to justify it (D-146). Wiring
+any learned signal into `priority()` or any other decision path, if it
+ever happens, is its own future, separately approved phase, not something
+this program authorizes.

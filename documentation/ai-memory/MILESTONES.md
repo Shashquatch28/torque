@@ -1793,6 +1793,101 @@ explicitly-assigned §10.8 human-resolution write path.)*
 
 ---
 
+## Module 12 — Build Roadmap — COMPLETE
+
+- **Commit:** *(uncommitted — maintainer commits)*. HEAD at implementation
+  time: `7172c92` (Module 9b). Recommended message below.
+- **Migrations:** **none.** Documentation-only milestone; no application code
+  changed. `alembic head` stays `0018_escalation_resolution`.
+- **Objective:** the blueprint's original Module 12 (a hypothetical Phase
+  1 → 5 build plan) is now historical — the implementation has already passed
+  every one of those phases. Replace it with an **actual current roadmap**,
+  derived from the repository as it exists today, that classifies every
+  remaining open item (across all of `DEFERRED.md` plus the two U-08-blocked
+  items) into what a judge needs to see live vs. what production needs
+  eventually, in dependency-aware order — and feeds Module 13 the inputs it
+  needs (what's demoable, what's simulated, the strongest live flow, what
+  limitations to disclose).
+- **Phase 0 verification (read-only, before any edit):** `git status` clean at
+  `7172c92`; `uv run pytest` **1209 passed**, 0 fail/skip, 1 pre-existing
+  cosmetic warning; `uv run ruff check .` clean; `alembic heads`/`current` both
+  `0018_escalation_resolution`; `tests/test_zz_migrations_roundtrip.py`
+  **1 passed**; `git diff HEAD -- src/torque/state_machine.py` /
+  `-- src/torque/models/guards.py` both **empty**. Spot-checked against the
+  live code (not just the docs): `GET /reports/{m}/incrementality` exists in
+  `api/reporting.py` and is fetched + rendered by `torque.js`
+  (`incrementalityCard`); `docker-compose.yml` defines exactly
+  `db, redis, migrate, api, worker, beat`; `D-090`'s `Status:` line reads
+  `IN FORCE`. **No documentation drift found** — `CURRENT_STATE.md`,
+  `DEFERRED.md`, and `UNRESOLVED.md` (Module 9b/10/11 entries, U-10) all match
+  the live repository exactly.
+- **Scope delivered:** the classification and roadmap are the deliverable —
+  see `DEFERRED.md` § "Build Roadmap Priority Classification (Module 12)" for
+  the full per-item breakdown (current state / why it matters / dependency /
+  priority / complexity / data-model / state-machine / external-service flags
+  for every item) and the dependency graph. Summary:
+  - **A — Demo-critical (1 item):** wire the ingestion→diagnosis→policy-
+    activation→execution auto-dispatch chain (D-080/D-088/D-093). Ranked
+    highest not because the demo is broken without it (the Decision-K
+    restraint scenarios + the static seed already carry a live
+    diagnosis-and-compliance story) but because it is the one place "one
+    autonomous agent" is still assembled by hand, and it is the cheapest, most
+    dependency-free item in the whole document.
+  - **B — Demo-enhancing (3 items):** live cross-leg-merge / B2B-bundle demo
+    scenarios (the blueprint's Module 13 script names this as a "Live:" beat);
+    an inline-diagnose fallback for the two "act" scenarios (redundant if A1
+    ships); a larger incrementality demo cohort (cosmetic).
+  - **C — Production-hardening (15 items):** real channel adapters + payment-
+    link/promise execution + `Action.cost` (bundled, needs 4 external
+    accounts); the U-08-gated issuer/BIN extraction → MAC first-touch lookup →
+    `ISSUER_SPECIFIC` systemic detection (one shared blocker); systemic
+    threshold calibration; secrets management; process manager/autoscaling;
+    CI/CD + registry; a Docker smoke test in CI; Postgres RLS; DPDP erasure
+    intake + the `content_sent` redaction cascade; observability;
+    `PlaybookRun.status` transitions; two demo-scale-deferred indexes.
+  - **D — Future/optional (8 items):** a real Temporal cluster (**D-090 not
+    reopened**), the learned individual-uplift model (blocked on 500+ resolved
+    cases), CAU, the SMS production path, NACH cross-instrument aggregation,
+    remaining Module 2 residue, the WhatsApp `AUTHENTICATION` category, and
+    cross-stratum merge widening.
+  - **Verified already sufficient, no action:** Module 9 descriptive
+    reporting, Module 9b incrementality, Module 10 Agent Console, Module 11
+    infra, and the compliance-guardrail demonstration.
+- **Decisions:** D-136 (the classification rule + the specific priority calls,
+  most notably ranking A1 above every Category-C item).
+- **Deviations from blueprint:** none in the "intentional deviation" sense —
+  the blueprint's own Module 12 explicitly needed Part D item 3 (build-window
+  length) to produce a calendar plan, which was never supplied; this run
+  answers the different, now-more-useful question of *ordering* rather than
+  *dates*, which is within the spirit of "convert Phases 1–5 into a
+  calendar-dated plan the moment the window length is known" — the window
+  still isn't known (U-05 item 3 stays open), so a priority/dependency
+  ordering is substituted.
+- **Deferred work removed from `DEFERRED.md`:** none — this run reorganizes
+  and classifies, it does not implement anything. No item's ✅/🔧/🔮 status
+  changed.
+- **Deferred work introduced:** none new — every item was already in
+  `DEFERRED.md`, `UNRESOLVED.md` (U-08), or a module docstring; this run adds
+  classification, not scope.
+- **Unresolved:** none resolved. U-08 is **not** answered — it is identified as
+  the shared blocker for two Category-C items and cross-referenced, per its
+  own text (already noted there since Module 3). No other `UNRESOLVED.md`
+  question touched.
+- **`state_machine.py` / `guards.py`:** **both byte-unchanged vs HEAD**
+  (`git diff HEAD --` empty for each, both before and after this run — no
+  application code was touched).
+- **Tests at completion:** **1209** passed (unchanged from `7172c92` — no code
+  changed). `ruff check .` clean. `alembic upgrade head` → `0018` (no-op);
+  roundtrip green.
+- **Verification status:** complete + verified. `git diff --check` clean (no
+  whitespace errors introduced). Only `documentation/ai-memory/{MILESTONES,
+  CURRENT_STATE,DEFERRED,ARCHITECTURE,DECISIONS}.md` and `README.md` changed;
+  zero files under `src/` or `tests/` touched.
+- **Recommended commit message:**
+  `Module 12: build roadmap — classify all remaining work (A demo-critical / B demo-enhancing / C production-hardening / D future) with a dependency graph; D-136; no code change`
+
+---
+
 ## (historical) What came next after Module 10
 
 **Module 10 — UI/UX — COMPLETE.** Torque is now a runnable, demo-able product:

@@ -2607,6 +2607,57 @@ BY D-0NN`.
   descriptive metrics (`recovery_summary` etc.) are byte-identical to before.
 - **Status:** IN FORCE
 
+## D-136 — Module 12 build-roadmap classification rule and priority ordering
+- **Milestone:** Module 12 — Build Roadmap
+- **Decision:** The blueprint's original Module 12 (Phase 1–5, "Foundation →
+  core loop → widen to 4 legs → compliance hardening → reporting/demo polish")
+  describes a build order that has already happened and does not distinguish
+  the two things remaining work now needs sorted by: *does a judge need this
+  live*, vs. *does production need this eventually*. How should the actual
+  remaining work (every open `DEFERRED.md` item + the two U-08-blocked items)
+  be classified and ordered?
+- **Chosen:** Four categories — **A. Demo-critical**, **B. Demo-enhancing**,
+  **C. Production-hardening**, **D. Future/optional** — applying one test to
+  every item: *"does this materially strengthen one of the five locked
+  differentiators (root-cause diagnosis / one ledger / incrementality /
+  compliance-by-construction / resource-aware prioritization) as something a
+  judge can watch happen, not just read about?"* Full classification with
+  per-item current state, dependency, priority, complexity, and
+  data-model/state-machine/external-service flags lives in `DEFERRED.md`
+  ("Build Roadmap Priority Classification"), not duplicated here.
+- **Alternatives:** re-run the blueprint's original 5-phase plan verbatim
+  (rejected — describes work already done, gives no signal on what's left);
+  rank by blueprint section order (rejected — conflates "the blueprint mentions
+  it" with "a judge needs to see it," which is exactly the trap the decision
+  rule above is designed to avoid); rank by implementation complexity alone
+  (rejected — cheapest-first would bury the one item that actually matters,
+  A1, under a pile of low-effort production polish).
+- **Key calls made under that rule** (see `DEFERRED.md` for the full table):
+  wiring the ingestion→diagnosis→policy-activation→execution auto-dispatch
+  chain (D-080/D-088/D-093) is ranked **A** (demo-critical, priority 1) — not
+  because the demo is broken without it (the Decision-K restraint scenarios
+  and the static seed already carry the differentiator-1/4 live story), but
+  because a live-injected `payment_failure`/`checkout_abandonment` case
+  currently dead-ends at `DETECTED` with no further autonomous action, which
+  understates "one autonomous agent" for both the demo and production, and it
+  is the cheapest, least risky item on the whole list (three `.apply_async`
+  calls at already-tested extension points, no schema, no state-machine
+  change). Live cross-leg-merge / B2B-bundle demo scenarios are ranked **B**
+  (demo-enhancing) — the blueprint's Module 13 script names them as a "Live:"
+  beat (differentiator 2), but the static seed already carries a real,
+  explorable B2B case, so the gap is real but not blocking. Real channel
+  adapters, the issuer/BIN-extraction-gated MAC lookup and `ISSUER_SPECIFIC`
+  systemic detection, and every infra/security hardening item are ranked **C**
+  — none is required to demonstrate a differentiator live, several need
+  external accounts or an unresolved design question (U-08) resolved first.
+  D-090 is **not** reopened; Temporal stays **D** (future driver swap only).
+- **Consequence:** the recommended next coding milestone is a small, optional
+  **"Module 12a — Close the Autonomous Loop"** (the A1 dispatch wiring + the B1
+  demo scenarios) immediately before Module 13 — not a demand to build any of
+  category C before judging. No code was changed to produce this
+  classification; it is a documentation-only milestone.
+- **Status:** IN FORCE
+
 ---
 
 ## Notes not recorded as decisions

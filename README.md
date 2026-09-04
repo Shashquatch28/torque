@@ -10,13 +10,19 @@ only, never as current spec.
 
 ## Status
 
-Modules **1–11 + 9b complete** (Module 9b uncommitted at time of writing). The
+Modules **1–12 + 9b complete** (Module 12 uncommitted at time of writing). The
 authoritative, always-current snapshot — what is built, the migration head, the
 test count, unresolved items — is
 [`documentation/ai-memory/CURRENT_STATE.md`](documentation/ai-memory/CURRENT_STATE.md).
 The rest of `documentation/ai-memory/` is the derived project memory
 (`ARCHITECTURE.md`, `DECISIONS.md`, `MILESTONES.md`, `INVARIANTS.md`,
 `DEFERRED.md`, `UNRESOLVED.md`).
+
+**What's left, and in what order:** Module 12 replaced the blueprint's original
+hypothetical build phases with an actual current roadmap — every remaining item
+classified as demo-critical / demo-enhancing / production-hardening /
+future-optional, with a dependency graph — in
+[`documentation/ai-memory/DEFERRED.md`](documentation/ai-memory/DEFERRED.md#build-roadmap-priority-classification-module-12).
 
 Highlights: shared case spine + append-only `CaseEvent` ledger, application-layer
 multi-tenancy, four-leg signal ingestion (Celery + Redis broker), rule-based

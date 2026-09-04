@@ -12,6 +12,351 @@ Legend: 🔧 build (planned) · 📋 design-only for demo · 🔮 roadmap / out 
 
 ---
 
+## Build Roadmap Priority Classification (Module 12)
+
+**Read this section first if you are deciding what to build next.** The
+per-module lists below this point are the historical, chronological record —
+what each module deferred and why, in the order the modules were built. This
+section is the *current* cross-cutting view: every item still open anywhere
+below, sorted by **what a judge needs to see live** rather than by which
+module happened to defer it.
+
+**The test applied to every item** (D-136): *does this materially strengthen
+one of the five locked differentiators — root-cause diagnosis, one case
+object/one ledger, incrementality-aware measurement, compliance-by-
+construction, resource-aware prioritization — as something watchable, not
+just readable?* Mentioning a feature in the blueprint is not, by itself, a
+reason to build it before judging.
+
+Four categories:
+
+- **A — DEMO-CRITICAL.** Without it, a live demo cannot credibly show one of
+  the five differentiators happening.
+- **B — DEMO-ENHANCING.** Strengthens a live demo beat the blueprint's Module
+  13 script explicitly names, but the demo already has a credible fallback
+  (a static, fully-explorable seeded case, or a scripted-but-real code path)
+  without it.
+- **C — PRODUCTION-HARDENING.** Needed for Torque to work as a real,
+  unattended product; irrelevant to what a judge watches.
+- **D — FUTURE / OPTIONAL.** Blocked on data volume, an external/regulatory
+  dependency, or genuinely out of scope; do not schedule.
+
+Already verified **sufficient, no action** (do not rebuild): Module 9
+descriptive reporting, Module 9b incrementality (API + dashboard card both
+live), Module 10 Agent Console, Module 11 infra (`docker compose --profile
+full` = db+redis+api+worker+beat, `/health/ready`, no Temporal), and the
+compliance-guardrail demonstration itself — the three Decision-K restraint
+scenarios (`hard_stop_mac` / `upi_retry_cap` / `nach_ceiling`) already drive
+real ingestion → real diagnosis (`transition_case`, a real `DIAGNOSIS_COMPLETED`
+event) → a real compliance-predicate assertion → a real `BLOCKED_BY_GUARDRAIL`
+action, live, on demand (`src/torque/demo/scenarios.py`).
+
+### A — DEMO-CRITICAL
+
+**A1. Wire the ingestion → diagnosis → policy-activation → execution
+auto-dispatch chain** (resolves D-080 / D-088 / D-093 — the three inter-module
+triggers every module since Module 3 has deferred to "an orchestration-layer
+concern").
+- **Current state:** `torque.diagnosis.diagnose_case_task`,
+  `torque.policy.activate_case_task`, and `torque.execution.schedule_run` are
+  each complete, tested, and independently callable — but nothing calls them
+  in sequence. A case created by real ingestion (or the `payment_failure` /
+  `checkout_abandonment` demo scenarios) sits at `DETECTED` forever unless
+  something external invokes `diagnose_case_task` by hand.
+  `tests/test_module10_demo.py` asserts exactly this today
+  (`status == "DETECTED"` for those two scenario keys) — not a bug, the
+  documented current behaviour.
+- **Why it matters:** this is the one place where "one autonomous agent" is
+  still assembled by hand rather than actually autonomous — in the demo *and*
+  in a real deployment. The Decision-K restraint scenarios and the static
+  16-case seed already prove diagnosis + compliance + one-ledger work
+  correctly; what's missing is the system doing it *on its own* when a case
+  is created, which is the more honest and more impressive thing to show.
+- **Dependency:** none. Every consumed engine (Module 3 diagnosis, Module 4
+  policy, Module 5 scheduler) is complete and independently tested.
+- **Priority:** 1 (highest of everything in this document).
+- **Complexity:** LOW–MEDIUM — add `diagnose_case_task.apply_async(...)` after
+  each of the four ingestion case-creation paths
+  (`ingestion.{cases,checkout,subscription,b2b}`), `activate_case_task
+  .apply_async(...)` after `DiagnosisOutcome.ROUTED_TO_PLAYBOOK`, and
+  `schedule_run(...)` after `ActivationOutcome.RUN_CREATED`. No new domain
+  logic — pure wiring at existing extension points, plus tests for the new
+  call sites and one Celery-eager end-to-end test (webhook in → case fully
+  worked or escalated, with no manual step).
+- **Data model change:** no. **State machine change:** no (drives only
+  already-legal transitions the engines already produce).
+  **External services:** no.
+- **Recommended ordering:** first — before Module 13, and before any item
+  below.
+
+### B — DEMO-ENHANCING
+
+**B1. Live cross-leg-merge and B2B multi-invoice-bundle demo scenarios.**
+- **Current state:** the real code is complete and tested
+  (`ingestion.dedup.find_supersedable_case` / `find_supersedable_payment_case`
+  — the bidirectional §2.4 merge; `ingestion.b2b.ingest_invoice`'s bundling
+  rule), but `DEMO_SCENARIOS` has no entry that triggers either live — only
+  the static seed shows a B2B case with 2 invoices, and no seeded case shows a
+  cross-leg merge at all.
+- **Why it matters:** the blueprint's own Module 13 script names this
+  explicitly as a **"Live:"** beat ("a B2B multi-invoice bundle, and a merged
+  cross-leg outreach event... shown rather than described") — directly
+  strengthens differentiator 2 (one case object, one ledger, across all four
+  legs). Not critical: a judge can already open the seeded B2B case and its
+  real `CaseEvent` stream, which is a credible (if static) substitute.
+- **Dependency:** none; independent of A1.
+- **Priority:** 2.
+- **Complexity:** LOW — two new `DEMO_SCENARIOS` entries + `inject_scenario`
+  branches, mirroring the five existing ones; no new domain code.
+- **Data model / state machine / external services:** no / no / no.
+- **Recommended ordering:** alongside or immediately after A1, before Module 13.
+
+**B2. Inline-diagnose the `payment_failure` / `checkout_abandonment` scenarios
+(fallback only if A1 is skipped).**
+- **Current state:** they stop at `DETECTED` (see A1).
+- **Why it matters:** a lower-risk, demo-scope-only patch — mirrors the
+  `_diagnose_to_playbook` helper the restraint scenarios already use — for a
+  maintainer who wants a live "it diagnoses" beat without touching the
+  production dispatch path right before judging.
+- **Dependency:** none; **redundant once A1 is done** (A1 makes this
+  unnecessary — do not build both).
+- **Priority:** 3, and only relevant if A1 is explicitly deferred.
+- **Complexity:** LOW. **Data model / state machine / external services:**
+  no / no / no.
+
+**B3. A larger/second incrementality demo cohort (tighter confidence interval)
+— optional polish.**
+- **Current state:** 3 control / 13 treatment gives an honest but wide lift CI
+  (roughly ±45 points) — correct behaviour at this sample size (Blueprint
+  §9.3: showing a wide interval openly is itself part of the honesty
+  differentiator), not a defect.
+- **Why it matters:** marginal; a tighter interval reads more "impressive" but
+  the wide one is arguably the better demo of intellectual honesty.
+- **Dependency:** none. **Priority:** 4 (lowest in B).
+- **Complexity:** LOW (seed data only). **Data model / state machine /
+  external services:** no / no / no.
+
+### C — PRODUCTION-HARDENING (roadmapped only — do not implement before Module 13)
+
+**C1. Real channel adapters** (§5.4 — Meta WhatsApp Cloud API, Resend, Fast2SMS,
+Razorpay retry / Mandate-Execute / NACH re-presentment).
+- **Current state:** `execution.executor.run_action` is a stub — always
+  returns `SUCCESS`, no external I/O.
+- **Why it matters:** required for Torque to do anything in a real deployment;
+  not required to prove a differentiator to a judge (a verifiable-live WhatsApp
+  send is not achievable in a demo room anyway — the guardrail *block* is the
+  more demonstrable story, and it already works).
+- **Dependency:** logically downstream of **A1** — without auto-dispatch, no
+  `scheduled_job` is ever armed on live traffic, so `run_action` is never
+  invoked outside a test or a demo scenario in the first place. Also needs
+  live developer/test-tier credentials for 4 separate services (an
+  operational dependency, not code).
+- **Priority:** 5. **Complexity:** HIGH (4 distinct integrations + retry/error
+  mapping + secrets).
+- **Data model:** no (channel/cost columns already exist). **State machine:**
+  no. **External services:** **yes** — Meta, Resend, Fast2SMS, Razorpay.
+
+**C2. `GENERATE_PAYMENT_LINK` / `LOG_PROMISE` real execution.**
+- **Current state:** stubbed alongside C1; Module 7 can still reconcile an
+  externally-created `PaymentLink`, but execution never creates one.
+- **Why it matters:** completes the recovery-signal loop for real traffic.
+- **Dependency:** same tier as C1 (Razorpay Payment Links API).
+- **Priority:** 5 (bundle with C1). **Complexity:** MEDIUM.
+- **Data model / state machine:** no / no. **External services:** yes (Razorpay).
+
+**C3. `Action.cost` population from real sends.**
+- **Current state:** nullable, ~0 everywhere; Module 8's *forward* cost
+  estimate (which reads `ChannelRateCard` directly) is unaffected — this is
+  only Module 9's *backward-looking* `total_action_cost` / `cost_efficiency_ratio`.
+- **Why it matters:** makes the descriptive cost-efficiency number real.
+- **Dependency:** C1 (needs real sends to cost). **Priority:** 6.
+- **Complexity:** LOW once C1 exists. **Data model / state machine:** no / no.
+  **External services:** inherits C1's.
+
+**C4. Issuer/BIN extraction (U-08) → §5.3 MAC first-touch lookup (D-083) →
+`ISSUER_SPECIFIC` systemic detection.**
+- **Current state:** both downstream items are blocked on the same genuinely
+  **unresolved design question** (U-08: which field, extracted from where,
+  stored on which model) — not merely unimplemented. `NETWORK_WIDE` systemic
+  detection and decline-code-based diagnosis work fully without it.
+- **Why it matters:** sharpens diagnosis and systemic-detection precision at
+  real issuer-level granularity; not needed for the demo — the `hard_stop_mac`
+  scenario honestly *simulates* a directive that has already arrived rather
+  than performing a live lookup, which is sufficient and clearly documented
+  as such.
+- **Dependency:** **U-08 must be resolved first** (a maintainer decision, not
+  implementation work). Both downstream items share this one blocker and
+  should be scoped as **one** milestone once U-08 is answered, not built
+  separately.
+- **Priority:** 7. **Complexity:** MEDIUM once U-08 is resolved (extraction is
+  a context/model addition; the lookup itself reuses the existing
+  `MacCodeRegistry.tier_for`).
+- **Data model:** **yes** — a new issuer/BIN field somewhere (exact shape is
+  what resolving U-08 decides) → **migration required**.
+  **State machine:** no. **External services:** no.
+
+**C5. Systemic threshold calibration** (`systemic_baseline_floor_per_min` /
+`systemic_absolute_count_floor` — U-04 placeholders).
+- **Current state:** invented, untuned defaults; irrelevant at demo scale (the
+  demo never injects enough volume to approach them).
+- **Dependency:** real or synthetic bulk failure-rate data (doesn't exist yet).
+- **Priority:** 8. **Complexity:** LOW (config change once data exists).
+  **Data model / state machine / external services:** no / no / no.
+
+**C6. Secrets management** (Vault / SOPS / cloud KMS).
+- **Current state:** `.env` + compose `env_file` only (Module 11, by design —
+  free-tier, demo-scope).
+- **Why it matters:** required before any real credential (Razorpay live keys,
+  the C1 channel tokens) is handled.
+- **Dependency:** none technically; should land alongside/before C1's
+  credentials exist.
+- **Priority:** 5 (parallel with C1). **Complexity:** MEDIUM.
+  **Data model / state machine:** no / no. **External services:** yes (a
+  vault/KMS provider).
+
+**C7. Process manager / autoscaling / multi-host orchestration.**
+- **Current state:** `docker-compose`, single host (D-129).
+- **Why it matters:** only once real traffic exceeds one host.
+- **Dependency:** none blocking; sequence whenever real load exists.
+- **Priority:** 9. **Complexity:** HIGH. **Data model / state machine:** no /
+  no. **External services:** yes (a hosting platform/orchestrator).
+
+**C8. CI/CD pipeline + Docker image registry publishing.**
+- **Current state:** none; build/lint/test contracts covered by the local
+  pytest suite only.
+- **Dependency:** none. **Priority:** 6. **Complexity:** MEDIUM.
+  **Data model / state machine:** no / no. **External services:** yes (a CI
+  provider / registry).
+
+**C9. Docker smoke test in CI** (an actual `docker compose --profile full up`,
+automated).
+- **Current state:** `tests/test_infra_*` assert the compose/Dockerfile
+  *contract* without Docker; the real smoke test has been run manually twice
+  (Modules 11 and 9b), both green, and is documented in each milestone report.
+- **Dependency:** **C8** (needs a CI runner with Docker-in-Docker).
+- **Priority:** 6. **Complexity:** MEDIUM. **Data model / state machine:**
+  no / no. **External services:** yes (inherits C8's).
+
+**C10. Postgres Row-Level Security.**
+- **Current state:** application-layer `TenantScope` only (D-001); every path
+  already goes through it, test-enforced — not a known gap, defense-in-depth.
+- **Dependency:** none. **Priority:** 8. **Complexity:** MEDIUM.
+  **Data model:** yes (RLS policies — a migration). **State machine:** no.
+  **External services:** no.
+
+**C11. DPDP erasure-request intake** (UI/endpoint).
+- **Current state:** `Counterparty.redact_pii()` exists and is unit-tested;
+  nothing lets a merchant or customer *trigger* it.
+- **Dependency:** none. **Priority:** 7. **Complexity:** LOW–MEDIUM.
+  **Data model / state machine / external services:** no / no / no.
+
+**C12. `Action.content_sent` redaction cascade on erasure.**
+- **Current state:** column exists; not cascaded by `redact_pii()`.
+- **Dependency:** C11 (needs a trigger to cascade from). **Priority:** 7.
+  **Complexity:** LOW. **Data model / state machine / external services:**
+  no / no / no.
+
+**C13. Observability** (structured logging / minimal metrics).
+- **Current state:** none beyond `/health` + `/health/ready` — deliberately
+  minimal (Module 11, D-132: no Prometheus/Grafana/ELK/OTel).
+- **Dependency:** none. **Priority:** 9. **Complexity:** MEDIUM.
+  **Data model / state machine:** no / no. **External services:** possibly (a
+  log/metrics sink, if one is chosen).
+
+**C14. `PlaybookRun.status` runtime transitions**
+(`RUNNING → PAUSED/COMPLETED/HALTED_BY_GUARDRAIL/ESCALATED/CANCELLED`).
+- **Current state:** the column defaults to `RUNNING`; the *case*-level state
+  machine (`RevenueLeakCase.status`) is what the Agent Console and dashboard
+  actually read — `PlaybookRun.status` has no consumer today, so this is an
+  unfinished column, not a known-broken behaviour.
+- **Dependency:** none. **Priority:** 9. **Complexity:** LOW–MEDIUM.
+  **Data model:** no (column exists). **State machine:** no — this enum is
+  explicitly *not* owned by `state_machine.py` (D-011). **External services:** no.
+
+**C15. `(merchant_id, counterparty_id)` and `(merchant_id, closed_at)`
+indexes** on `revenue_leak_case` (deferred at demo scale — D-108, Module 9
+note).
+- **Current state:** not added; no measured slowness at demo row counts.
+- **Dependency:** none. **Priority:** 9. **Complexity:** LOW.
+  **Data model:** **yes (index-only migration)**. **State machine / external
+  services:** no / no.
+
+### D — FUTURE / OPTIONAL (do not schedule; revisit only on the stated trigger)
+
+- **D1. A real Temporal engine / self-hosted cluster.** **D-090 stands, not
+  reopened** (reaffirmed by D-127, Module 11) — a future driver swap behind
+  `execute_due_job` only, and only if the Postgres-polling driver proves
+  insufficient at a scale the demo/current build never reaches.
+- **D2. Learned individual uplift model** (XGBoost + SHAP + T-/X-learner
+  meta-learners, Decision F / §8.4). Trigger: 500+ resolved cases — a data
+  threshold, not an engineering blocker. The feature set is already named and
+  collected (§8.4); no schema change needed when it lands.
+- **D3. Card Account Updater (CAU).** No free tier — excluded entirely (Part E
+  item 6).
+- **D4. SMS production path.** Needs TRAI DLT template registration — an
+  external regulatory dependency, not code (Part E item 5).
+- **D5. NACH cross-instrument aggregation** (cheque + NACH dishonours). Needs
+  bank-side visibility Torque does not have (Part E item 4).
+- **D6. Remaining Module 2 residue** — per-decline retry-budget increment
+  semantics beyond seed-to-1, real NPCI NACH return-code ingestion,
+  `MacCodeRegistry` full seed + unseeded-code self-healing, instrument-key
+  HMAC/pepper hardening, a real storefront pixel for Leg 2, counting
+  `subscription.charged.failed` in the systemic rollup (D-073) — all low-value
+  pre-real-scale, none blocking anything above.
+- **D7. WhatsApp `AUTHENTICATION` template category; Meta/WABA template +
+  status sync.** No current use case (D-041).
+- **D8. Cross-stratum merge widening** (Module 6 residual, D-102). A
+  documented, safe fallback (solo send) already exists at demo scale.
+
+### Dependency graph (not a priority ranking — an ordering constraint)
+
+```
+A1 (auto-dispatch wiring) ── no dependency ── do this first
+  └─ enables real execution to ever fire on live (non-demo, non-test) traffic
+       └─ C1 (real channel adapters, needs 4 external accounts)
+            └─ C2 (GENERATE_PAYMENT_LINK / LOG_PROMISE execution)
+                 └─ C3 (Action.cost population)
+
+B1 (cross-leg / B2B live scenarios) ── independent of A1 ── do alongside A1
+B2 (inline-diagnose fallback)       ── superseded by A1; only if A1 skipped
+B3 (bigger incrementality cohort)   ── independent, lowest priority in B
+
+U-08 (issuer/BIN extraction — an unresolved DESIGN question, not code)
+  ├─→ C4a: §5.3 MAC first-touch lookup (D-083)
+  └─→ C4b: ISSUER_SPECIFIC systemic detection
+       (C4a and C4b are independent of EACH OTHER once U-08 resolves —
+        not sequential; both wait on the same one upstream decision)
+
+C6 (secrets management)  ── should land alongside/before C1's real credentials
+C8 (CI/CD + registry) → C9 (Docker smoke test in CI, needs C8's runner)
+C11 (DPDP erasure intake) → C12 (content_sent redaction cascade, needs C11)
+C5, C7, C10, C13, C14, C15 ── independent of everything above; sequence
+  whenever convenient post-demo, in any order
+
+D1–D8 ── independent of all of the above; each waits on its own stated
+  trigger (scale, data volume, or an external/regulatory dependency), not on
+  any engineering work in this document
+```
+
+### Recommended implementation order
+
+1. **This milestone (Module 12)** — documentation only, no code.
+2. *(Maintainer's call, optional but recommended)* **"Module 12a — Close the
+   Autonomous Loop"** — A1 + B1. Both LOW–MEDIUM complexity, no schema change,
+   no state-machine change, no external service, no dependency on anything
+   else. Makes Module 13's script beats 2/3/4 fully live instead of partly
+   scripted / partly static.
+3. **Module 13 — Demo Script.** Works today with or without step 2; strictly
+   stronger with it. (Still needs Part D item 4 — a real judging rubric, if one
+   exists — per U-05.)
+4. **Post-demo, opportunistically, in any order within each branch:**
+   C6 + C8 (secrets + CI foundation) → C1 + C2 → C3; independently, C9 once C8
+   exists; independently, resolve U-08 → C4; independently, C5 / C7 / C10 /
+   C11 → C12 / C13 / C14 / C15.
+5. **D-track** — revisit only when its specific trigger condition is met.
+
+---
+
 ## Module 2 — Signal Ingestion
 
 - ✅ **DONE in M7a:** the FastAPI application (`torque.api`), the Razorpay webhook

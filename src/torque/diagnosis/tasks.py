@@ -11,12 +11,16 @@ Thin on purpose, mirroring `torque.ingestion.tasks`: open one transactional
 logs / eager-mode assertions. `_session_scope` is a module-level indirection so
 tests can bind the task to the harness session.
 
-NOTE (Module 2 → Module 3 handoff): wiring the automatic *enqueue* of this task
-from the ingestion legs is deliberately NOT done in Module 3 — see D-080. In
-eager test mode an inline enqueue would run diagnosis synchronously inside
-ingestion and change Module 2's tested post-ingestion contract (cases end
-`DETECTED`). The engine + task are the finished, independently-invocable Module 3
-surface; the cross-module trigger is an orchestration-layer concern.
+**Module 12a (D-137, resolves D-080/D-088).** The Module 2 → Module 3 automatic
+*enqueue* is now wired — see `torque.ingestion.tasks._dispatch_diagnosis`, which
+calls this task. Symmetrically, this task is the Module 3 → Module 4 trigger:
+once `diagnose_case`'s own transaction has committed (i.e. **after** the `with`
+block below — never from inside an open transaction), a
+`DiagnosisOutcome.ROUTED_TO_PLAYBOOK` result dispatches
+`torque.policy.activate_case_task` for the same case. `ESCALATED` and `NOOP`
+dispatch nothing — an escalated case is done (a human takes it from here) and a
+`NOOP` diagnosed nothing. `_dispatch_activation` is its own module-level name so
+tests can monkeypatch it exactly like `_session_scope`.
 """
 
 from __future__ import annotations
@@ -24,10 +28,17 @@ from __future__ import annotations
 import uuid
 
 from torque.db.session import session_scope
-from torque.diagnosis.engine import diagnose_case
+from torque.diagnosis.engine import DiagnosisOutcome, diagnose_case
 from torque.ingestion.celery_app import celery_app
 
 _session_scope = session_scope
+
+
+def _dispatch_activation(case_id: str) -> None:
+    """Enqueue policy activation for a just-diagnosed, routed case (D-137)."""
+    from torque.policy.tasks import activate_case_task
+
+    activate_case_task.apply_async((case_id,))
 
 
 @celery_app.task(name="torque.diagnosis.diagnose_case", ignore_result=True)
@@ -35,4 +46,6 @@ def diagnose_case_task(case_id: str) -> str:
     """Diagnose one case by id (Blueprint Module 3). Idempotent under redelivery."""
     with _session_scope() as session:
         outcome = diagnose_case(session, case_id=uuid.UUID(str(case_id)))
+    if outcome is DiagnosisOutcome.ROUTED_TO_PLAYBOOK:
+        _dispatch_activation(str(case_id))
     return outcome.name

@@ -10,9 +10,26 @@ code into a single visible event on the demo merchant:
   scenarios: create the case, seed the blocking budget row, **assert the real
   compliance predicate refuses the retry**, and record the
   `BLOCKED_BY_GUARDRAIL` action so it appears in the exception list and the
-  case timeline.
+  case timeline;
+* `cross_leg_merge` / `b2b_invoice_bundle` (Module 12a / B1) — the real §2.4
+  bidirectional cross-leg Merge (`ingestion.cases.create_or_attach_case` +
+  `ingestion.checkout.create_checkout_case`, via `ingestion.dedup`) and the real
+  §3 B2B grouping rule (`ingestion.b2b.ingest_invoice`), for the **same**
+  counterparty, so the "one case object, one ledger" differentiator is a live
+  click, not just the static seed.
 
 No parallel event-generation mechanism is invented.
+
+**`dispatch=True`** (Module 12a / D-137) additionally wires
+`torque.ingestion.tasks.dispatch_diagnosis` into the real ingestion calls above,
+so the resulting case is picked up by the same autonomous
+ingestion→diagnosis→policy-activation→execution chain a real webhook would
+trigger — asynchronously, via the real Celery broker; this function itself
+still returns immediately with the case as ingestion left it (never blocks on
+the dispatched work). Defaults to `False` so every existing direct caller (the
+whole Module 10 demo test suite) is unaffected; `torque.api.demo` is the one
+caller that opts in, matching how `api/webhooks.py` already dispatches for a
+real Razorpay webhook.
 """
 
 from __future__ import annotations
@@ -21,7 +38,7 @@ import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from torque.compliance import (
@@ -42,11 +59,14 @@ from torque.enums import (
     HardStopReason,
 )
 from torque.events import Attribution, append_case_event, write_action_and_event
+from torque.ingestion.b2b import ingest_invoice
 from torque.ingestion.cases import create_or_attach_case
 from torque.ingestion.checkout import create_checkout_case
 from torque.ingestion.subscription import create_subscription_case
+from torque.ingestion.tasks import dispatch_diagnosis
 from torque.models import (
     Action,
+    B2BInvoice,
     CardRetryBudget,
     Event,
     NACHRetryPolicy,
@@ -67,6 +87,12 @@ DEMO_SCENARIOS: list[dict] = [
      "description": "The mandate has used its 3 NPCI retries — Torque stops."},
     {"key": "nach_ceiling", "label": "NACH representment ceiling", "kind": "restraint",
      "description": "The self-imposed 3/cycle NACH ceiling is reached — Torque stops."},
+    {"key": "cross_leg_merge", "label": "Cross-leg merge", "kind": "act",
+     "description": "The same customer abandons checkout, then their retry fails "
+                    "— one ledger, not two cases (Leg 1 <-> Leg 2)."},
+    {"key": "b2b_invoice_bundle", "label": "B2B invoice bundle", "kind": "act",
+     "description": "A second overdue invoice for the same counterparty bundles "
+                    "into their one open receivable case (Leg 4)."},
 ]
 _KEYS = {s["key"] for s in DEMO_SCENARIOS}
 
@@ -98,12 +124,12 @@ def _event(session: Session, *, etype: str, payload: dict) -> Event:
 
 
 def _payment_payload(*, amount, contact, method="card", token=None,
-                     error_code="SOFT_DECLINE") -> dict:
+                     error_code="SOFT_DECLINE", order_id=None) -> dict:
     entity = {
         "id": _next("pay"), "amount": _paise(amount), "currency": "INR",
         "method": method, "contact": contact,
         "email": f"{contact.strip('+')}@demo.test", "error_code": error_code,
-        "order_id": _next("order"),
+        "order_id": order_id or _next("order"),
     }
     if token:
         entity["token_id"] = token
@@ -111,13 +137,27 @@ def _payment_payload(*, amount, contact, method="card", token=None,
             "payload": {"payment": {"entity": entity}}, "created_at": 1_760_000_000}
 
 
-def _checkout_payload(*, value, contact) -> dict:
+def _checkout_payload(*, value, contact, cart_id=None) -> dict:
     return {"event": "checkout.abandoned", "created_at": 1_760_000_000,
             "payload": {"checkout": {"entity": {
-                "cart_id": _next("cart"), "cart_value": _paise(value),
+                "cart_id": cart_id or _next("cart"), "cart_value": _paise(value),
                 "drop_stage": "vpa_entry", "payment_method_attempted": "UPI_COLLECT",
                 "contact": contact, "email": f"{contact.strip('+')}@demo.test",
             }}}}
+
+
+def _invoice_payload(*, original, contact, outstanding=None, terms="NET30") -> dict:
+    original_paise = _paise(original)
+    entity = {
+        "id": _next("inv"), "amount": original_paise, "currency": "INR",
+        "amount_paid": 0,
+        "amount_due": _paise(outstanding) if outstanding is not None else original_paise,
+        "expire_by": 1_760_000_000, "terms": terms,
+        "customer_details": {"contact": contact, "email": f"{contact.strip('+')}@demo.test"},
+        "gst": {"gstin": "27AAAAA0000A1Z5"},
+    }
+    return {"entity": "event", "event": "invoice.overdue", "created_at": 1_760_000_000,
+            "payload": {"invoice": {"entity": entity}}}
 
 
 def _sub_payload(*, amount, contact, method) -> dict:
@@ -176,19 +216,31 @@ def _blocked_action(session: Session, case: RevenueLeakCase, *,
     )
 
 
-def inject_scenario(session: Session, key: str, *, now: datetime | None = None) -> dict:
-    """Run one demo scenario against `acc_demo`. The caller owns the transaction."""
+def inject_scenario(
+    session: Session, key: str, *, now: datetime | None = None, dispatch: bool = False
+) -> dict:
+    """Run one demo scenario against `acc_demo`. The caller owns the transaction.
+
+    `dispatch=True` (Module 12a) wires `torque.ingestion.tasks.dispatch_diagnosis`
+    into the real ingestion calls below — the same dispatch a real webhook makes
+    (`api/webhooks.py`), fired from inside this still-open transaction, exactly
+    like that existing caller. Defaults to `False`: every direct call (the whole
+    Module 10 demo test suite) is unaffected; `torque.api.demo` opts in.
+    """
     now = now or datetime.now(UTC)
     if key not in _KEYS:
         raise ValueError(f"unknown demo scenario {key!r}")
     scope = TenantScope(session, DEMO_MERCHANT_ID)
     contact = _contact()
+    on_case_ready = (
+        (lambda case: dispatch_diagnosis(str(case.case_id))) if dispatch else None
+    )
 
     if key == "payment_failure":
         ev = _event(session, etype="payment.failed",
                     payload=_payment_payload(amount="7900.00", contact=contact,
                                              token=_next("tok")))
-        create_or_attach_case(session, event=ev)
+        create_or_attach_case(session, event=ev, on_case_ready=on_case_ready)
         case = _case_for_event(session, ev.event_id)
         score_case(session, case, now=now)
         return {"scenario": key, "case_id": str(case.case_id), "status": str(case.status)}
@@ -196,10 +248,63 @@ def inject_scenario(session: Session, key: str, *, now: datetime | None = None) 
     if key == "checkout_abandonment":
         ev = _event(session, etype="checkout.abandoned",
                     payload=_checkout_payload(value="4300.00", contact=contact))
-        create_checkout_case(session, event_id=ev.event_id)
+        create_checkout_case(session, event_id=ev.event_id, on_case_ready=on_case_ready)
         case = _case_for_event(session, ev.event_id)
         score_case(session, case, now=now)
         return {"scenario": key, "case_id": str(case.case_id), "status": str(case.status)}
+
+    if key == "cross_leg_merge":
+        # Leg 2 first: the customer abandons checkout with cart_id == X.
+        cart_id = _next("cart")
+        co_ev = _event(session, etype="checkout.abandoned",
+                       payload=_checkout_payload(value="6200.00", contact=contact,
+                                                 cart_id=cart_id))
+        create_checkout_case(session, event_id=co_ev.event_id)
+        abandonment = _case_for_event(session, co_ev.event_id)
+
+        # Leg 1: the same order (order_id == cart_id) then fails as a live retry.
+        pay_ev = _event(session, etype="payment.failed",
+                        payload=_payment_payload(amount="6200.00", contact=contact,
+                                                 token=_next("tok"), order_id=cart_id))
+        create_or_attach_case(session, event=pay_ev, on_case_ready=on_case_ready)
+        payment_case = _case_for_event(session, pay_ev.event_id)
+
+        session.refresh(abandonment)
+        score_case(session, payment_case, now=now)
+        return {
+            "scenario": key,
+            "case_id": str(payment_case.case_id),
+            "status": str(payment_case.status),
+            "merged_case_id": str(abandonment.case_id),
+            "merged": abandonment.superseded_by_case_id == payment_case.case_id,
+        }
+
+    if key == "b2b_invoice_bundle":
+        # Two overdue invoices for the same counterparty — the §3 grouping rule
+        # bundles the second into the case the first one opened; no new case.
+        first_ev = _event(session, etype="invoice.overdue",
+                          payload=_invoice_payload(original="42000.00", contact=contact))
+        ingest_invoice(session, event_id=first_ev.event_id)
+        case = _case_for_event(session, first_ev.event_id)
+        first_case_id = case.case_id
+
+        second_ev = _event(session, etype="invoice.overdue",
+                           payload=_invoice_payload(original="18500.00", contact=contact))
+        ingest_invoice(session, event_id=second_ev.event_id, on_case_ready=on_case_ready)
+
+        session.refresh(case)
+        score_case(session, case, now=now)
+        invoice_count = session.scalar(
+            select(func.count()).select_from(B2BInvoice).where(B2BInvoice.case_id == case.case_id)
+        )
+        return {
+            "scenario": key,
+            "case_id": str(case.case_id),
+            "status": str(case.status),
+            "bundled": case.case_id == first_case_id,
+            "invoice_count": int(invoice_count or 0),
+            "amount_at_risk": str(case.amount_at_risk),
+        }
 
     if key == "hard_stop_mac":
         token = _next("tok")

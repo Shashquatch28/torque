@@ -2658,6 +2658,111 @@ BY D-0NN`.
   classification; it is a documentation-only milestone.
 - **Status:** IN FORCE
 
+## D-137 — The autonomous chain is wired at the existing Celery task boundary, via an opt-in `on_case_ready` hook, never inside the pure engines
+- **Milestone:** Module 12a — Close the Autonomous Loop
+- **Decision:** D-080 (ingestion → diagnosis), D-088 (diagnosis → policy), and
+  D-093 (policy → execution) each deliberately left the cross-module *enqueue*
+  unwired, precisely because an inline/eager enqueue would run the next stage
+  synchronously inside the current one and change that stage's own tested
+  post-condition (e.g. Module 2's ingestion tests assert a case ends
+  `DETECTED`). How do you wire real autonomy without breaking that contract or
+  duplicating any engine's logic?
+- **Chosen:**
+  1. **Ingestion → diagnosis.** `create_or_attach_case` / `create_checkout_case`
+     / `create_subscription_case` / `ingest_invoice` (and their buffer-layer
+     wrappers) each gain one new, purely additive, keyword-only parameter:
+     `on_case_ready: Callable[[RevenueLeakCase], None] | None = None`. It is
+     called with the **canonical** case — the survivor of a §2.4 merge in
+     either direction, or the bundled-into case for a B2B attach, never a
+     superseded/narrower row — exactly once, only when a case was genuinely
+     (re)created. Default `None` means every existing direct caller (the whole
+     Module 2 test suite, the demo scenarios) is **byte-for-byte unaffected**.
+     Only `torque.ingestion.tasks`'s four Celery tasks pass one, and it does no
+     I/O itself — it appends the case id to a plain Python list. Only **after**
+     the task's own `with session_scope()` block exits (i.e. the transaction
+     has committed) does the task call `torque.ingestion.tasks.
+     dispatch_diagnosis`, which enqueues `torque.diagnosis.diagnose_case_task`.
+  2. **Diagnosis → policy.** No hook needed here: `diagnose_case_task` already
+     receives `case_id` as its own argument. After its `with session_scope()`
+     block exits, `if outcome is DiagnosisOutcome.ROUTED_TO_PLAYBOOK:` it calls
+     `torque.diagnosis.tasks._dispatch_activation`, enqueuing
+     `torque.policy.activate_case_task`. `ESCALATED` and `NOOP` dispatch
+     nothing.
+  3. **Policy → execution.** Also no hook: inside `activate_case_task`'s
+     `with session_scope()` block (**same transaction**, not a further Celery
+     hop), `if outcome is ActivationOutcome.RUN_CREATED:` it looks up the
+     just-created `PlaybookRun` and calls the existing
+     `torque.execution.scheduler.schedule_run` directly — a plain function
+     call. "Scheduling execution" means arming one `ScheduledJob` row; the
+     unmodified 10s/60s beat pollers (D-090) are what actually run it.
+  In every case the **pure engine functions**
+  (`diagnose_case`, `activate_case`, `create_or_attach_case`, …) are either
+  untouched or gain only the one additive parameter — none gained a new
+  responsibility, and no engine's decision logic is reproduced in the
+  dispatcher.
+- **Alternatives:** enqueue unconditionally inside the pure engine functions
+  (rejected — this is exactly what D-080/088/093 already ruled out, and
+  empirically breaks existing `celery_eager` tests that call an engine in
+  isolation, e.g. `test_diagnosis_task.py`); change `BufferOutcome`/
+  `DiagnosisOutcome`/`ActivationOutcome` to carry the case object (rejected —
+  the outcome enums are asserted with `is` across ~15 existing test files;
+  widening them to a richer return type is a much larger, riskier surface than
+  one optional keyword parameter); re-derive "the case for this event" in the
+  task layer by re-querying (rejected for the B2B attach path specifically — no
+  event→case link exists once a `B2BInvoice` merely attaches to a
+  pre-existing case; re-deriving identity there would duplicate
+  `resolve_counterparty`/grouping logic the task has no business repeating).
+- **Consequence:** `state_machine.py` and `guards.py` are untouched — the chain
+  drives only already-legal transitions the engines already produce. No new
+  Celery task, no new table. Two of the three, changed-behavior existing tests
+  (`test_diagnosis_task.py::test_task_diagnoses_a_case`,
+  `test_module4_task.py::test_task_creates_run`) were strengthened (bound every
+  task's `_session_scope` to the harness session, seeded the catalog where
+  needed) to actually prove the new chain fires, rather than silently no-op
+  against an invisible second connection.
+- **Status:** IN FORCE
+
+## D-138 — `dispatch_diagnosis` always enqueues with a short countdown (closes a real, empirically-found race)
+- **Milestone:** Module 12a — Close the Autonomous Loop
+- **Decision:** D-137's ingestion→diagnosis dispatch has **two** real callers:
+  the Celery task layer (fires strictly after its own transaction has
+  committed — provably safe) and `torque.demo.scenarios.inject_scenario`
+  (`dispatch=True`, called from `torque.api.demo.post_inject`), which fires
+  *inside* the still-open request transaction — the same shape
+  `api/webhooks.py` already uses for its own dispatches, whose `get_db`
+  dependency commits only after the handler returns. Is that second shape
+  actually safe?
+- **Chosen:** No — confirmed **empirically**, not just in theory, against the
+  real `docker compose --profile full` stack (real worker, real Redis, real
+  Postgres, no test-harness monkeypatching): injecting a demo scenario and
+  dispatching diagnosis with **no delay** let the worker receive and execute
+  `diagnose_case_task` *before* the API request's transaction committed — the
+  task saw no case at all and returned a clean, silent `NOOP`, and nothing
+  ever retried it. `dispatch_diagnosis` (`torque.ingestion.tasks`) therefore
+  **always** enqueues `diagnose_case_task` with a small
+  `countdown` (`_DIAGNOSIS_DISPATCH_COUNTDOWN_SECONDS = 2`) — cheap, harmless
+  insurance for the already-safe commit-then-dispatch callers, and the actual
+  fix for the not-yet-committed one. Re-verified against the same real stack
+  afterward: both the low-confidence (→ `ESCALATED_TO_HUMAN`) and
+  high-confidence (→ `PLAYBOOK_ACTIVE` + a real `PlaybookRun` + a real
+  `ScheduledJob`) paths now complete correctly with no manual step.
+- **Alternatives:** restructure `api/deps.get_db` to expose an explicit
+  post-commit hook (rejected — a much larger, shared-across-every-endpoint
+  change for one caller's problem); make `diagnose_case_task` retry when it
+  finds no case (rejected — would blur `NOOP`'s existing, load-bearing meaning
+  "not eligible / already handled / redelivery" with a *new* meaning "try again
+  shortly," everywhere `NOOP` is asserted today, not just for this caller);
+  give only `torque.demo.scenarios` its own countdown, leaving the Celery-task
+  callers at zero delay (rejected — one function, one safety behavior, is
+  simpler to reason about and costs the safe callers nothing but two seconds of
+  background latency).
+- **Consequence:** `task_always_eager` (test-harness only) ignores `countdown`
+  entirely and still runs inline immediately — no existing or new test's
+  timing changed. A real deployment's diagnosis now starts a couple of seconds
+  after a case is created rather than instantaneously; imperceptible next to
+  the 30s/90s self-recovery buffers already in front of Legs 1/3.
+- **Status:** IN FORCE
+
 ---
 
 ## Notes not recorded as decisions

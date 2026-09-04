@@ -440,11 +440,14 @@ D1–D8 ── independent of all of the above; each waits on its own stated
   `state_machine.py` (U-01 #3, D-066) as a **legal but dormant** edge. **Driving
   it** (a sweep that includes active playbook runs) + mid-run recovery semantics
   is Module 5 — M7c produces no `PLAYBOOK_ACTIVE` case.
-- 🔧 **Dispatch to Module 3 (the auto-trigger)** — the Module 3 engine + task
-  exist and are invocable, but no ingestion leg enqueues `diagnose_case_task`; an
-  ingestion-created case is left in `DETECTED` (or `DIAGNOSING` after systemic
-  resolution) for a separate orchestration step to pick up (D-080, moved here from
-  "Dispatch to Module 3"). Wiring the enqueue is an orchestration-layer concern.
+- ✅ **DONE in Module 12a:** dispatch to Module 3 (D-080) — every ingestion
+  case-creating path now dispatches `diagnose_case_task` for the canonical case
+  once its own transaction commits (`torque.ingestion.tasks.dispatch_diagnosis`,
+  D-137/D-138). **Residual, deliberately not extended:** an ingestion-created
+  case still resumed from `SYSTEMIC_HOLD → DIAGNOSING` by the separate §2.5
+  systemic-resolution sweep (M7c) is **not** itself re-dispatched by this
+  change — that sweep creates no new case and calls no `on_case_ready` hook.
+  See `MILESTONES.md` "Module 12a".
 - ✅ **DONE in Module 11:** the `docker-compose` `worker` / `beat` services (and
   `api` + one-shot `migrate`) — behind a `full` profile, one reusable
   `Dockerfile`. See `MILESTONES.md` "Module 11 — Tech Stack & Infra".
@@ -503,9 +506,11 @@ Still deferred (these are **Module 5**, the execution half — not Module 4's jo
 - 🔧 Action-specific `params` **schemas** — still deferred; the blueprint keeps
   `ActionTemplate.params` freeform (decision E) and assigns execution-time param
   validation to Module 5.
-- 🔧 The **Module 3 → Module 4 auto-dispatch trigger** (D-088) — the engine + task
-  are ready and invocable, but no diagnosis-completion code enqueues
-  `activate_case_task`; the cross-module trigger is an orchestration-layer concern.
+- ✅ **DONE in Module 12a:** the Module 3 → Module 4 auto-dispatch trigger
+  (D-088) — `diagnose_case_task` enqueues `activate_case_task` for the same
+  case on `ROUTED_TO_PLAYBOOK`, once its own transaction has committed
+  (`torque.diagnosis.tasks._dispatch_activation`, D-137). See `MILESTONES.md`
+  "Module 12a".
 
 ## Module 5 — Execution / Orchestration — ✅ COMPLETE
 
@@ -539,8 +544,10 @@ Still deferred within Module 5's area:
 - 🔧 **`MacCodeRegistry` self-healing** (§5.3) — unseeded code → default
   `TIER_2_CAPPED_RETRY` + flagged `CaseEvent` (`tier_for()` still returns `None`).
   Blocked with the first-touch MAC lookup on U-08 / D-083.
-- 🔧 The **Module 4 → Module 5 auto-dispatch trigger** — `schedule_run` is not
-  auto-called by `activate_case` (D-093); orchestration-layer concern.
+- ✅ **DONE in Module 12a:** the Module 4 → Module 5 hand-off (D-093) —
+  `torque.policy.tasks.activate_case_task` calls `schedule_run` directly on
+  `RUN_CREATED`, in the **same** transaction as `activate_case` (not a further
+  Celery hop). See `MILESTONES.md` "Module 12a".
 
 ## Module 6 — Compliance & Cross-Leg Guardrail Engine — ✅ COMPLETE
 
@@ -770,10 +777,33 @@ Still deferred / future within Module 11's area:
   without Docker; an actual `docker compose --profile full up` smoke test is a
   manual maintainer step.
 
-## Modules 12–13
+## Module 12a — Close the Autonomous Loop — ✅ COMPLETE
 
-- 🔧 Build roadmap calendar dates (Part D item 3) — Module 12.
-- 🔧 Demo script finalization (Part D item 4 — judging rubric) — Module 13.
+Built in the Module 12a run (`torque.ingestion.tasks.dispatch_diagnosis`,
+`torque.diagnosis.tasks._dispatch_activation`, `torque.policy.tasks.
+activate_case_task`'s inline `schedule_run` call; `torque.demo.scenarios`
+`cross_leg_merge` / `b2b_invoice_bundle`). Now **DONE** — see this file's top
+"Build Roadmap Priority Classification" section (item A1/B1) and
+`MILESTONES.md` "Module 12a" for the full breakdown:
+- ✅ **A1** — the ingestion → diagnosis → policy-activation →
+  execution-scheduling autonomous chain (resolves D-080/D-088/D-093 — struck
+  from the Module 2/3/4/5 lists above).
+- ✅ **B1** — live `cross_leg_merge` / `b2b_invoice_bundle` demo scenarios,
+  exercising the real §2.4 Merge and §3 B2B grouping rule for the same
+  counterparty.
+
+Still deferred / residual within Module 12a's area:
+- 🔧 The §2.5 systemic-hold/resume sweep (M7c) does not itself dispatch
+  diagnosis for a case it resumes to `DIAGNOSING` — deliberately out of scope
+  (a separate, self-contained mechanism; see `ARCHITECTURE.md` §8L's scope
+  note). Not blocking anything; the sweep still works exactly as before.
+- 🔧 Everything Module 12 classified as Category C/D (real channel adapters,
+  the U-08-gated MAC lookup / `ISSUER_SPECIFIC` detection, secrets management,
+  CI/CD, etc.) remains exactly as classified — none pulled forward by this run.
+
+## Module 13 — Demo Script
+
+- 🔧 Demo script finalization (Part D item 4 — judging rubric).
 
 ## Cross-cutting / schema-adjacent deferrals
 

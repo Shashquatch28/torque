@@ -21,7 +21,7 @@ Do not describe `PLANNED` / `DEFERRED` behaviour as if it exists.
 |---|---|---|
 | 1 — Core Data Model | shared case object, tenancy, PII/DPDP, event sourcing, retry-rail compliance entities | `IMPLEMENTED` (M1–M6b) |
 | 2 — Signal Ingestion | webhook intake, signature verify, idempotency, out-of-order buffer, cross-leg dedup, systemic detection job | **`IMPLEMENTED` (Module 2 complete)** — all four legs: Leg 1 `payment.failed` (90s buffer, `PAYMENT_DEGRADATION`), Leg 3 `subscription.charged.failed` (30s buffer, `SUBSCRIPTION_FAILURE`, UPI/NACH/Card rail seeding), Leg 2 `checkout.abandoned` (signed `/internal` injection endpoint, no buffer, `CHECKOUT_ABANDONMENT`), Leg 4 `invoice.overdue` (no buffer, `B2BInvoice` + §3 grouping, `B2B_RECEIVABLE`); **bidirectional** §2.4 cross-leg Merge; §2.5 `NETWORK_WIDE` systemic detection + hold/resume + §2.7 hold-on-ingest across all legs; `PLAYBOOK_ACTIVE→SYSTEMIC_HOLD` edge added (dormant). Celery/Redis broker-only + Celery beat. Remaining *refinements* (not blockers): `ISSUER_SPECIFIC` detection (U-08); systemic rollup over subscription failures (D-073); a real storefront pixel (Part D item 1); dispatch to Module 3 |
-| 3 — Diagnosis Engine | root-cause classification + confidence; owns `root_cause_code` enum | **`IMPLEMENTED` (Module 3 complete)** — `torque.diagnosis` package: rule-based per-leg classification (§3.2), `T = 0.65` confidence routing to `PLAYBOOK_ACTIVE`/`ESCALATED_TO_HUMAN` (§3.3), `is_hard_decline` set here (D-058/D-084), `suggested_timing_adjustment` (§3.4, new col), one `DIAGNOSIS_COMPLETED` event per case, idempotent + atomic + tenant-scoped. Auto-dispatch from Module 2 (D-080) and §5.3 first-touch MAC lookup (D-083) deferred. See §8C |
+| 3 — Diagnosis Engine | root-cause classification + confidence; owns `root_cause_code` enum | **`IMPLEMENTED` (Module 3 complete)** — `torque.diagnosis` package: rule-based per-leg classification (§3.2), `T = 0.65` confidence routing to `PLAYBOOK_ACTIVE`/`ESCALATED_TO_HUMAN` (§3.3), `is_hard_decline` set here (D-058/D-084), `suggested_timing_adjustment` (§3.4, new col), one `DIAGNOSIS_COMPLETED` event per case, idempotent + atomic + tenant-scoped. **Auto-dispatch from Module 2 now wired (Module 12a, D-137 — resolves D-080).** §5.3 first-touch MAC lookup (D-083) still deferred, blocked on U-08. See §8C |
 | 4 — Policy & Playbook Engine | root cause → bounded action graph; playbook authoring/validation (validation part `IMPLEMENTED` in M4) | **`IMPLEMENTED` (Module 4 complete)** — `torque.policy` package: the eleven-playbook §4.1 catalog (ORM-seeded, D-085), root-cause→playbook selection, version-pinned `PlaybookRun` instantiation for `PLAYBOOK_ACTIVE` cases (no-playbook/disabled → `ESCALATED_TO_HUMAN`, D-086), pure graph-reading traversal rules, payday-override policy gate (§4.3), `multi_case_template` contract (§4.4). Runtime execution/timing/guardrails/Temporal are Module 5. See §8D |
 | 5 — Execution / Orchestration | runtime graph execution, retry-budget enforcement, atomic Action+CaseEvent write, timing/allowed-hours/payday, durable driver | **`IMPLEMENTED` (Module 5 complete)** — `torque.execution`: the §5.6 **Postgres-polling** driver (`scheduled_job` + 10 s/60 s beat pollers, `FOR UPDATE SKIP LOCKED`) chosen over Temporal (D-090); `execute_due_job` runs the §5.1 loop (guardrails §5.2 → executor stub §5.4 → atomic Action+CaseEvent → `STEP_TRANSITIONED` → advance `active_step_id`); timing D-025; Card/UPI/NACH consumption; U-02 settled (D-091). Real channel adapters + Outreach Coordinator + WhatsApp gate are Module 6 (D-092). See §8E |
 | 6 — Compliance & Cross-Leg Guardrail Engine | `GuardrailEngine.check()`, Outreach Coordinator, escalation ceiling, human queue | **`IMPLEMENTED` (Module 6 complete)** — `torque.coordination` package: the `GuardrailEngine` facade (§6.2, returns the four-way `GuardDecision` — D-097); the Outreach Coordinator (4h cross-leg quiet period, live merge in the poll batch, defer, open-conversation — Part A §5); the full WhatsApp gate (opt-in + approved UTILITY template + open-conversation suspend); §6.3 escalation-ceiling → `ESCALATED_TO_HUMAN` in the runner tick; the persistent `human_queue` table (migration 0016) + three feeders. `priority()` is the Module 8 seam (D-098). See §8F |
@@ -619,12 +619,13 @@ diagnosis and routes it. Package layout:
 both the fresh `DETECTED` entry and the §2.5-resumed `DIAGNOSING` entry (skips the
 `DETECTED` hop).
 
-**Not here:** the Module 2 → Module 3 auto-dispatch trigger (D-080 — the engine +
-task are ready, no leg enqueues them); the §5.3 first-touch MAC-code lookup at
-diagnosis time (D-083, blocked on U-08 — Module 3 *consumes* an existing
-`network_directive_tier` but extracts no MAC code); playbook selection /
-instantiation (Module 4, now §8D); any retry/outreach/Temporal (Module 5). No new
-`CaseEventType`, no state-machine edge, no `guards.py` change. *(Module 8 update:
+**Not here:** the §5.3 first-touch MAC-code lookup at diagnosis time (D-083,
+blocked on U-08 — Module 3 *consumes* an existing `network_directive_tier` but
+extracts no MAC code); playbook selection / instantiation (Module 4, now §8D);
+any retry/outreach/Temporal (Module 5). No new `CaseEventType`, no
+state-machine edge, no `guards.py` change. *(Module 12a update: the Module 2 →
+Module 3 auto-dispatch trigger, previously deferred as D-080, is now wired —
+see §8L.)* *(Module 8 update:
 `_apply_result` now also calls `torque.scoring.score_case(session, case)` inline
 after routing — a derived-column refresh only, D-112 / §8H.)*
 
@@ -668,8 +669,9 @@ version-pinned `PlaybookRun` (or an escalation). Package layout:
 ESCALATED_TO_HUMAN` edge (no-playbook/disabled); run creation needs no transition
 (case already `PLAYBOOK_ACTIVE`). `state_machine.py` byte-unchanged.
 
-**Not here:** the Module 3 → Module 4 auto-dispatch trigger (D-088); the runtime
-execution itself — all Module 5 (§8E).
+**Not here:** the runtime execution itself — Module 5 (§8E). *(Module 12a
+update: the Module 3 → Module 4 auto-dispatch trigger, previously deferred as
+D-088, is now wired — see §8L.)*
 
 ---
 
@@ -731,9 +733,12 @@ jobs and folds 2+ via `coordination.merge` before the solo loop (D-102).
 `StepResult` gains `ESCALATED_CEILING` and `MERGED`. `GuardDecision` gains
 `defer_until` / `human_queue_reason`.
 
-**Still deferred:** the Module 4 → 5 auto-dispatch trigger (D-093); real channel
-adapters (§5.4); a real Temporal engine (D-090 — a driver swap); cross-stratum
-merge (D-102 residual). *(Module 8 scoring is now `IMPLEMENTED` — §8H.)*
+**Still deferred:** real channel adapters (§5.4); a real Temporal engine
+(D-090 — a driver swap); cross-stratum merge (D-102 residual). *(Module 8
+scoring is now `IMPLEMENTED` — §8H. Module 12a update: the Module 4 → 5
+auto-dispatch trigger, previously deferred as D-093, is now wired — `schedule_run`
+is called directly from `torque.policy.tasks.activate_case_task`, same
+transaction as `activate_case`, not a further Celery hop — see §8L.)*
 
 ---
 
@@ -1062,7 +1067,7 @@ stays `0018`); `state_machine.py` / `guards.py` byte-unchanged.
 | **PostgreSQL 16** | compose `db` (host `:5442` → container `5432`) | **the single source of truth** — case spine, `CaseEvent` ledger, `scheduled_job` execution timers, `human_queue`, retry budgets, everything | authoritative |
 | **Redis 7** | compose `redis` (host `:6389` → `6379`) | **Celery broker transport only** — `result_backend=None`, no persistence configured, no volume. Nothing durable ever lives here (D-057) | none |
 | **api** | `python -m torque` → uvicorn `torque.api.app:create_app` (`--factory`), bind `Settings.api_host:api_port` (`TORQUE_API_HOST`/`_PORT`, def `127.0.0.1:8000`; container `0.0.0.0:8000`) | the FastAPI JSON API **and** the mounted static UI (`/`, `/ui/`), one process, one port | none (stateless) |
-| **worker** | `celery -A torque.ingestion.celery_app:celery_app worker` | executes **every** `torque.*` Celery task: the four ingestion buffers, `detect_systemic`, the two §5.6 execution pollers' work, `recompute_*` scoring, plus the invocable-but-not-auto-dispatched `diagnose_case` / `activate_case` / `reconcile_event` | none |
+| **worker** | `celery -A torque.ingestion.celery_app:celery_app worker` | executes **every** `torque.*` Celery task: the four ingestion buffers, `detect_systemic`, the two §5.6 execution pollers' work, `recompute_*` scoring, **`diagnose_case` and `activate_case` (now auto-dispatched from ingestion / diagnosis respectively — Module 12a, §8L)**, plus the invocable-but-not-auto-dispatched `reconcile_event` | none |
 | **beat** | `celery -A …:celery_app beat --schedule=/tmp/celerybeat-schedule` | the **repeatable-timer trigger only** — enqueues `systemic-detection` (60 s), `execution-poll-payment` (10 s), `execution-poll-other` (60 s), `recovery-score-daily-recompute` (crontab 02:00 UTC). Holds no domain state; `--schedule` file is local bookkeeping on a writable path (non-root container) | none |
 
 **Execution durability is unchanged (D-090 / D-127):** `beat` only fires the poll
@@ -1122,6 +1127,99 @@ all 12 `torque.*` tasks registered, beat schedule 10 s/60 s/60 s/crontab,
 `Settings`/`PolicyConfig`, no committed secrets, fail-closed defaults),
 `tests/test_health_endpoints.py` (6 — liveness unchanged, readiness 200/503,
 core surfaces still routed).
+
+---
+
+## 8L. Autonomous orchestration — `IMPLEMENTED` (Module 12a)
+
+Closes D-080 / D-088 / D-093 — the three cross-module *enqueue* triggers every
+module since Module 3 deliberately left unwired. **This is orchestration, not a
+new engine**: `diagnose_case`, `activate_case`, and the four ingestion
+case-creating functions are unchanged in what they decide; Module 12a only adds
+the calls that carry their outcome to the next stage. No new Celery task type,
+no new table, no `state_machine.py` / `guards.py` change.
+
+```
+ingestion task (Module 2)          diagnosis task (Module 3)        policy task (Module 4)
+─────────────────────────          ─────────────────────────        ─────────────────────
+with session_scope():              with session_scope():             with session_scope():
+  outcome = create_or_              outcome = diagnose_case(...)       outcome = activate_case(...)
+    attach_case(                 # transaction commits here            if outcome is RUN_CREATED:
+      ..., on_case_ready=       if outcome is ROUTED_TO_PLAYBOOK:        schedule_run(session, ...)
+        <capture case_id>)        dispatch_activation(case_id)        # same transaction — no
+# transaction commits here          -> enqueues activate_case_task      further Celery hop
+if case_id captured:                                                 # transaction commits here
+  dispatch_diagnosis(case_id)
+    -> enqueues diagnose_case_task
+    (countdown=2s, D-138)
+```
+
+- **Ingestion → diagnosis** (`torque.ingestion.tasks.dispatch_diagnosis`,
+  D-137): `create_or_attach_case` / `create_checkout_case` /
+  `create_subscription_case` / `ingest_invoice` (and the two buffer-layer
+  wrappers) each gain one additive, keyword-only `on_case_ready:
+  Callable[[RevenueLeakCase], None] | None = None`. Called with the
+  **canonical** case exactly once — the survivor of a §2.4 merge in either
+  direction, or the case a B2B invoice bundled into, never a superseded row —
+  and only when a case was genuinely (re)created (never on the early `NOOP`
+  redelivery return). Default `None`: every existing direct caller (the whole
+  Module 2 test suite, `torque.demo.scenarios`) is unaffected. Only the four
+  ingestion Celery tasks pass one; it records the case id (no I/O) while the
+  transaction is open, and `dispatch_diagnosis` is called only *after* `with
+  session_scope()` exits.
+- **Diagnosis → policy** (`torque.diagnosis.tasks._dispatch_activation`,
+  D-137): no hook needed — `diagnose_case_task` already receives `case_id`.
+  After its own transaction commits, `DiagnosisOutcome.ROUTED_TO_PLAYBOOK`
+  enqueues `torque.policy.activate_case_task`; `ESCALATED` / `NOOP` dispatch
+  nothing (an escalated case is a human's now; a `NOOP` diagnosed nothing).
+- **Policy → execution** (D-137): also no hook — inside `activate_case_task`'s
+  **same** transaction as `activate_case`, `ActivationOutcome.RUN_CREATED`
+  looks up the just-created `PlaybookRun` and calls
+  `torque.execution.scheduler.schedule_run` **directly** (a plain function
+  call, not a further Celery hop) to arm its first `ScheduledJob`. D-090 is
+  unchanged: the existing 10 s/60 s beat pollers (untouched) are what actually
+  execute it. `ESCALATED_NO_PLAYBOOK` / `ESCALATED_DISABLED` / `NOOP` schedule
+  nothing.
+- **The one real bug this milestone found and fixed (D-138):** `torque.demo.
+  scenarios.inject_scenario` (`dispatch=True`, wired from `torque.api.demo.
+  post_inject`) calls `dispatch_diagnosis` *inside* the still-open request
+  transaction — the same shape `api/webhooks.py` already uses, whose `get_db`
+  commits only after the handler returns. Verified against a real
+  `docker compose --profile full` stack: with no delay, the real worker could
+  (and did) receive and run `diagnose_case_task` *before* that commit landed,
+  see no case, and silently `NOOP` — nothing ever retried it. Fix:
+  `dispatch_diagnosis` always enqueues with a 2 s `countdown` — free for the
+  already-safe commit-then-dispatch callers, and the actual fix for this one.
+  `task_always_eager` (tests only) ignores `countdown` and still runs inline.
+- **B1 — live cross-leg / B2B demo scenarios:** `torque.demo.scenarios` gains
+  `cross_leg_merge` (a checkout abandonment then a matching-order payment
+  failure for the same counterparty — the real forward §2.4 Merge via
+  `ingestion.dedup.find_supersedable_case`) and `b2b_invoice_bundle` (two
+  overdue invoices for the same counterparty — the real §3 grouping rule via
+  `ingestion.b2b.ingest_invoice`). No new domain code; `inject_scenario` gains
+  `dispatch: bool = False` (default unchanged for every existing direct
+  caller); `torque.api.demo.post_inject` passes `True`.
+- **Tests:** `tests/test_module12a_autonomous_chain.py` (19 — every hop above,
+  both merge directions, B2B attach, redelivery/NOOP non-dispatch, a genuine
+  downstream failure propagating not swallowed, two full end-to-end tests
+  driven only through the task layer, the demo `dispatch=True` HTTP wiring).
+  `test_diagnosis_task.py` / `test_module4_task.py` strengthened to actually
+  prove the chain (bound `_session_scope`, seeded catalog) rather than
+  accidentally pass via cross-connection invisibility.
+- **Verified live:** an end-to-end Docker smoke test (real worker, real Redis,
+  real Postgres) — a low-confidence injected case reached
+  `ESCALATED_TO_HUMAN` and a high-confidence one reached `PLAYBOOK_ACTIVE` with
+  a real `PlaybookRun` + `ScheduledJob`, both with zero manual steps beyond
+  creating the originating event.
+- **Deliberately out of scope:** the Module 2 §2.5 systemic-hold/resume
+  mechanism (`torque.ingestion.systemic._check_and_resolve`, M7c) is a
+  separate, self-contained system that batch-transitions
+  `SYSTEMIC_HOLD → DIAGNOSING` on its own 60 s beat job — it is **not** touched
+  here, so a case resumed that way still needs a *separate* diagnosis trigger
+  (it is not itself created by ingestion, so it never gets an
+  `on_case_ready` call). This was scoped out as belonging to Module 2's own
+  area, not A1's "ingestion → diagnosis" chain, and is noted as a residual
+  rather than silently extended into.
 
 ---
 
@@ -1274,18 +1372,20 @@ what remains is **not Module 2's job**: no `ISSUER_SPECIFIC` systemic detection
 per-decline budget increments / `mandate_cancelled_at` (Module 5), no real NACH
 return code (Module 5), no real storefront pixel (Part D item 1), no card-token
 hashing, no code that drives `PLAYBOOK_ACTIVE → SYSTEMIC_HOLD` (edge legal but
-dormant). **Module 3 diagnosis is now `IMPLEMENTED`** (§8C) — but with no
-automatic `Event`→Diagnosis dispatch from ingestion (D-080; the engine + task are
-ready, nothing enqueues them) and no §5.3 first-touch MAC-code lookup at diagnosis
-time (D-083, blocked on U-08). **Module 4 policy & playbook engine is now
-`IMPLEMENTED`** (§8D) — the §4.1 catalog, selection, and version-pinned
-`PlaybookRun` instantiation — but with no automatic Diagnosis→Activation dispatch
-(D-088). **Module 5 execution & orchestration is now `IMPLEMENTED`** (§8E) — the
-§5.6 Postgres-polling driver (chosen over Temporal, D-090; resolves U-07), runtime
-graph traversal advancing `active_step_id`, timing/payday/`allowed_hours` (D-025),
-the §5.2 retry/systemic guardrails + Card/UPI/NACH consumption, and the atomic
-Action+CaseEvent write — but with no automatic Module 4→5 dispatch (D-093) and
-**no real channel adapters** (`executor.run_action` is a stub, §5.4).
+dormant). **Module 3 diagnosis is now `IMPLEMENTED`** (§8C) — auto-dispatched
+from ingestion since Module 12a (§8L, resolves D-080); no §5.3 first-touch
+MAC-code lookup at diagnosis time (D-083, blocked on U-08). **Module 4 policy &
+playbook engine is now `IMPLEMENTED`** (§8D) — the §4.1 catalog, selection, and
+version-pinned `PlaybookRun` instantiation — auto-dispatched from diagnosis
+since Module 12a (§8L, resolves D-088). **Module 5 execution & orchestration is
+now `IMPLEMENTED`** (§8E) — the §5.6 Postgres-polling driver (chosen over
+Temporal, D-090; resolves U-07), runtime graph traversal advancing
+`active_step_id`, timing/payday/`allowed_hours` (D-025), the §5.2 retry/systemic
+guardrails + Card/UPI/NACH consumption, and the atomic Action+CaseEvent write —
+a new run's first timer is armed automatically from policy activation since
+Module 12a (§8L, resolves D-093), same transaction, no new Celery hop. **No real
+channel adapters** (`executor.run_action` is still a stub, §5.4 — unchanged by
+Module 12a, out of its scope).
 **Module 6 compliance & cross-leg guardrail engine is now `IMPLEMENTED`** (§8F) —
 the `GuardrailEngine` facade, the Outreach Coordinator, the WhatsApp gate,
 escalation-ceiling escalation, the persistent `human_queue` (migration 0016).
@@ -1303,8 +1403,17 @@ SPA dashboard served by the same process (`/ui`), the Agent Console
 (`torque.agent_console` — human resolve/pause, `escalation_resolution` +
 `HUMAN_RESOLVED`, migration **0018**, `guards.human_resolution_writer`), and the
 Demo Surface (`torque.demo` — deterministic `acc_demo` seed + one-click
-Decision-K scenarios + a polling live feed). Still absent: **incrementality /
-causal measurement** ("Module 9b" — lift + Wilson CI + SUTVA, D-121), Module 11
-infra consolidation, the `MacCodeRegistry` full seed, real channel adapters,
-`Action.cost` population, a real Temporal engine, and code that drives
-`PLAYBOOK_ACTIVE → SYSTEMIC_HOLD` (edge legal but dormant).
+Decision-K scenarios **+ the Module 12a live cross-leg-merge / B2B-bundle
+scenarios** + a polling live feed). **Incrementality / causal measurement is
+now `IMPLEMENTED`** ("Module 9b", §8I extension — lift + Wilson/Newcombe CI +
+SUTVA, resolves D-121/U-10). **Module 11 tech-stack & infra consolidation is
+now `IMPLEMENTED`** (§8K — the full `db+redis+api+worker+beat` `docker-compose`
+runtime, `/health/ready`). **Module 12 build-roadmap classification is now
+`IMPLEMENTED`** (documentation-only — see `DEFERRED.md`). **The ingestion →
+diagnosis → policy-activation → execution-scheduling autonomous chain is now
+`IMPLEMENTED`** ("Module 12a", §8L — resolves D-080/D-088/D-093). Still absent:
+the `MacCodeRegistry` full seed, real channel adapters, `Action.cost`
+population, a real Temporal engine (D-090/D-127, not reopened), and code that
+drives `PLAYBOOK_ACTIVE → SYSTEMIC_HOLD` (edge legal but dormant — the
+Module-2-§2.5 systemic-hold/resume mechanism is a separate, self-contained
+system Module 12a deliberately did not extend; see §8L's scope note).

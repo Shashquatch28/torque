@@ -1,9 +1,9 @@
 # CURRENT STATE — read this first
 
-**Last updated:** 2026-09-04, after the **Module 12 — Build Roadmap** run
-(**uncommitted, documentation-only**, on top of committed Modules 1–11 + 9b).
-**Reconstructed from:** committed Modules 1–11 + 9b (HEAD `7172c92`) + the
-uncommitted Module 12 documentation + `Torque_Blueprint_v7_FullSystem.md`.
+**Last updated:** 2026-09-04, after the **Module 12a — Close the Autonomous
+Loop** run (**uncommitted**, on top of committed Modules 1–12).
+**Reconstructed from:** committed Modules 1–12 (HEAD `fc813ab`) + the
+uncommitted Module 12a changes + `Torque_Blueprint_v7_FullSystem.md`.
 **This file is derived documentation, not authoritative.** The repo and blueprint win.
 
 ---
@@ -12,14 +12,14 @@ uncommitted Module 12 documentation + `Torque_Blueprint_v7_FullSystem.md`.
 
 A revenue-leakage recovery agent closing the loop across four funnel legs —
 **payment degradation, checkout abandonment, subscription/mandate failure, B2B
-receivables** — with **one shared case object and one shared event ledger**. It
-diagnoses root cause, runs a bounded recovery playbook under hard compliance
-guardrails, reconciles incoming payments back to the leaking case, scores every
-open case by its economic recovery opportunity, reports the business outcome
-both **descriptively** (₹ recovered, recovery rate) and **causally**
-(treatment-vs-control incremental lift with an honest confidence interval and
-the SUTVA cross-merchant caveat), presents all of it as a runnable product on
-one port, and ships that runtime as a reproducible free-tier `docker-compose`
+receivables** — with **one shared case object and one shared event ledger**.
+It **autonomously** diagnoses root cause, activates a bounded recovery
+playbook, and schedules its first execution step — no manual trigger between
+any of those stages as of this run — under hard compliance guardrails,
+reconciles incoming payments back to the leaking case, scores every open case
+by its economic recovery opportunity, reports the business outcome both
+descriptively and causally, presents all of it as a runnable product on one
+port, and ships that runtime as a reproducible free-tier `docker-compose`
 stack. Full vision: `PROJECT_CONTEXT.md` §1. Spec:
 `Torque_Blueprint_v7_FullSystem.md`. Product-pitch knowledge base:
 `learning_log.md` (root).
@@ -30,146 +30,135 @@ stack. Full vision: `PROJECT_CONTEXT.md` §1. Spec:
 **Modules 9 + 10 — COMPLETE & committed** (`7b89e36`).
 **Module 11 — COMPLETE & committed** (`6c6392c`).
 **Module 9b — COMPLETE & committed** (`7172c92`).
-**Module 12 — Build Roadmap — COMPLETE** (this run, **uncommitted,
-documentation-only** — no application code, no migration, no test changed).
+**Module 12 — Build Roadmap — COMPLETE & committed** (`fc813ab`,
+documentation-only).
+**Module 12a — Close the Autonomous Loop — COMPLETE** (this run,
+**uncommitted**) — Module 12's top-ranked item (A1) + its one demo-enhancing
+item (B1).
 
-Module 12 is not a code module: it classifies every remaining open item into
-**A. demo-critical / B. demo-enhancing / C. production-hardening /
-D. future-optional**, with a dependency graph and a recommended order. The full
-breakdown lives in `DEFERRED.md` § "Build Roadmap Priority Classification" —
-read it before proposing the next milestone. Summary:
+| Module 12a capability | Behaviour |
+|---|---|
+| Autonomous chain (A1, D-137/D-138) | A case created by **any** of the four ingestion legs now **automatically** flows `DETECTED → diagnosis → (PLAYBOOK_ACTIVE + a scheduled run) or ESCALATED_TO_HUMAN`, with no manual engine call. `torque.ingestion.tasks.dispatch_diagnosis` enqueues `diagnose_case_task` for the canonical case (correct across both §2.4 merge directions and B2B attach) once its own transaction commits; `diagnose_case_task` enqueues `activate_case_task` on `ROUTED_TO_PLAYBOOK`; `activate_case_task` calls `torque.execution.scheduler.schedule_run` **directly, same transaction** on `RUN_CREATED` — arming the existing, unchanged 10s/60s Postgres-polling beat pollers (D-090, not reopened). Resolves D-080 / D-088 / D-093. |
+| The one bug this run found (D-138) | `dispatch_diagnosis` always enqueues with a 2 s `countdown`. Discovered **empirically** via the Docker smoke test: dispatching with no delay let a real worker run `diagnose_case_task` *before* the originating (demo/API-layer) request's transaction had committed — the task saw no case and silently `NOOP`'d. Fixed; re-verified green against the real stack. |
+| Live demo scenarios (B1) | Two new one-click `torque.demo.scenarios` entries: **`cross_leg_merge`** (checkout abandonment then a matching-order payment failure for the same counterparty — the real forward §2.4 Merge) and **`b2b_invoice_bundle`** (two overdue invoices for the same counterparty — the real §3 grouping rule). `inject_scenario(dispatch=True)` (the API's default) routes the resulting case through the same autonomous chain above. |
+| Migration | **none.** `alembic head` stays `0018_escalation_resolution`. |
+| State machine / guards | **byte-unchanged vs HEAD** (`git diff HEAD --` empty for both). The chain drives only already-legal transitions the engines already produced. |
 
-| Category | Count | Headline |
-|---|---|---|
-| **A — demo-critical** | 1 | Wire the ingestion→diagnosis→policy-activation→execution auto-dispatch chain (D-080/D-088/D-093) — currently nothing chains these; a live-injected case dead-ends at `DETECTED`. LOW–MEDIUM complexity, no schema/state-machine change, no dependency. |
-| **B — demo-enhancing** | 3 | Live cross-leg-merge / B2B-bundle demo scenarios (the blueprint's Module 13 script names this as a "Live:" beat); an A1-fallback; a bigger incrementality cohort. |
-| **C — production-hardening** | 15 | Real channel adapters (needs 4 external accounts), the U-08-gated MAC lookup + `ISSUER_SPECIFIC` systemic detection, secrets management, CI/CD, Postgres RLS, DPDP intake, observability, etc. Roadmapped, **not implemented**. |
-| **D — future/optional** | 8 | Real Temporal cluster (**D-090 not reopened**), learned uplift model (needs 500+ cases), CAU, SMS production path, NACH cross-instrument aggregation, and other genuinely non-critical items. |
-
-**Verified already sufficient, no action needed:** Module 9 descriptive
-reporting, Module 9b incrementality (API + dashboard both live), Module 10
-Agent Console, Module 11 infra, and the compliance-guardrail demonstration
-(the three Decision-K restraint scenarios already run real diagnosis + a real
-guardrail block, live, on demand).
-
-**Recommended next coding milestone:** an optional, small **"Module 12a —
-Close the Autonomous Loop"** (item A1 + item B1 above) immediately before
-**Module 13 — Demo Script**. Module 13 can proceed with or without it — the
-system is demo-credible today — but 12a makes the live demo strictly stronger.
-Do not start either without an approved scope.
+**Module 13 — Demo Script — not started.**
 
 ## Verified facts (checked this session against the repo)
 
 | Fact | Value |
 |---|---|
-| Git HEAD (`main`) | **`7172c92`** "Module 9b: incrementality / causal measurement". Module 12 sits **uncommitted** on top (docs only). |
-| Working tree (Module 12) | **Modified only:** `documentation/ai-memory/{MILESTONES,CURRENT_STATE,DEFERRED,ARCHITECTURE,DECISIONS}.md`, `README.md`. **Zero files under `src/` or `tests/` touched.** |
-| Alembic head | **`0018_escalation_resolution`** — unchanged; Module 12 has no migration. |
-| Test suite | **1209 passed** (`uv run pytest -q`), 0 fail / 0 skip. Unchanged from `7172c92` — no code touched. 1 pre-existing cosmetic `StarletteDeprecationWarning`. |
+| Git HEAD (`main`) | **`fc813ab`** "Module 12: build roadmap — classify all remaining work". Module 12a sits **uncommitted** on top. |
+| Working tree (Module 12a) | **New:** `tests/test_module12a_autonomous_chain.py`. **Modified:** `src/torque/ingestion/{tasks,cases,buffer,checkout,subscription,b2b}.py`, `src/torque/diagnosis/tasks.py`, `src/torque/policy/tasks.py`, `src/torque/demo/scenarios.py`, `src/torque/api/demo.py`, `tests/conftest.py`, `tests/{test_diagnosis_task,test_module4_task,test_module10_demo}.py`, plus `documentation/ai-memory/*`. **Zero files under `src/torque/models/`, `state_machine.py`, or `guards.py`.** |
+| Alembic head | **`0018_escalation_resolution`** — unchanged; Module 12a has no migration. |
+| Test suite | **1230 passed** (`uv run pytest -q`), 0 fail / 0 skip. Was 1211 at `fc813ab`; **`+19`** (`test_module12a_autonomous_chain.py`), net **+19** overall (2 pre-existing tests strengthened, not added; the Module 10 all-scenarios parametrized test gained 2 cases from the 2 new `DEMO_SCENARIOS` keys, offset by other bookkeeping — see `MILESTONES.md` "Module 12a" for the exact count). 1 pre-existing cosmetic `StarletteDeprecationWarning`. |
 | Lint | `uv run ruff check .` → clean. |
 | Migration roundtrip | green (`tests/test_zz_migrations_roundtrip.py`, incl. 0018). |
 | `src/torque/state_machine.py` | **`git diff HEAD --` empty** — byte-unchanged (since M1). |
 | `src/torque/models/guards.py` | **`git diff HEAD --` empty** — unchanged since the Module 10 `human_resolution_writer`. |
-| `docker-compose.yml` services | Confirmed live: `db, redis, migrate, api, worker, beat` (Module 11, unchanged). |
-| `GET /reports/{m}/incrementality` | Confirmed live in `src/torque/api/reporting.py`, fetched + rendered by `torque.js`'s `incrementalityCard` (Module 9b, unchanged). |
-| D-090 | Confirmed `Status: IN FORCE` in `DECISIONS.md` — Postgres-polling remains the durable `PlaybookRun` driver; **not reopened**. |
-| Stack | Python 3.11, SQLAlchemy 2.0, Alembic, Pydantic v2, FastAPI + StaticFiles, Celery + Redis (broker only) + beat, PostgreSQL 16, `uv`, pytest, ruff, `Dockerfile` + full `docker-compose`. No Node, no Temporal. |
+| Docker smoke test | **Passed, and found a real bug (D-138), then re-verified green** after the fix — see `MILESTONES.md` "Module 12a" for the exact sequence. |
+| Stack | Unchanged from Module 11: Python 3.11, SQLAlchemy 2.0, Alembic, Pydantic v2, FastAPI + StaticFiles, Celery + Redis (broker only) + beat, PostgreSQL 16, `uv`, pytest, ruff, `Dockerfile` + full `docker-compose`. No Node, no Temporal, no new dependency. |
 | DB / infra | Postgres host **5442**; Redis host **6389**; API **8000** (compose `full` profile). **25 tables** (unchanged). |
 
-## What is implemented (Module 12)
+## What is implemented (new in Module 12a)
 
-Nothing in application code — Module 12 is a documentation/planning milestone.
-It produced:
-- `documentation/ai-memory/DEFERRED.md` § "Build Roadmap Priority
-  Classification" — the full A/B/C/D breakdown, per-item fields, and the
-  dependency graph.
-- `documentation/ai-memory/DECISIONS.md` **D-136** — the classification rule
-  and the specific priority calls (most notably A1 ranked above every
-  Category-C item).
-- This snapshot, `MILESTONES.md`'s Module 12 section, and a pointer in
-  `README.md`.
+- **`torque.ingestion.tasks.dispatch_diagnosis`** — the ingestion → diagnosis
+  enqueue, with the D-138 countdown.
+- **`on_case_ready` hook** on `create_or_attach_case` / `create_checkout_case`
+  / `create_subscription_case` / `ingest_invoice` (+ their buffer wrappers) —
+  additive, default `None`, wired only by the Celery task layer.
+- **`torque.diagnosis.tasks._dispatch_activation`** — the diagnosis → policy
+  enqueue, fired only on `ROUTED_TO_PLAYBOOK`.
+- **`torque.policy.tasks.activate_case_task`**'s inline `schedule_run` call on
+  `RUN_CREATED` — the policy → execution hand-off, same transaction.
+- **`torque.demo.scenarios`** — `cross_leg_merge`, `b2b_invoice_bundle`,
+  `inject_scenario(..., dispatch=False)`.
+- **`torque.api.demo.post_inject`** — now calls `inject_scenario(...,
+  dispatch=True)`.
+
+Full breakdown: `ARCHITECTURE.md` §8L.
 
 ## How to run the product locally
 
-Unchanged from Module 11 — see `README.md` ("Setup — host dev loop" / "Run the
-full stack in containers"). No new run path was introduced.
+Unchanged from Module 11 — see `README.md`. The demo now additionally
+demonstrates: inject `payment_failure` (or any "act"/B1 scenario) → wait a
+couple of seconds → the case has diagnosed and (if confident) activated and
+scheduled itself, with no manual step. The three Decision-K restraint
+scenarios are unaffected (they already drove their own inline diagnosis +
+guardrail block, synchronously, before this run).
 
 ## Next milestone
 
-Two live options, **not started**, waiting on maintainer approval:
-1. **"Module 12a — Close the Autonomous Loop"** (recommended first) — wire
-   the auto-dispatch chain (A1) + add the two live cross-leg/B2B demo
-   scenarios (B1). See `DEFERRED.md` for the exact scope.
-2. **Module 13 — Demo Script** — can proceed directly; still needs Part D
-   item 4 (a real judging rubric, if one exists — U-05).
-
-Category C (production-hardening) and D (future/optional) items are
-roadmapped, not scheduled — see `DEFERRED.md` for triggers/ordering.
+**Module 13 — Demo Script** — not started. Needs Part D item 4 (a real judging
+rubric, if one exists — U-05) to set the ordering/emphasis; otherwise ready to
+proceed using the five locked differentiators, now with a genuinely autonomous
+live flow to show alongside the Decision-K restraint scenarios and the static
+seed. Category C (production-hardening) and D (future/optional) items from
+Module 12's roadmap remain roadmapped, not scheduled.
 
 ## Never-violate rules (short form — full list in CONTINUATION_PROTOCOL.md)
 
 1. **No Git write operations.** The maintainer does all VCS.
 2. **The blueprint is law.** Deviations only if proposed, justified, approved,
-   documented in code + `DECISIONS.md`. (Module 12: no deviation — it answers
-   the ordering question the blueprint's own Module 12 needed Part D item 3 to
-   answer with dates, which is still unanswered — U-05 item 3.)
+   documented in code + `DECISIONS.md`. (Module 12a: no deviation — closes
+   cross-module triggers the blueprint's own text (D-080/D-088/D-093) always
+   expected an orchestration layer to wire, using only already-specified
+   mechanisms.)
 3. **One module = one implementation run = one audit.**
-4. **Do not implement `DEFERRED.md` work as a side effect.** (Module 12 itself
-   is proof of this: it classifies and orders without building anything.)
-5. **Do not resolve `UNRESOLVED.md` questions unilaterally.** Module 12
-   resolved **none** — U-08 is cross-referenced as a shared blocker for two
-   Category-C items, not answered.
-6. `state_machine.py` / `guards.py` are load-bearing. **Module 12 touched
-   neither** (no code touched at all).
+4. **Do not implement `DEFERRED.md` work as a side effect.** (Module 12a
+   implemented exactly A1 + B1 — nothing from Category C/D was pulled forward.)
+5. **Do not resolve `UNRESOLVED.md` questions unilaterally.** Module 12a
+   resolved none; U-08 untouched.
+6. `state_machine.py` / `guards.py` are load-bearing. **Module 12a touched
+   neither** (`git diff HEAD --` empty for both).
 7. Every run verifies: `pytest`, `ruff`, migration roundtrip, `git diff HEAD` of
    `state_machine.py` **and** `guards.py`.
 
 ## Unresolved decisions / questions right now
 
+Unchanged from Module 12 — Module 12a resolved no `UNRESOLVED.md` item:
 - **U-01 / U-02 / U-07 / U-10** — RESOLVED.
 - **U-05** — Part D items 1–2 RESOLVED. Items 3 (build-window length) and 4
-  (judging rubric) still open — Module 12 could not answer item 3 either (no
-  calendar plan was produced, only a priority/dependency ordering); both block
-  only Modules 12a/13's exact scheduling, not their content.
+  (judging rubric) still open.
 - **U-03 / U-04 / U-06** — open (MAC precedence, systemic N/M numbers, unseeded
-  MAC codes). None constrain Module 12a or Module 13.
-- **U-08** — open; now explicitly the shared blocker for two `DEFERRED.md`
-  Category-C items (MAC first-touch lookup, `ISSUER_SPECIFIC` systemic
-  detection). Not resolved by this run.
-- **U-09** — Module 8 calibration values are stated defaults. Not blocking.
-- **U-11** — Agent Console vocabulary choices. Not blocking.
+  MAC codes). None constrain Module 13.
+- **U-08** — open; the shared blocker for the two Category-C items Module 12
+  identified (MAC first-touch lookup, `ISSUER_SPECIFIC` systemic detection).
+- **U-09 / U-11** — open, not blocking.
 - **D-090 (Postgres-polling over Temporal)** — **IN FORCE**, reaffirmed by
-  D-127 (Module 11), **not reopened** by Module 12.
+  D-127 (Module 11), **not reopened** by Module 12a (D-137's execution
+  hand-off explicitly arms the existing `scheduled_job` mechanism, nothing else).
 
 ## Known contradictions / caveats
 
-- **Module 12 is uncommitted** on top of committed Modules 1–11 + 9b
-  (`7172c92`). It changes documentation only — every "verified fact" above
-  (1209 tests, `0018` head, both load-bearing diffs empty) is identical to
-  `7172c92`'s, by construction.
-- **A live-injected case does not currently self-diagnose.** The
-  `payment_failure` / `checkout_abandonment` demo scenarios (and any real
-  ingestion) create a genuine `DETECTED` case and then stop — nothing
-  auto-dispatches diagnosis (D-080), activation (D-088), or scheduling
-  (D-093). This is a **known, documented** limitation (not new to Module 12 —
-  every module since Module 3 has deferred it), now ranked the top item
-  (A1) in `DEFERRED.md`'s roadmap. The demo is still credible today via the
-  three Decision-K restraint scenarios (which *do* drive real diagnosis +
-  guardrail-blocking inline) and the static 16-case seed.
-- **No live cross-leg-merge or B2B-bundle demo trigger exists** — only the
-  static seed shows one. Ranked B1.
-- **README.md / `CURRENT_STATE.md` Module 11 framing still applies** — Redis
-  broker-only, no Temporal, host + full-stack run paths unchanged.
-- **The executor is still a stub (§5.4).** Torque fires no real messages /
-  charges; unchanged by Module 12 — roadmapped as Category C (item C1).
+- **Module 12a is uncommitted** on top of committed Modules 1–12 (`fc813ab`).
+  Every "verified fact" above (1230 tests, `0018` head, both load-bearing
+  diffs empty) is the working tree's state.
+- **The autonomous chain now runs in the real deployment**, not just in
+  scripted demo scenarios — a real webhook creating a case will, within a
+  couple of seconds, be diagnosed and (if confident) activated and scheduled,
+  with no operator action. This was previously false (a documented,
+  intentional gap since Module 3); it is now true.
+- **The §2.5 systemic-hold/resume sweep is unchanged and NOT part of this
+  chain** — a case it resumes to `DIAGNOSING` still needs its own separate
+  diagnosis trigger. Deliberately out of Module 12a's scope (see
+  `ARCHITECTURE.md` §8L).
+- **`dispatch_diagnosis`'s 2 s countdown is a real, load-bearing detail**, not
+  cosmetic — removing it would silently reintroduce D-138's race for the
+  demo/API-layer caller (the ingestion-task-layer callers would still be safe
+  either way, since they dispatch strictly after their own confirmed commit).
+- **The executor is still a stub (§5.4).** Torque now *reaches* the point of
+  scheduling a real execution step automatically, but `run_action` still
+  performs no real I/O — unchanged, out of Module 12a's scope (Category C).
 - **No Temporal** (D-090 / D-127). **No browser/e2e harness** (D-122).
-- **`Action.cost` is still ~0** — a Category-C item (C3), downstream of C1.
-- Module 1–11 + 9b caveats still stand (UI computes nothing; "Cancel" =
+- Module 1–12 caveats still stand (UI computes nothing; "Cancel" =
   `WRITTEN_OFF`; demo `reset` disables the `case_event` trigger for its scoped
-  wipe over both demo merchant ids; large `recovery_score` values for unpriced
-  open cases; pre-existing suite flakiness under load; two recovery
-  definitions coexist deliberately — Module 9 attributed vs. Module 9b
-  intent-to-treat).
+  wipe over both demo merchant ids; two recovery definitions coexist
+  deliberately — Module 9 attributed vs. Module 9b intent-to-treat; large
+  `recovery_score` values for unpriced open cases; pre-existing suite flakiness
+  under load; `Action.cost` still ~0).
 
 ## What to do next (for the agent reading this)
 
@@ -177,7 +166,7 @@ Follow `CONTINUATION_PROTOCOL.md`: verify this snapshot against the live repo
 (`git log`, `git status`, `alembic heads/current`, `pytest`, `ruff`,
 `git diff HEAD -- src/torque/state_machine.py` and `-- src/torque/models/guards.py`
 — **both expected empty**), report any drift, then — once the maintainer has
-committed Module 12 and chosen — propose **"Module 12a — Close the Autonomous
-Loop"** and/or **Module 13 — Demo Script** as one continuous scope. Do not
-propose any Category-C or Category-D item as the next milestone without the
+committed Module 12a — propose **Module 13 — Demo Script** as the next
+milestone. Do not propose any Category-C or Category-D item (see
+`DEFERRED.md`'s "Build Roadmap Priority Classification") without the
 maintainer explicitly asking for production-hardening work.

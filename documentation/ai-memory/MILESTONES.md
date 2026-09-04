@@ -1888,6 +1888,103 @@ explicitly-assigned §10.8 human-resolution write path.)*
 
 ---
 
+## Module 12a — Close the Autonomous Loop — COMPLETE
+
+- **Commit:** *(uncommitted — maintainer commits)*. HEAD at implementation
+  time: `fc813ab` (Module 12). Recommended message below.
+- **Migrations:** **none.** `alembic head` stays `0018_escalation_resolution`.
+- **Objective:** the Module 12 roadmap's top-ranked item (A1) — wire the
+  ingestion → diagnosis → policy-activation → execution-scheduling chain the
+  engines have supported since Modules 3/4/5 but nothing ever triggered
+  (D-080/D-088/D-093) — plus (B1) two new live demo scenarios exercising the
+  real §2.4 cross-leg Merge and §3 B2B grouping rule for the same counterparty.
+- **Scope delivered:**
+  - **A1 — autonomous chain (D-137, D-138):**
+    - `torque.ingestion.{cases,buffer,checkout,subscription,b2b}` — each
+      case-creating function gains one additive, keyword-only
+      `on_case_ready: Callable[[RevenueLeakCase], None] | None = None`
+      (default `None` ⇒ every existing direct caller unaffected). Called with
+      the **canonical** case only (the merge survivor / bundled-into case,
+      never a superseded row).
+    - `torque.ingestion.tasks` — new `dispatch_diagnosis(case_id)`: enqueues
+      `torque.diagnosis.diagnose_case_task` with a 2 s `countdown` (D-138). The
+      four case-creating Celery tasks capture the ready case id via the hook
+      *during* their transaction and call `dispatch_diagnosis` only *after*
+      `with session_scope()` exits (commit-then-dispatch).
+    - `torque.diagnosis.tasks.diagnose_case_task` — after its own commit, on
+      `ROUTED_TO_PLAYBOOK` calls the new `_dispatch_activation(case_id)`,
+      enqueuing `torque.policy.activate_case_task`. `ESCALATED`/`NOOP` dispatch
+      nothing.
+    - `torque.policy.tasks.activate_case_task` — on `RUN_CREATED`, **inside the
+      same transaction**, looks up the just-created `PlaybookRun` and calls the
+      existing `torque.execution.scheduler.schedule_run` directly (a plain
+      function call, not a new Celery hop) — D-090's Postgres-polling beat
+      pollers, unchanged, are what actually execute it.
+    - No engine (`diagnose_case`, `activate_case`, the four ingestion
+      functions) gained new decision logic; the dispatcher only orchestrates.
+  - **B1 — live cross-leg / B2B demo scenarios:**
+    `torque.demo.scenarios` gains `cross_leg_merge` (checkout abandonment then
+    a matching-order payment failure for the same counterparty — the real
+    forward §2.4 Merge) and `b2b_invoice_bundle` (two overdue invoices for the
+    same counterparty — the real §3 grouping rule). `inject_scenario` gains
+    `dispatch: bool = False`; `torque.api.demo.post_inject` passes `True` so an
+    injected case is picked up by the real chain above, exactly like a real
+    webhook.
+  - **Tests (NEW, 19 + strengthened 2):** `tests/test_module12a_autonomous_chain.py`
+    (19 — ingestion→diagnosis with the correct canonical case incl. both merge
+    directions and B2B attach, duplicate/NOOP non-dispatch, diagnosis→policy
+    incl. ESCALATED/NOOP non-dispatch and redelivery-at-most-once,
+    policy→execution incl. no-duplicate-run, a genuine downstream failure
+    propagating (not swallowed), two full end-to-end tests with no manual
+    engine call, and the demo `dispatch=True` wiring via the HTTP API).
+    `tests/test_diagnosis_task.py::test_task_diagnoses_a_case` and
+    `tests/test_module4_task.py::test_task_creates_run` strengthened to bind
+    every task's `_session_scope` and assert the chain actually fires (a
+    `PlaybookRun` / `ScheduledJob` now exists), replacing an accidental
+    "passes because the chained call can't see the uncommitted case anyway"
+    with a genuine proof. `tests/test_module10_demo.py`'s parametrized
+    all-scenarios test extended for the 2 new keys.
+- **Decisions:** D-137 (the `on_case_ready` hook + commit-then-dispatch
+  wiring), D-138 (the dispatch countdown — found and fixed via the Docker
+  smoke test, not merely reasoned about).
+- **Deviations from blueprint:** none — this closes deferred cross-module
+  triggers the blueprint always expected an "orchestration layer" to wire
+  (D-080/D-088/D-093's own text), using only already-specified mechanisms
+  (Celery, Postgres-polling). D-090 not reopened.
+- **Deferred work removed from `DEFERRED.md`:** D-080 (ingestion → diagnosis
+  auto-dispatch), D-088 (diagnosis → policy auto-dispatch), D-093 (policy →
+  execution auto-dispatch/`schedule_run` call) — all three genuinely satisfied.
+  "The UI does not surface a live cross-leg/B2B demo" residual (Module 12's B1
+  item) removed.
+- **Deferred work introduced:** none new. Real channel adapters, `Action.cost`
+  population, the U-08-gated MAC lookup / `ISSUER_SPECIFIC` detection, and
+  every other Category-C/D item from Module 12's roadmap remain exactly as
+  classified there — none pulled forward.
+- **Unresolved:** none resolved and none newly introduced. U-08 untouched.
+- **`state_machine.py` / `guards.py`:** **both byte-unchanged vs HEAD**
+  (`git diff HEAD --` empty for each). The chain drives only already-legal
+  transitions the engines already produced; no new guard, no guarded field.
+- **Tests at completion:** **1230** passed (was 1211 at `fc813ab`), 0 failed,
+  0 skipped, 1 pre-existing cosmetic `StarletteDeprecationWarning`. `ruff
+  check .` clean. `alembic upgrade head` → `0018` (no-op — no migration);
+  roundtrip green.
+- **Verification status:** complete + verified against a live Postgres
+  (docker-compose `db`) and an end-to-end Docker smoke test against the Module
+  11 `docker compose --profile full` stack (real worker + real Redis + real
+  Postgres, no monkeypatching): reset/seed → inject `payment_failure` with no
+  manual diagnosis call → the low-confidence case reached `ESCALATED_TO_HUMAN`
+  on its own; a directly-inserted high-confidence event reached
+  `PLAYBOOK_ACTIVE` with a real `PlaybookRun` **and** a real `ScheduledJob`
+  armed, on its own. The smoke test is also what *found* D-138's race (the
+  first attempt silently NOOP'd) — fixed, then re-verified green. Existing
+  descriptive reporting, incrementality, Agent Console human queue, the
+  Decision-K restraint scenarios, and the new cross-leg/B2B scenarios all
+  continued to work against the same running stack.
+- **Recommended commit message:**
+  `Module 12a: close the autonomous loop — ingestion->diagnosis->policy->execution auto-dispatch (D-137/D-138) + live cross-leg merge / B2B bundle demo scenarios; no schema change`
+
+---
+
 ## (historical) What came next after Module 10
 
 **Module 10 — UI/UX — COMPLETE.** Torque is now a runnable, demo-able product:

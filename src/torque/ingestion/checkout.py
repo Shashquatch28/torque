@@ -24,6 +24,7 @@ each case's `source_event` and `STATUS_CHANGED` history.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 from sqlalchemy import select
@@ -42,7 +43,12 @@ from torque.state_machine import sync_control_group
 CHECKOUT_ABANDONED = "checkout.abandoned"
 
 
-def create_checkout_case(session: Session, *, event_id) -> BufferOutcome:
+def create_checkout_case(
+    session: Session,
+    *,
+    event_id,
+    on_case_ready: Callable[[RevenueLeakCase], None] | None = None,
+) -> BufferOutcome:
     event = session.get(Event, event_id)
     if event is None or event.processed or event.type != CHECKOUT_ABANDONED:
         return BufferOutcome.NOOP
@@ -103,6 +109,8 @@ def create_checkout_case(session: Session, *, event_id) -> BufferOutcome:
         score_case(session, payment_case)
         event.processed = True
         session.flush()
+        if on_case_ready is not None:
+            on_case_ready(payment_case)  # the survivor is canonical, not `case`
         return BufferOutcome.CASE_MERGED
 
     # Canonical abandonment case — the §2.7 systemic hold hook applies.
@@ -114,4 +122,6 @@ def create_checkout_case(session: Session, *, event_id) -> BufferOutcome:
     score_case(session, case)
     event.processed = True
     session.flush()
+    if on_case_ready is not None:
+        on_case_ready(case)
     return BufferOutcome.CASE_CREATED

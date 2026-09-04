@@ -58,6 +58,9 @@ def post_inject(key: str, session: Session = Depends(get_db)) -> dict:
             status_code=409, detail="demo merchant not seeded — POST /demo/seed first"
         )
     try:
-        return inject_scenario(session, key)
+        # Module 12a — dispatch=True: the injected case is picked up by the
+        # real autonomous ingestion->diagnosis->policy-activation->execution
+        # chain, exactly like a real webhook (see torque.demo.scenarios).
+        return inject_scenario(session, key, dispatch=True)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

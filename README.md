@@ -10,7 +10,10 @@ only, never as current spec.
 
 ## Status
 
-Modules **1–12 + 9b complete** (Module 12 uncommitted at time of writing). The
+Modules **1–12 + 9b + 12a complete** (Module 12a uncommitted at time of
+writing). A case created by any ingestion leg now flows autonomously —
+diagnosis, playbook activation, and execution scheduling all dispatch
+themselves, with no manual trigger between stages (Module 12a). The
 authoritative, always-current snapshot — what is built, the migration head, the
 test count, unresolved items — is
 [`documentation/ai-memory/CURRENT_STATE.md`](documentation/ai-memory/CURRENT_STATE.md).
@@ -25,7 +28,9 @@ future-optional, with a dependency graph — in
 [`documentation/ai-memory/DEFERRED.md`](documentation/ai-memory/DEFERRED.md#build-roadmap-priority-classification-module-12).
 
 Highlights: shared case spine + append-only `CaseEvent` ledger, application-layer
-multi-tenancy, four-leg signal ingestion (Celery + Redis broker), rule-based
+multi-tenancy, four-leg signal ingestion (Celery + Redis broker) **that now
+autonomously dispatches diagnosis → playbook activation → execution scheduling
+end to end (Module 12a) — no manual trigger between stages**, rule-based
 diagnosis, the playbook catalog + version-pinned runs, the **Postgres-polling**
 execution driver (`scheduled_job` + stratified Celery-beat pollers — Temporal was
 the alternative; D-090), the compliance / cross-leg guardrail engine + human

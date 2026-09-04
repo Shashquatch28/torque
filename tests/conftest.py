@@ -344,6 +344,11 @@ def make_api_client(db, monkeypatch):
         checkout_spy = MagicMock(name="create_checkout_case_task.apply_async")
         invoice_spy = MagicMock(name="ingest_invoice_task.apply_async")
         reconcile_spy = MagicMock(name="reconcile_event_task.apply_async")
+        # Module 12a — the ingestion -> diagnosis -> policy autonomous chain
+        # (D-137). Spied by default for the same reason as the four above: no
+        # test that exercises the HTTP/demo layer should need a live broker.
+        diagnose_spy = MagicMock(name="diagnose_case_task.apply_async")
+        activate_spy = MagicMock(name="activate_case_task.apply_async")
         if patch_enqueue:
             monkeypatch.setattr(
                 "torque.ingestion.tasks.resolve_buffered_event_task.apply_async", spy
@@ -361,6 +366,12 @@ def make_api_client(db, monkeypatch):
             monkeypatch.setattr(
                 "torque.reconciliation.tasks.reconcile_event_task.apply_async", reconcile_spy
             )
+            monkeypatch.setattr(
+                "torque.diagnosis.tasks.diagnose_case_task.apply_async", diagnose_spy
+            )
+            monkeypatch.setattr(
+                "torque.policy.tasks.activate_case_task.apply_async", activate_spy
+            )
         settings = Settings(
             razorpay_webhook_secret_test=WEBHOOK_TEST_SECRET if with_secrets else None,
             razorpay_webhook_secret_live=WEBHOOK_LIVE_SECRET if with_secrets else None,
@@ -376,6 +387,8 @@ def make_api_client(db, monkeypatch):
         client.checkout_enqueue = checkout_spy
         client.invoice_enqueue = invoice_spy
         client.reconcile_enqueue = reconcile_spy
+        client.diagnose_enqueue = diagnose_spy
+        client.activate_enqueue = activate_spy
         created.append(client)
         return client
 

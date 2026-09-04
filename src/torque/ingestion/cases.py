@@ -18,10 +18,21 @@
 
 The caller (`buffer.resolve_buffered_event`, run inside the Celery task's
 `session_scope`) owns the transaction — every write here is one atomic unit.
+
+**Module 12a — `on_case_ready`.** An optional hook, called with the canonical
+case exactly once, only when a case was genuinely (re)created this call
+(`CASE_CREATED` / `CASE_MERGED` — never on the early-return `NOOP`). Defaults to
+`None` (no-op) so every existing direct caller — the whole Module 2 test suite,
+the demo scenarios — is byte-for-byte unaffected. The Celery task layer
+(`torque.ingestion.tasks`) is the only caller that passes one, to *record* the
+case id for dispatch **after** this transaction commits (see D-137) — the hook
+itself must never perform I/O (no Celery dispatch from inside an open
+transaction).
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 from sqlalchemy import select
@@ -38,7 +49,12 @@ from torque.models import CardRetryBudget, Event, RevenueLeakCase
 from torque.state_machine import sync_control_group
 
 
-def create_or_attach_case(session: Session, *, event: Event) -> BufferOutcome:
+def create_or_attach_case(
+    session: Session,
+    *,
+    event: Event,
+    on_case_ready: Callable[[RevenueLeakCase], None] | None = None,
+) -> BufferOutcome:
     existing = session.scalars(
         select(RevenueLeakCase).where(RevenueLeakCase.source_event_id == event.event_id)
     ).first()
@@ -103,6 +119,10 @@ def create_or_attach_case(session: Session, *, event: Event) -> BufferOutcome:
 
     event.processed = True
     session.flush()
+
+    if on_case_ready is not None:
+        on_case_ready(case)
+
     return BufferOutcome.CASE_MERGED if merged else BufferOutcome.CASE_CREATED
 
 

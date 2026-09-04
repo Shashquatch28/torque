@@ -96,19 +96,29 @@ def test_dashboard_numbers_are_backend_derived(db):
     assert s.revenue_at_risk > s.recovered_amount
 
 
+_ACT_SCENARIOS = ("payment_failure", "checkout_abandonment")
+_RESTRAINT_SCENARIOS = ("hard_stop_mac", "upi_retry_cap", "nach_ceiling")
+_CROSS_LEG_SCENARIOS = ("cross_leg_merge", "b2b_invoice_bundle")  # Module 12a / B1
+
+
 @pytest.mark.parametrize("scenario", [s["key"] for s in DEMO_SCENARIOS])
 def test_each_scenario_injects_a_real_case(db, scenario):
+    assert set(_ACT_SCENARIOS + _RESTRAINT_SCENARIOS + _CROSS_LEG_SCENARIOS) == {
+        s["key"] for s in DEMO_SCENARIOS
+    }
     seed_demo(db)
     before = _count(db)
     out = inject_scenario(db, scenario)
-    assert _count(db) == before + 1
     case = db.get(RevenueLeakCase, out["case_id"])
     assert case is not None and case.merchant_id == DEMO_MERCHANT_ID
-    if scenario in ("payment_failure", "checkout_abandonment"):
+
+    if scenario in _ACT_SCENARIOS:
+        assert _count(db) == before + 1
         assert out["status"] == "DETECTED"
-    else:
+    elif scenario in _RESTRAINT_SCENARIOS:
         # Decision-K restraint scenarios: the case reached a playbook and a real
         # guardrail block was recorded
+        assert _count(db) == before + 1
         assert out["status"] == "PLAYBOOK_ACTIVE"
         assert "block_reason" in out
         blocked = db.scalar(
@@ -117,6 +127,17 @@ def test_each_scenario_injects_a_real_case(db, scenario):
             .where(Action.outcome == ActionOutcome.BLOCKED_BY_GUARDRAIL)
         )
         assert blocked == 1
+    elif scenario == "cross_leg_merge":
+        # One new payment case + one new (immediately-superseded) checkout case.
+        assert _count(db) == before + 2
+        assert out["merged"] is True
+        merged = db.get(RevenueLeakCase, out["merged_case_id"])
+        assert merged.superseded_by_case_id == case.case_id
+    elif scenario == "b2b_invoice_bundle":
+        # The second invoice bundles into the first case — no new case.
+        assert _count(db) == before + 1
+        assert out["bundled"] is True
+        assert out["invoice_count"] == 2
 
 
 def test_unknown_scenario_raises(db):

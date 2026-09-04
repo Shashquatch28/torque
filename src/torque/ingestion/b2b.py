@@ -20,6 +20,7 @@ invoices (the "here's everything you owe" thread — §3). Partial-payment /
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 from sqlalchemy import func, select
@@ -37,7 +38,12 @@ from torque.state_machine import is_terminal, sync_control_group
 INVOICE_OVERDUE = "invoice.overdue"
 
 
-def ingest_invoice(session: Session, *, event_id) -> BufferOutcome:
+def ingest_invoice(
+    session: Session,
+    *,
+    event_id,
+    on_case_ready: Callable[[RevenueLeakCase], None] | None = None,
+) -> BufferOutcome:
     event = session.get(Event, event_id)
     if event is None or event.processed or event.type != INVOICE_OVERDUE:
         return BufferOutcome.NOOP
@@ -125,4 +131,10 @@ def ingest_invoice(session: Session, *, event_id) -> BufferOutcome:
 
     event.processed = True
     session.flush()
+
+    if on_case_ready is not None:
+        # Correct in both branches: `target_case` is either the just-created
+        # case or the pre-existing open case this invoice bundled into (§3).
+        on_case_ready(target_case)
+
     return BufferOutcome.CASE_CREATED if created else BufferOutcome.CASE_ATTACHED

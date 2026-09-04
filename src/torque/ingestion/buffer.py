@@ -17,6 +17,8 @@ any point rolls the whole thing back (no partial case / merge / budget /
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -24,7 +26,7 @@ from torque.config import get_policy
 from torque.ingestion import payloads
 from torque.ingestion.cases import create_or_attach_case
 from torque.ingestion.outcomes import BufferOutcome
-from torque.models import Event
+from torque.models import Event, RevenueLeakCase
 
 PAYMENT_FAILED = "payment.failed"
 PAYMENT_CAPTURED = "payment.captured"
@@ -36,7 +38,12 @@ def payment_failure_buffer_seconds() -> int:
     return get_policy().payment_failure_buffer_seconds
 
 
-def resolve_buffered_event(session: Session, *, event_id) -> BufferOutcome:
+def resolve_buffered_event(
+    session: Session,
+    *,
+    event_id,
+    on_case_ready: Callable[[RevenueLeakCase], None] | None = None,
+) -> BufferOutcome:
     event = session.get(Event, event_id)
     if event is None or event.processed or event.type != PAYMENT_FAILED:
         return BufferOutcome.NOOP
@@ -46,7 +53,7 @@ def resolve_buffered_event(session: Session, *, event_id) -> BufferOutcome:
         session.flush()
         return BufferOutcome.SELF_RECOVERED
 
-    return create_or_attach_case(session, event=event)
+    return create_or_attach_case(session, event=event, on_case_ready=on_case_ready)
 
 
 def _has_interim_capture(session: Session, failure_event: Event) -> bool:

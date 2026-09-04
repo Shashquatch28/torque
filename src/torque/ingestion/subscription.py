@@ -25,6 +25,8 @@ applies. The Celery task wraps everything in one `session_scope()` transaction.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -49,7 +51,12 @@ def subscription_failure_buffer_seconds() -> int:
     return get_policy().subscription_failure_buffer_seconds
 
 
-def resolve_subscription_buffered_event(session: Session, *, event_id) -> BufferOutcome:
+def resolve_subscription_buffered_event(
+    session: Session,
+    *,
+    event_id,
+    on_case_ready: Callable[[RevenueLeakCase], None] | None = None,
+) -> BufferOutcome:
     event = session.get(Event, event_id)
     if event is None or event.processed or event.type != SUBSCRIPTION_FAILED:
         return BufferOutcome.NOOP
@@ -59,7 +66,7 @@ def resolve_subscription_buffered_event(session: Session, *, event_id) -> Buffer
         session.flush()
         return BufferOutcome.SELF_RECOVERED
 
-    return create_subscription_case(session, event=event)
+    return create_subscription_case(session, event=event, on_case_ready=on_case_ready)
 
 
 def _has_interim_charge(session: Session, failure_event: Event) -> bool:
@@ -77,7 +84,12 @@ def _has_interim_charge(session: Session, failure_event: Event) -> bool:
     return False
 
 
-def create_subscription_case(session: Session, *, event: Event) -> BufferOutcome:
+def create_subscription_case(
+    session: Session,
+    *,
+    event: Event,
+    on_case_ready: Callable[[RevenueLeakCase], None] | None = None,
+) -> BufferOutcome:
     existing = session.scalars(
         select(RevenueLeakCase).where(RevenueLeakCase.source_event_id == event.event_id)
     ).first()
@@ -121,6 +133,10 @@ def create_subscription_case(session: Session, *, event: Event) -> BufferOutcome
 
     event.processed = True
     session.flush()
+
+    if on_case_ready is not None:
+        on_case_ready(case)
+
     return BufferOutcome.CASE_CREATED
 
 

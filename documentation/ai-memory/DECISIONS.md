@@ -3146,6 +3146,91 @@ BY D-0NN`.
 
 ---
 
+## D-145 — Phase 6 integration architecture: `503` for AI-disabled, fixed-string error mapping, a single provider-construction seam, an un-truncated audit trail, and presentation-only graph padding
+
+- **Milestone:** AI Phase 6 — Agent Console Integration (`ai-layer` branch,
+  not `main`).
+- **Decision (five bundled sub-decisions, one milestone):**
+  1. **`503 Service Unavailable` for a disabled AI subsystem, not a new
+     status-code convention.** No existing endpoint in this repository
+     covered "a `GET` route behind a disabled feature flag" exactly.
+     `torque.api.health`'s readiness probe already uses `503` for
+     "required infrastructure this deployment needs is not available right
+     now" — a disabled `AISettings.enabled` is the same shape of fact
+     (something this deployment could have, but doesn't right now), so
+     `503` was chosen as the closest fit rather than inventing a bespoke
+     code or reusing `404`/`403` (both would misrepresent the fact — the
+     merchant/case are not missing or forbidden, the *feature* is off).
+     Read via `Depends(get_ai_settings)` (the existing Phase 0/4
+     `AISettings`, no second flag mechanism) — checked first, before any
+     merchant lookup, so a disabled deployment never even touches the
+     database for this route.
+  2. **Every `HTTPException.detail` in `torque.api.ai` is a fixed,
+     hand-written string — never `str(exc)`, never a provider's own
+     exception message.** `EvidenceNotFoundError` -> `404` with the
+     identical `"case not found for this merchant"` wording
+     `torque.api.reporting.get_case` already uses for the same fact (never
+     distinguishing "unknown case" from "wrong merchant" — the same
+     established Module 10 posture `torque.api.agent_console`'s
+     `CaseNotFoundError` handling already uses). `NarrativeGenerationError`
+     -> `502` (an upstream/provider-
+     shaped failure — chosen over `500` to signal "a dependency failed,"
+     matching the internal exception's own `from exc`-chained-provider-
+     failure shape without ever surfacing that chain to the caller). The
+     frontend independently never interpolates `e.message` in the AI panel
+     either — belt-and-suspenders, so a future backend wording change
+     alone cannot leak new detail through the UI.
+  3. **`_get_provider()` is the single, deliberately trivial construction
+     site for the injected `LLMProvider`**, always returning `MockProvider()`
+     today. Not a settings-driven factory, not a registry — Phase 4/D-142
+     already established there is exactly one concrete provider and no
+     selection to make; adding a `TORQUE_AI_PROVIDER` setting now with
+     nothing to select between would repeat the "configuration that isn't
+     actually consumed" mistake D-AI-18/D-142 already declined. When
+     D-AI-03 is eventually resolved, this one function is the seam a real
+     provider replaces — no caller of it changes.
+  4. **`renderConsolePane`'s audit trail now renders every event, not
+     `events.slice(-8)`.** A citation can reference any event in the
+     case's history, not just the most recent 8; citation navigation needs
+     that event's `<li>` actually present in the DOM to scroll to and
+     highlight. This is the one adjustment Phase 6 made to pre-existing
+     (Module 10) rendering code — a truncation limit, not a redesign of
+     the panel — necessitated by, and scoped exactly to, citation
+     navigation's own requirement.
+  5. **The dashboard "recovery over time" bar chart is zero-padded to a
+     7-bar minimum, in the frontend, using only real backend values.**
+     Investigated first (per the task's own instruction): the backend
+     (`recovery_over_time`) was already correct and complete; the seeded
+     demo's Torque-credited recoveries simply cluster into one UTC day, so
+     a single `flex:1` bar stretched across the whole chart — a rendering
+     defect, not a data or backend defect. `barChart()` now left-pads a
+     sparse series with explicit, honest zero-recovery days (a day with no
+     recovered case genuinely recovered ₹0 — the true value, not a
+     fabricated one) up to 7 bars before rendering exactly as before. No
+     backend change, no metric computed in JavaScript, no demo-seed data
+     touched.
+- **Alternatives considered:** a dedicated `TORQUE_AI_API_ENABLED` setting
+  separate from `AISettings.enabled` — rejected, the task explicitly
+  required reusing the established flag, not inventing a second mechanism.
+  `403 Forbidden` for the disabled-AI case — rejected, `403` implies the
+  caller lacks permission for a resource that otherwise exists, which
+  misdescribes "this deployment has the feature turned off entirely."
+  Truncating the audit trail differently (e.g. showing only cited events
+  plus the last 8) — rejected as more complex for no real benefit at this
+  data scale, and it would make the audit trail's own completeness
+  contingent on which events happen to be cited, which is confusing for a
+  human reviewer independent of the AI feature.
+- **Consequence:** the AI API surface fits this repository's existing
+  conventions rather than introducing new ones per endpoint; the one
+  genuinely new piece of policy (`503` for the disabled case) is recorded
+  here rather than left implicit; citation navigation is reliable
+  regardless of how old the cited event is; the dashboard graph reads as a
+  real trend at any data scale without the backend or the demo data ever
+  changing.
+- **Status:** IN FORCE.
+
+---
+
 ## Notes not recorded as decisions
 
 - The **Git-history incident of 2026-09-02** (a bad commit briefly on `main`,

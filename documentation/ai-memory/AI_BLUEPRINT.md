@@ -58,7 +58,7 @@ Phase 2 — Evidence normalization + citation model      COMPLETE
 Phase 3 — Retrieval / precedent engine                  COMPLETE
 Phase 4 — LLM case explanation                           COMPLETE
 Phase 5 — Faithfulness / evaluation                        COMPLETE
-Phase 6 — Agent Console integration                         NOT STARTED
+Phase 6 — Agent Console integration                         COMPLETE
 Phase 7 — Shadow ML                                          NOT STARTED
 Phase 8 — Hardening                                           NOT STARTED
 Phase 9 — Demo polish                                          NOT STARTED
@@ -73,7 +73,13 @@ suite (`tests/test_ai_boundary.py`, `tests/test_ai_config.py`,
 `tests/test_ai_evidence.py`, `tests/test_ai_citations.py`,
 `tests/test_ai_retrieval.py`, `tests/test_ai_providers.py`,
 `tests/test_ai_narrative.py`, `tests/test_ai_evaluation.py`,
-`tests/ai_eval_cases.py`). The package's public capabilities are:
+`tests/ai_eval_cases.py`); **and, since Phase 6, `src/torque/api/ai.py`** —
+`GET /ai/{merchant_id}/cases/{case_id}/explain`, the first (and only)
+consumer of the AI package from outside it — plus `tests/test_ai_api.py`,
+and the Agent Console's own AI surface in `src/torque/ui/static/{torque.js,
+torque.css}` (an "Explain this case" button, a citation-grounded narrative
+panel, and click-to-locate citation navigation into the existing `CaseEvent`
+audit trail). The package's public capabilities are:
 `torque.ai.evidence.gather_case_evidence` (a read-only function projecting
 one case's authoritative Torque state into typed, redacted,
 citation-referenced DTOs); `torque.ai.citations.resolve_citation` /
@@ -83,16 +89,19 @@ deterministic, Postgres-FTS-assisted search for comparable, resolved,
 same-merchant historical cases); `torque.ai.narrative.explain_case` (a
 citation-grounded `CaseNarrative` synthesized from evidence + precedent by
 an injected `LLMProvider`, `MockProvider` being the only concrete provider
-that exists); and `torque.ai.evaluation.evaluate_narrative` /
+that exists); `torque.ai.evaluation.evaluate_narrative` /
 `evaluate_retrieval_precision` (deterministic, pure metric functions that
 turn Phase 4's pass/fail citation gate into measured statistics —
-`EvaluationReport`). There is no embedding, no vector search, no real
-(network-backed) LLM provider, no API endpoint, no frontend change, no
-LLM-as-judge, and no shadow ML model. See the Phase 5 completion report for
+`EvaluationReport`); and now `GET /ai/{merchant_id}/cases/{case_id}/explain`
+— the first place any of the above is reachable by anything other than its
+own test suite, gated by `AISettings.enabled` (`503` when off), read-only,
+tenant-scoped, and rendered by the Agent Console. There is still no
+embedding, no vector search, no real (network-backed) LLM provider, no
+LLM-as-judge, and no shadow ML model. See the Phase 6 completion report for
 the exact, unimplemented list.
 
-No phase beyond 0-5 is marked complete merely because its architecture is
-documented below — everything from Phase 6 onward in this file is a plan,
+No phase beyond 0-6 is marked complete merely because its architecture is
+documented below — everything from Phase 7 onward in this file is a plan,
 not a report of what exists.
 
 ---
@@ -215,24 +224,27 @@ Enforced, not merely stated:
       |    citations.py  retrieval.py  prompts.py               |
       |    providers/{base,mock_provider}.py  narrative.py       |
       |    evaluation.py                                           |
-      |  NOT YET BUILT (Phase 6+):                            |
+      |  NOT YET BUILT (Phase 7+):                            |
       |    shadow/  providers/ (a real provider)                |
       +----------------------------------------------------+
                             |
                             | structured, citation-grounded CaseNarrative
-                            | (returned to the caller — Phase 4 has no
-                            |  caller of its own yet; see below)
+                            | (Phase 6 gives this a real caller)
                             v
-                torque.api.ai  (future — does not exist yet, Phase 6)
+             torque.api.ai  (IMPLEMENTED, Phase 6 — GET-only,
+                              AISettings.enabled-gated, one route)
                             |
+                            | JSON CaseNarrative
                             v
-              torque.ui.static  (future — no changes yet, Phase 6)
+         torque.ui.static/{torque.js,torque.css}  (IMPLEMENTED, Phase 6 —
+              Agent Console "Explain this case" + narrative panel +
+              citation -> existing CaseEvent audit-trail navigation)
 ```
 
-`torque.ai.narrative.explain_case` is fully implemented and fully callable
-as of Phase 4 — but nothing outside its own test suite calls it yet. No
-API endpoint and no UI change exist; per explicit instruction, Phase 4
-built the capability without building its integration.
+`torque.ai.narrative.explain_case` was fully implemented and fully callable
+as of Phase 4, with no caller outside its own test suite. **Phase 6 gives it
+its first real caller**: one read-only API route consumed by one Agent
+Console panel — see §9b.
 
 ## 6. AI Component Boundaries
 
@@ -677,18 +689,217 @@ duplicate citation, an unsupported claim, a wrong `precedent.found`) are
 simple `CaseNarrative.model_copy(update=...)` manipulations living directly
 in `tests/test_ai_evaluation.py`, next to the assertions that use them.
 
+**Reconciliation (Phase 6, checked before marking this file's own Phase 6
+work complete, per that task's own §25):** this **6-case hand-labeled
+evaluation subset** (`tests/ai_eval_cases.py`) is a deliberately small,
+independently-labeled set built to exercise specific, named scenarios
+(precedent found/not-found, multiple precedents, an adversarial-text case,
+an evidence gap) — it is not, and was never meant to be, "all of the demo
+data." It is a genuinely different thing from the **`torque.demo.seed`
+demo corpus** the Agent Console and dashboard render against, which is
+**not a fixed number** — `seed_demo()` creates a base set of cases (5
+recovered, 3 blocked, several open/escalated/self-recovered archetypes)
+and the Demo Surface's one-click scenario injectors
+(`torque.demo.scenarios`) can add more on top; a live count against the
+running seeded `acc_demo` merchant during Phase 6 verification read **22
+total cases** (`GET /reports/acc_demo/summary` -> `case_count: 22`) — a
+real, measured number as of this writing, not a fixed constant, and not
+inflated or shrunk to make any number here look tidier. Phase 5's
+evaluation subset was not, and should not be, artificially grown to match
+whatever the demo corpus happens to contain at any given time; the two
+serve different purposes (a hand-labeled measurement set vs. a
+demo-scale operational dataset) and are documented separately rather than
+conflated.
+
 ### What this phase does not touch
 
 `narrative.py::_validate_citations` — the hard, generation-time citation
 gate — is untouched (confirmed byte-unchanged); evaluation is a downstream,
 read-only measurement layer over what that gate already enforced, not a
 replacement or a loosening of it. No `EvaluationReport` is ever persisted;
-`evaluate_narrative`/`evaluate_retrieval_precision` are called only from
-tests, with no API endpoint or UI surface (Phase 6+).
+`evaluate_narrative`/`evaluate_retrieval_precision` are still called only
+from tests, even after Phase 6 — Phase 6 gave `explain_case` an API caller
+(§9b), not `evaluate_narrative`. No API endpoint or UI surface exposes an
+`EvaluationReport` anywhere; that remains unbuilt, with no target phase
+fixed.
+
+## 9b. AI HTTP + Agent Console Integration — **Implemented, Phase 6**
+
+```
+Agent Console (human queue -> selected case -> case pane)
+        |
+        | user clicks "Explain this case"  (on demand only — never on
+        |                                    page load, never polled)
+        v
+GET /ai/{merchant_id}/cases/{case_id}/explain      (torque.api.ai)
+        |
+        | AISettings.enabled?  -- no --> 503, nothing else touched
+        | -- yes --
+        v
+explain_case()   (Phase 4, unmodified: evidence -> precedent -> provider
+        |         -> citation validation -> CaseNarrative)
+        v
+CaseNarrative (JSON)
+        |
+        v
+Agent Console renders it in place, in the same case pane —
+every citation is a button; clicking one locates the matching
+<li data-event-seq="N"> already in the audit trail below it,
+scrolls it into view, and flashes it — no second timeline, no
+second case-detail view, no new page.
+```
+
+### The API layer — `src/torque/api/ai.py`
+
+One route, `GET /ai/{merchant_id}/cases/{case_id}/explain`, same
+conventions as `torque.api.reporting`: one `APIRouter`, `Depends(get_db)`,
+a `_require_merchant` guard before anything else runs. It is the only
+consumer of `torque.ai` from outside the package — `tests/test_ai_boundary.py`
+only scans `src/torque/ai/`, so this file was always the "future phase"
+consumer that boundary was written to allow, not an exception carved into
+it; the boundary test itself is untouched.
+
+- **Feature flag.** `AISettings.enabled` (`torque.ai.config`, Phase 0/4) is
+  read via `Depends(get_ai_settings)` — the exact "API-layer concern" that
+  module's own docstring named as Phase 6's job, not a second flag
+  mechanism invented here. Disabled -> `503` before any merchant lookup,
+  evidence gathering, or provider call happens at all. No pre-existing
+  repository convention covered "a GET route behind a disabled feature
+  flag" exactly; `503` was chosen as the closest fit to an existing one —
+  `torque.api.health`'s readiness probe already uses `503` for "required
+  infrastructure is not available right now," and a disabled AI subsystem
+  is the same shape of fact. See D-145.
+- **Error mapping.** `EvidenceNotFoundError` -> `404` (`"case not found for
+  this merchant"`, the identical wording `torque.api.reporting.get_case`
+  already uses for the same fact — never distinguishing "unknown case"
+  from "case belongs to another merchant," the same posture as every other
+  Module 10 read endpoint). `NarrativeGenerationError` -> `502` (an
+  upstream/provider-shaped failure). Every raised `HTTPException.detail` is
+  a fixed, hand-written string — never `str(exc)`, never the provider's own
+  exception message — so a leaking internal detail is structurally
+  impossible, not merely avoided by convention.
+- **Provider.** `_get_provider()` is the single construction site for the
+  injected `LLMProvider` — always `MockProvider()` today (no real provider
+  exists; deferred, D-AI-03). A future real provider replaces this one
+  function; no caller of it changes.
+- **Read-only, proven, not merely asserted.** `tests/test_ai_api.py::
+  test_explain_performs_no_write` captures `CaseEvent` row counts and the
+  target case's `status`/`recovered_amount`/`escalation_resolution` before
+  and after a request through the real ASGI app, and asserts
+  `db.new`/`.dirty`/`.deleted` are empty afterward — the same pattern
+  Phase 4/5 used at the function level, now proven across the HTTP
+  boundary too.
+- **`GET /ai/{merchant_id}/cases/{case_id}/explain`'s response body is a
+  raw `CaseNarrative`** (`response_model=CaseNarrative`) — no separate API
+  DTO, no reshaping. `torque.api.ai` is a thin HTTP translation over Phase
+  4's real contract, not a second copy of it.
+
+### The Agent Console surface — `torque.ui.static/{torque.js,torque.css}`
+
+- **"Explain this case"** — one button in the existing case pane
+  (`renderConsolePane`, the same panel the resolve/pause/unpause controls
+  already live in) — no duplicated case-detail view, no new route/hash. On
+  demand only: `explainCase()` runs from the button's own `onclick`, never
+  from the pane's initial `Promise.all` load and never polled (§26 of the
+  Phase 6 task).
+- **Narrative rendering.** `renderNarrative(n)` reads the real
+  `CaseNarrative` fields directly (`n.summary`, `n.current_state`,
+  `n.root_cause_explanation`, `n.timeline`, `n.actions_taken`,
+  `n.guardrail_explanation`, `n.precedent`,
+  `n.recommended_human_attention`, `n.uncertainty`, `n.evidence_gaps`,
+  `n.provider_id`, `n.prompt_version`) — no parallel frontend narrative
+  shape. All narrative text goes through the app's one existing
+  `esc()`-then-`innerHTML` convention (the same convention every other
+  view in this file already uses) — never raw-interpolated.
+- **Citation labels.** A citation id keeps its real Phase 2
+  `EvidenceReference.reference_id` value (e.g. `case_event:658`) as its
+  machine-resolvable identity; only the on-screen *label* is
+  human-friendly (`citationLabel()`: `case_event:658` -> "Event 658",
+  `action:<uuid>` -> "Action <uuid prefix>", etc.) — the citation scheme
+  itself (Phase 2, D-140) is untouched.
+- **Citation -> event navigation, the core demo moment.** Every citation
+  renders as a `<button data-cite="...">`; a click delegated on the
+  narrative panel parses it with a strict `^case_event:(\d+)$` pattern
+  *before* it is ever used to build a CSS selector
+  (`li[data-event-seq="${m[1]}"]`) — an id that doesn't match the pattern
+  can never become part of a selector at all, so a citation string cannot
+  be turned into an arbitrary/injected selector (§28 of the task). A match
+  scrolls the existing `<li>` (already rendered by the unmodified
+  `renderEvent`, now additionally carrying `data-event-seq`) into view and
+  flashes it (`.cite-hit`, verified live: the flash class is present on
+  the correct `<li>` immediately after the click). A citation that isn't a
+  `case_event` (the case snapshot itself, an action, a promise, a
+  counterparty relationship — none of which has an existing per-row DOM
+  element to navigate to) falls back to a toast naming the reference,
+  rather than fabricating a second timeline entry or a broken scroll
+  target.
+- **Error / disabled / empty states.** `explainCase()`'s `catch` renders
+  one of a small set of fixed, generic messages selected only by HTTP
+  status (`503` -> "AI explanations are not enabled for this deployment.",
+  `404` -> "This case could not be found.", `5xx` -> a generic generation-
+  failure message) — `e.message` (the backend's raw `HTTPException.detail`)
+  is never interpolated into the panel, so a future change to backend
+  wording cannot leak new detail through this path. An empty
+  `actions_taken`/`guardrail_explanation` renders "None recorded." rather
+  than an empty gap; an evidence gap or missing diagnosis renders Phase 4's
+  own honest `uncertainty`/`evidence_gaps` text verbatim, never an invented
+  diagnosis.
+- **`renderConsolePane`'s audit trail now renders every event, not just
+  the last 8** (`events.slice(-8)` -> `events`) — the one small, necessary
+  adjustment to existing Phase-0-10 code this phase made: a citation
+  naming an older event needs that event actually present in the DOM to
+  navigate to. See D-145.
+
+### The dashboard graph fix (in scope per §34 of the Phase 6 task)
+
+Investigated per the task's own order (what graph, what backend data, does
+the API return it, is the defect data/rendering/CSS) before changing
+anything. Finding: **the backend was never the problem.**
+`GET /reports/{merchant_id}/over-time?bucket=day`
+(`torque.reporting.metrics.recovery_over_time`) already returns exactly the
+real, correct, Torque-credited recovery buckets that exist — untouched,
+because nothing was wrong with it. The rendering defect was in
+`torque.js`'s `barChart()`: with very few real buckets (the seeded demo
+data's Torque-credited recoveries cluster into essentially one UTC day),
+a single `<div class="bar">` under `flex:1` stretched to the full width of
+its container — a giant, uninformative rectangle, not a trend chart, and
+easy to mistake for a broken/decorative placeholder (confirmed live: before
+the fix, the seeded dataset rendered exactly one full-width, full-height
+bar).
+
+**Fix, rendering-only:** `barChart()` now left-pads a sparse series with
+explicit zero-recovery days (a day with no recovered case genuinely
+recovered ₹0 — this is the true value for that day, not a fabricated one)
+immediately before the earliest real bucket, up to a minimum of 7 bars,
+before rendering exactly as before. Confirmed live against the real seeded
+dataset: 1 real bucket became 7 (`9/9` … `15/9`), with the 6 synthetic
+bars all real, honest zeros and the one real bucket at its correct
+relative height — no backend change, no new endpoint, no metric moved into
+JavaScript, no fabricated non-zero value anywhere. See D-145.
+
+### Documentation-artifact audit (§15 of the Phase 6 task)
+
+Audited `index.html`, `torque.js`, and `torque.css` for user-facing
+documentation/blueprint labels (section numbers, `Module N`, `Phase N`,
+"Blueprint") before changing anything, per the task's own instruction not
+to blindly rename things without understanding them first. **Finding: zero
+instances rendered anywhere.** Every `§10.x` / `Module 9` / `Module 10`
+occurrence in these three files lives inside a `//` or `/* */` source
+comment (organizational section headers for the file's own maintainers) —
+none is ever assigned to `innerHTML`, a template-literal string that
+becomes visible text, or any other user-facing surface; verified both by
+direct source inspection and by rendering the live dashboard, cases list,
+case detail, Agent Console, and demo views end to end. **No cleanup edit
+was made for this item because none was needed** — reported as an audit
+with zero findings, not skipped. `tests/test_module10_ui.py::
+test_ui_has_no_documentation_artifacts_outside_comments` makes this a
+standing, enforced fact rather than a one-time observation: it strips
+`//`/`/* */` comments from all three files and asserts none of these
+strings survive in what's left.
 
 ## 10. Planned Shadow ML Architecture — **NOT BUILT** (Phase 7)
 
-**RECOMMENDED**, not yet implemented, and explicitly gated behind Phases 5-6
+**RECOMMENDED**, not yet implemented, and explicitly gated behind Phase 6
 landing first (it has no dependency on retrieval/LLM work technically, but
 sequencing it after keeps the riskier, more novel narrative-generation work
 reviewed first). Target: binary `recovered` (`status in {RECOVERED,
@@ -703,7 +914,7 @@ schema so the UI cannot render a number without the caveat attached.
 
 ## 11. Security Model
 
-Implemented (Phase 0-5):
+Implemented (Phase 0-6):
 
 - **Static import-boundary test**, `tests/test_ai_boundary.py` — see §3
   item 2. This is the load-bearing enforcement mechanism; everything else in
@@ -745,13 +956,29 @@ Implemented (Phase 0-5):
   there is no code path from generated text to a mutation, structurally,
   not merely by convention (see §9's "LLM never becomes a source of truth"
   and INV-63).
+- **`torque.api.ai` (Phase 6) adds no new write surface.** One `GET` route,
+  `Depends(get_db)` (the same dependency every other read endpoint uses —
+  no `get_ai_db` or second session architecture was needed or built), and
+  `_require_merchant` before anything else — the identical pattern
+  `torque.api.reporting` already established. Tenant isolation is not
+  re-implemented at the API layer; it is inherited unchanged from
+  `explain_case`'s own use of `gather_case_evidence`/`find_precedent`
+  (both already `TenantScope`-scoped, Phases 1/3). Proven, not just
+  argued: `tests/test_ai_api.py::test_explain_cross_tenant_case_is_404_not_a_leak`
+  and `::test_explain_performs_no_write`.
 
 Planned, **NOT YET BUILT**:
 
-- A dedicated read-only DB session/role for the future API layer (Phase 6) —
+- A dedicated read-only DB session/role for the AI API layer —
   **NEEDS HUMAN DECISION** on whether a Postgres role with `SELECT`-only
   grants is provisioned (a one-time DB-admin action outside Alembic's normal
-  migration flow) versus relying on the import-boundary test alone.
+  migration flow) versus relying on the import-boundary test alone. Phase 6
+  used the existing `get_db` dependency (the same session every other
+  endpoint uses, which itself has `INSERT`/`UPDATE`/`DELETE` privileges at
+  the Postgres role level) rather than provisioning a new role — the import
+  boundary + this endpoint's own read-only construction remain the
+  enforcement mechanism, exactly as before. This decision is still open,
+  not resolved by Phase 6.
 
 **Leakage boundary (documented now, enforced by file separation once Phase 7
 exists).** `gather_case_evidence` deliberately returns post-outcome fields
@@ -784,7 +1011,7 @@ Real-provider adversarial testing is an explicitly optional future lane
 
 ## 13. Multi-Tenancy / Data-Isolation Requirements
 
-Implemented and tested (Phase 1-4):
+Implemented and tested (Phase 1-4, extended Phase 6):
 
 - Every read in `torque.ai.evidence` goes through `TenantScope` — `.get()`
   for the case itself (returns `None`, not another tenant's row, for a
@@ -828,6 +1055,15 @@ Implemented and tested (Phase 1-4):
   `tests/test_ai_narrative.py::test_cross_tenant_case_raises_evidence_not_found`
   proves `explain_case` inherits `gather_case_evidence`'s cross-tenant
   invisibility exactly (it raises before any provider call is even made).
+- **The API layer (Phase 6) is the first place tenant isolation is
+  provable over HTTP, not just at the function level.**
+  `tests/test_ai_api.py::test_explain_cross_tenant_case_is_404_not_a_leak`
+  requests a real case through the wrong merchant's path and asserts both
+  the `404` and that neither the case id nor its root-cause text appear
+  anywhere in the response body — the same never-a-leak posture as every
+  other Module 10 endpoint, now exercised end to end through
+  `fastapi.testclient.TestClient` rather than only at the Python function
+  boundary.
 
 ## 14. Phase Roadmap
 
@@ -839,7 +1075,7 @@ Implemented and tested (Phase 1-4):
 | 3 | Retrieval / precedent engine (Postgres FTS as a secondary signal over an exact metadata filter) | **COMPLETE** |
 | 4 | LLM case explanation (provider-agnostic, evidence-grounded, citation-bearing) | **COMPLETE** |
 | 5 | Faithfulness / evaluation harness (validates generated citations via Phase 2's `resolve_citation`) | **COMPLETE** |
-| 6 | Agent Console integration (new read-only API route + UI panel) | NOT STARTED |
+| 6 | Agent Console integration (new read-only API route + UI panel) | **COMPLETE** |
 | 7 | Shadow ML model (observational only) | NOT STARTED |
 | 8 | Hardening (adversarial + failure-mode testing) | NOT STARTED |
 | 9 | Demo polish + documentation | NOT STARTED |
@@ -859,9 +1095,10 @@ Phase 4 (LLM case explanation) <---+   (complete)
    |                                |
 Phase 5 (faithfulness evaluation)   |    (consumes Phase 2's resolve_citation
    |                                |     directly — this is why citations had
-   |  <- YOU ARE HERE (complete)    |     to exist before generation, not after)
-Phase 6 (Agent Console integration) |
-   |                                |
+   |                                |     to exist before generation, not after)
+Phase 6 (Agent Console integration) |    (complete — explain_case's first
+   |                                |     real caller: one API route + panel)
+   |  <- YOU ARE HERE (complete)    |
 Phase 7 (shadow ML) -- depends only on Phase 1, mergeable in parallel with 3-6
    |
 Phase 8 (hardening) -- depends on everything above
@@ -873,8 +1110,14 @@ Final AI Integration Gate (main-branch merge eligibility)
 
 ## 16. Testing / Evaluation Strategy
 
-Implemented for Phase 0-5 (110 AI-specific tests, all passing — see the
-Phase 5 completion report for exact file/test names): architecture/boundary
+Implemented for Phase 0-6: **123** tests across the `tests/test_ai_*.py`
+family (`test_ai_boundary`, `test_ai_config`, `test_ai_evidence`,
+`test_ai_citations`, `test_ai_retrieval`, `test_ai_providers`,
+`test_ai_narrative`, `test_ai_evaluation`, and — new in Phase 6 —
+`test_ai_api`, 10 tests), plus **6** new Phase-6 tests living in
+`tests/test_module10_ui.py` (the Agent Console's own AI-surface assertions,
+alongside that file's existing Module 10 UI checks — see the Phase 6
+completion report for exact test names). Architecture/boundary
 tests (static import-graph check + write-call substring sweep across the
 whole package), evidence-shape tests (snapshot correctness, timeline
 ordering, citation-reference resolvability), tenant-isolation tests,
@@ -906,17 +1149,49 @@ citation, an unsupported claim, a wrong `precedent.found`), determinism
 (same input -> byte-identical `EvaluationReport`), a cross-check that
 `evaluation.py`'s mirrored citation-collection logic matches `narrative.py`'s
 real one, a full integration test against the real seeded evaluation set,
-and an aggregate-threshold test over the 6-case set. Full existing
-regression suite (1230 pre-existing tests) re-run and green alongside every
-new AI test added since — 1343 total as of Phase 5.
+and an aggregate-threshold test over the 6-case set.
+
+**(Phase 6, `tests/test_ai_api.py`, 10 tests):** a happy-path narrative
+through the real ASGI app with the exact-citation-match contract asserted
+on the JSON response, a genuinely-unique-root-cause no-precedent case,
+cross-tenant rejection with a body-content leak check, unknown-merchant and
+unknown-case `404`s, AI-disabled `503` with a count-based proof that not
+even a merchant lookup happened, a monkeypatched provider-exception test
+and a monkeypatched fabricated-citation test both asserting a `5xx` with no
+internal exception text/module path/traceback anywhere in the response
+body, a citation-resolvability cross-check against a fresh
+`gather_case_evidence` call, and a before/after row-count +
+`db.new`/`.dirty`/`.deleted` read-only proof across the HTTP boundary.
+**(Phase 6, `tests/test_module10_ui.py`, 6 new tests, alongside its
+existing Module 10 checks):** the AI endpoint path and the `Explain this
+case` button/on-demand-only wiring are present in `torque.js`; every
+`CaseNarrative` field is read directly (no parallel frontend shape) and
+narrative text is escaped before rendering; the citation-click handler
+exists, its selector-building regex is present, and the audit-trail `<li>`
+carries the `data-event-seq` anchor it navigates to; the AI-error path
+never interpolates `e.message`; the graph's zero-padding fix reads only
+real `recovered_amount` values (no `Math.random`, no local rate/score
+recomputation); and — enforced as a standing fact, not a one-time
+observation — no documentation/blueprint label survives outside a source
+comment in `index.html`, `torque.js`, or `torque.css`.
+
+Full existing regression suite re-run and green alongside every new AI test
+added since — **1359** total as of Phase 6 (was 1343 after Phase 5, **+16**:
+10 in `test_ai_api.py`, 6 in `test_module10_ui.py`).
 
 Not yet built: LLM-as-judge or semantic-entailment scoring (deliberately
 deferred, no target phase — see D-144), any evaluation framework dependency
 (RAGAS or similar, explicitly out of scope per the Phase 5 task), an API
-endpoint or UI surface for evaluation results, adversarial testing against a
-*real* language model (only the deterministic `MockProvider` path has been
-adversarially tested — see §12's stated scope), shadow-ML leakage/
-calibration tests — all Phase 6+.
+endpoint or UI surface for `EvaluationReport` specifically (Phase 6 exposed
+`explain_case`, not `evaluate_narrative` — see §9a/§9b), adversarial testing
+against a *real* language model (only the deterministic `MockProvider` path
+has been adversarially tested — see §12's stated scope), shadow-ML
+leakage/calibration tests, a browser/e2e test harness (none exists in this
+repository; the Phase 6 task explicitly said not to introduce one — UI
+correctness is proven by static-source assertions against `torque.js` plus
+live manual verification, the same posture this whole file's "no browser
+harness" note at the top of `test_module10_ui.py` already documents) — all
+Phase 7+.
 
 ## 17. Git / Branch Strategy
 
@@ -932,7 +1207,7 @@ landed directly on `ai-layer`, per explicit instruction for this milestone.
 **RECOMMENDED** (not yet exercised): one phase per feature branch off
 `ai-layer` (`ai-layer/phase-N-<slug>`), each independently reviewable,
 merged into `ai-layer` in dependency order — an option for the maintainer to
-adopt for future phases; Phase 0-5 were each built directly on `ai-layer`
+adopt for future phases; Phase 0-6 were each built directly on `ai-layer`
 instead, per explicit instruction each time.
 
 ## 18. Main-Branch Integration Gate
@@ -943,7 +1218,7 @@ performed). Before `ai-layer` is eligible to merge into `main`:
 - [ ] Full existing regression suite green, unmodified.
 - [ ] `uv run ruff check .` clean repository-wide.
 - [ ] `alembic upgrade head` succeeds; zero new migrations introduced by the
-      AI program (true through Phase 5: no migration exists under this work).
+      AI program (true through Phase 6: no migration exists under this work).
 - [ ] Every AI-specific test file green.
 - [ ] `tests/test_ai_boundary.py` green — the forbidden-import and
       forbidden-write-call checks both pass.
@@ -952,24 +1227,48 @@ performed). Before `ai-layer` is eligible to merge into `main`:
       `events/case_event_writer.py`, `agent_console/resolve.py`, any
       `execution/*.py`, `scoring/score.py`'s write functions, or any
       existing migration file.
-- [ ] Demo usability: a human can use whatever AI-facing feature exists,
-      unaided (not yet applicable — no UI-facing feature exists).
+- [x] Demo usability: a human can use whatever AI-facing feature exists,
+      unaided — **now applicable and satisfied as of Phase 6**: Agent
+      Console -> select case -> "Explain this case" -> narrative -> click a
+      citation -> the existing audit trail scrolls to and highlights the
+      cited event, verified live against the real seeded `acc_demo` dataset
+      (see the Phase 6 completion report). Still unmerged; this checkbox
+      records readiness, not that the gate as a whole has been exercised.
 - [ ] `documentation/ai-memory/{ARCHITECTURE,DECISIONS,MILESTONES,DEFERRED,
       INVARIANTS}.md` updated to reflect the new module(s), in this
       project's own established style (this document + the accompanying
-      decision/invariant/milestone entries are the Phase 0-5 instance of
+      decision/invariant/milestone entries are the Phase 0-6 instance of
       that requirement).
 
 ## 19. Demo Architecture
 
-Not yet applicable — no user-visible AI capability exists (Phase 0-5 is
-entirely backend; `explain_case` produces a real, citation-grounded
-`CaseNarrative`, `evaluate_narrative` produces a real, measured
-`EvaluationReport`, and both have been proven end-to-end against the seeded
-`acc_demo` dataset, but neither has a caller outside its own test suite — no
-API endpoint, no UI). See the prior research phase's full demo narrative
-for the target end-to-end story once Phase 6 lands; not reproduced here
-since it describes a UI flow that does not exist yet.
+**Implemented, Phase 6.** The end-to-end flow the prior research phase
+described is now real, not aspirational:
+
+```
+Agent Console (human queue)
+    -> select an escalated/demo case
+    -> "Explain this case"           (on demand, never on page load)
+    -> GET /ai/{merchant_id}/cases/{case_id}/explain
+    -> a citation-grounded CaseNarrative renders in the same case pane
+    -> click a citation (e.g. "Event 658")
+    -> the existing audit-trail <li> for that event scrolls into view
+       and flashes — no second timeline, no new view
+```
+
+Verified live against the real seeded `acc_demo` dataset (Docker
+`db`/`redis`, `uv run python -m torque`, `TORQUE_AI_ENABLED=true`): a real
+escalated subscription-failure case rendered a summary, a cited current
+state and root cause, a three-entry timeline each citing its real
+`CaseEvent`, an honest "no comparable resolved case exists yet" precedent
+section, a recommended-attention note, an uncertainty/evidence-gap
+statement, and a `Generated ... · mock:deterministic-v1 · narrative-v1`
+footer; clicking `Event 658` scrolled to and flashed the matching audit-
+trail row; clicking a non-event citation (`Case snapshot`) fell back to a
+toast rather than a broken navigation. No case, action, or event state
+changed across any of this (confirmed both by `tests/test_ai_api.py::
+test_explain_performs_no_write` and by re-reading the same case's row
+count/fields directly after the manual click-through).
 
 ## 20. Decision Register
 
@@ -980,14 +1279,15 @@ since it describes a UI flow that does not exist yet.
 | D-AI-08 | Tenant isolation: reuse `TenantScope` exactly, no second facade | **LOCKED** | Implemented |
 | D-AI-15 | Feature flag: `TORQUE_AI_ENABLED`, default `False`, same `BaseSettings` pattern as `torque.config` | **RECOMMENDED** | Implemented (`torque.ai.config.AISettings`) |
 | D-AI-17 (part 1) | Read-only enforcement: static import-boundary test | **LOCKED** (implemented, non-negotiable per this program's instructions) | Implemented |
-| D-AI-17 (part 2) | Read-only enforcement: dedicated Postgres read-only DB role | **NEEDS HUMAN DECISION** | Not built — Phase 6+ |
+| D-AI-17 (part 2) | Read-only enforcement: dedicated Postgres read-only DB role | **NEEDS HUMAN DECISION** | Not built — Phase 6 used the existing `get_db` dependency instead (see §11); still open, no target phase |
 | D-140 | Citation contract: preserve Phase 1's `reference_id` scheme; make `CaseSnapshot` citable; keep `Citation` to one field; keep `resolve_citation` pure | **LOCKED** (implemented; see `DECISIONS.md`) | Implemented |
 | D-141 | Retrieval architecture: Postgres FTS as a secondary-only signal over an exact metadata filter, no vector DB, no index/migration at N≈16, terminal-state logic duplicated not imported | **LOCKED** (implemented; see `DECISIONS.md`) | Implemented |
 | D-AI-17 (part 3) | Whether to narrow `test_ai_boundary.py`'s `torque.state_machine` block to a name-level allowlist for `TERMINAL_STATUSES`/`is_terminal` instead of duplicating them | **NEEDS HUMAN DECISION** | Not taken — duplication + cross-test used instead (D-141) |
 | D-142 | Provider architecture: `LLMProvider`+`MockProvider` only, real provider deferred, async boundary needs no new test dependency | **LOCKED** (implemented; see `DECISIONS.md`) | Implemented |
 | D-143 | Narrative safety architecture: orchestrator-authored identity fields, exact-match citation gate, `NarrativeClaim` naming (not `TimelineEntry`) | **LOCKED** (implemented; see `DECISIONS.md`) | Implemented |
 | D-144 | Evaluation architecture: lexical-overlap unsupported-claim proxy empirically calibrated to `0.2`; LLM-as-judge deferred, no target phase; `EvaluationReport` placed in `schemas.py`; citation collection mirrored not imported from `narrative.py`; `evaluate_retrieval_precision` kept structurally separate from the pure `evaluate_narrative` | **LOCKED** (implemented; see `DECISIONS.md`) | Implemented |
-| D-AI-03 | Real LLM provider: Anthropic primary + local/mock fallback | **NEEDS HUMAN DECISION** (API budget/key) | Not built — deferred past Phase 4, no target phase fixed |
+| D-145 | Phase 6 integration architecture: `503` for AI-disabled (nearest fit to `health.py`'s existing readiness convention, no second flag mechanism); fixed hand-written `HTTPException.detail` strings only, never `str(exc)`; `_get_provider()` as the single provider-construction seam; `renderConsolePane`'s audit trail renders every event (not the prior `slice(-8)`) so citation navigation always has a target; the over-time bar chart is zero-padded to a 7-bar minimum using only real backend values | **LOCKED** (implemented; see `DECISIONS.md`) | Implemented |
+| D-AI-03 | Real LLM provider: Anthropic primary + local/mock fallback | **NEEDS HUMAN DECISION** (API budget/key) | Not built — deferred past Phase 4, no target phase fixed; Phase 6's `_get_provider()` is the seam that decision plugs into once made |
 | D-AI-09 | Persistence vs. stateless generation: regenerate narratives on request, no caching table | **LOCKED** (implemented — `explain_case` persists nothing; see INV-63) | Implemented |
 | D-AI-11 | Shadow-model inclusion: build, strictly observational | **RECOMMENDED** | Not built — Phase 7 |
 | D-AI-14 | Branch strategy: `ai-layer`, forked from clean `main`, no sub-branches | **LOCKED** (satisfied) | Satisfied |
@@ -995,7 +1295,7 @@ since it describes a UI flow that does not exist yet.
 
 ## 21. Risk Register
 
-| Risk | Status at Phase 0-5 |
+| Risk | Status at Phase 0-6 |
 |---|---|
 | AI write-path creep | Mitigated by the static, CI-enforced import-boundary test — present and green, covers every module including `narrative.py` and `providers/` |
 | PII leakage into AI evidence | Mitigated by an explicit allowlist + passing content-substring tests; `Counterparty` is never queried; `torque.ai.prompts` serializes only the same already-redacted DTOs, never a superset |
@@ -1007,9 +1307,12 @@ since it describes a UI flow that does not exist yet.
 | A provider hallucinating/misreporting its own identity, the case it's explaining, or the prompt version used | Mitigated (Phase 4) — `explain_case` never trusts these fields from the provider; always orchestrator-stamped after validation; proven with a provider configured to lie (`wrong_case_id=True`) |
 | A malformed/failing/adversarial provider response corrupting the caller or leaking internals | Mitigated — every failure mode converges on one exception type (`NarrativeGenerationError`), the raw provider exception is chained for local debugging only, never in the top-level message; the deterministic evidence path is entirely unaffected by a generation failure |
 | Prompt injection against the deterministic mock path | Mitigated and tested end-to-end (fixed system message, JSON-escaped evidence, `rindex`-robust envelope parsing surviving a delimiter-embedding attempt) — **explicitly NOT validated against a real language model**, since none is integrated; real-provider adversarial testing remains an optional future lane (§12) |
-| Hallucination / unsupported-claim *rate* against the deterministic `MockProvider` path | Measured (Phase 5) — `unsupported_claim_rate = 0.000` across the 6-case evaluation set, via the deterministic lexical-overlap proxy (`_OVERLAP_THRESHOLD = 0.2`, empirically calibrated — see D-144). **Explicitly not semantic entailment** — a real model's actual hallucination rate remains unmeasured until a real provider exists (Phase 6+ decision, D-AI-03) |
+| Hallucination / unsupported-claim *rate* against the deterministic `MockProvider` path | Measured (Phase 5) — `unsupported_claim_rate = 0.000` across the 6-case evaluation set, via the deterministic lexical-overlap proxy (`_OVERLAP_THRESHOLD = 0.2`, empirically calibrated — see D-144). **Explicitly not semantic entailment** — a real model's actual hallucination rate remains unmeasured until a real provider exists (still an open, unresolved decision after Phase 6, D-AI-03) |
 | The lexical-overlap proxy misclassifying a genuinely-unsupported claim as supported, or vice versa, due to surface-level token overlap rather than true entailment | A real, tracked risk (not eliminated) — mitigated only insofar as the calibration was verified against both the real `MockProvider` output and the task's own illustrative BAD example; LLM-as-judge is the documented, deliberately-deferred mitigation with no target phase (D-144) |
 | Shadow-model overclaiming, real-provider outage/latency | Not yet applicable — no real provider exists, no shadow model exists |
+| **(Phase 6, new surface)** A citation id becoming an injected/arbitrary DOM selector | Mitigated — `focusCitation()` validates against a strict `^case_event:(\d+)$` pattern *before* any selector is built; a non-matching id never reaches `querySelector` at all, it falls back to a toast. Tested at the source level (`test_ui_citation_click_navigates_to_the_existing_event_timeline`); every real citation id Phase 2 ever produces is one of exactly five fixed `source_type` prefixes, none of which can contain selector metacharacters by construction |
+| **(Phase 6, new surface)** The AI API's own error responses leaking a raw provider exception, a Python module path, or a stack trace to an unauthenticated-by-this-layer caller | Mitigated — every `HTTPException.detail` in `torque.api.ai` is a fixed, hand-written string; the frontend independently never interpolates `e.message` in the AI panel either (belt-and-suspenders — a backend wording change alone cannot leak new detail through the UI). Tested both ways: `test_explain_provider_failure_maps_to_5xx_without_leaking_internals` / `test_explain_fabricated_citation_maps_to_5xx` at the API layer, `test_ui_ai_error_states_never_leak_raw_exception_text` at the UI layer |
+| **(Phase 6, new surface)** The AI endpoint becoming a de facto write path via a future careless change (e.g. someone adding a "save this narrative" button later) | Mitigated today by construction (one `GET` route, `explain_case` itself writes nothing) and proven (`test_explain_performs_no_write`) — **not** mitigated by any NEW structural gate beyond what Phases 0/4 already built; a future write feature would need its own explicit read/write boundary decision, not an assumption that this endpoint's current read-only-ness is permanent by default |
 
 ## 22. Explicit Non-Goals
 
@@ -1023,25 +1326,39 @@ program to date; no global citation registry or citation database table; no
 change to `main` until the Integration Gate passes and the maintainer
 performs the merge.
 
+**Reaffirmed after Phase 6 specifically:** no write endpoint was added to
+`torque.api.ai` (one `GET` route, nothing else); no real, network-backed LLM
+provider was introduced; no evaluation-results API or UI was built (Phase 5's
+`EvaluationReport` remains test-only); no new frontend framework/build step
+(the Agent Console's AI panel is the same hand-written, no-build vanilla-JS
+SPA every other view already is); no browser/e2e test harness was
+introduced; no shadow ML; no embeddings; no vector database; no demo-seed
+data was redesigned or rebalanced to make the dashboard graph look better —
+the graph fix is presentation-only (§9b).
+
 ## 23. Future Path Toward the 500+ Resolved-Case Learned Model
 
-Updated from the prior research phase: **TODAY** is Phase 0-5 as
+Updated from the prior research phase: **TODAY** is Phase 0-6 as
 implemented — a read-only evidence foundation, a resolvable citation
 primitive, a deterministic same-merchant precedent search, a real,
 citation-grounded, provider-agnostic LLM narrative-generation capability
-(`MockProvider`-backed, no real language model integrated), and a
-deterministic faithfulness-evaluation layer turning that generation
-capability's pass/fail citation gate into measured statistics
-(`EvaluationReport`). Nothing is predictive yet, and nothing generated or
-evaluated is exposed to a human anywhere — neither `explain_case` nor
-`evaluate_narrative` has a caller outside its own test suite. **Phase 6-9**
-(this document's roadmap) is what remains for a hackathon demo — Agent
-Console integration (an actual "Explain this case" button, plausibly
-surfacing evaluation metrics alongside the narrative), an honestly-caveated
-shadow model, adversarial hardening, and demo polish. **FUTURE
+(`MockProvider`-backed, no real language model integrated), a deterministic
+faithfulness-evaluation layer turning that generation capability's
+pass/fail citation gate into measured statistics (`EvaluationReport`, still
+test-only), and — new in Phase 6 — a real, working, human-facing path to
+`explain_case`: one read-only API route consumed by an Agent Console panel
+with live citation-to-audit-trail navigation, verified end to end against
+the seeded `acc_demo` dataset. Nothing is predictive yet.
+`evaluate_narrative`/`EvaluationReport` still has no caller outside its own
+test suite — Phase 6 gave `explain_case` a human-facing surface, not
+`evaluate_narrative`. **Phase 7-9** (this document's roadmap) is what
+remains for a hackathon demo — an honestly-caveated shadow model,
+adversarial hardening (including the first real-provider-vs-prompt-
+injection testing this program has ever done), and demo polish. **FUTURE
 PRODUCTION** requires real channel adapters shipping, real merchant traffic
-accumulating real outcomes, a real LLM provider decision (deferred, D-142),
-and crossing the blueprint's own 500-resolved-case threshold (Blueprint
-§8.4) before any learned signal is even considered for wiring into
-`priority()` — and that wiring, if it ever happens, is its own future,
-separately approved phase, not something this program authorizes.
+accumulating real outcomes, a real LLM provider decision (deferred, D-AI-03
+— Phase 6's `_get_provider()` is the seam it plugs into), and crossing the
+blueprint's own 500-resolved-case threshold (Blueprint §8.4) before any
+learned signal is even considered for wiring into `priority()` — and that
+wiring, if it ever happens, is its own future, separately approved phase,
+not something this program authorizes.

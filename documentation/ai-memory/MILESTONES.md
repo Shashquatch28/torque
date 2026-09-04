@@ -2607,6 +2607,173 @@ explicitly-assigned §10.8 human-resolution write path.)*
 
 ---
 
+## AI Phase 6 — Agent Console Integration — COMPLETE
+
+- **Branch:** `ai-layer`. **Not on `main`.**
+- **Verified before starting:** `git status`/`git branch --show-current`
+  confirmed `ai-layer`, clean tree on top of the Phase 5 commit.
+  `src/torque/ai/narrative.py::_validate_citations`,
+  `src/torque/state_machine.py`, and `src/torque/models/guards.py` were
+  re-read and confirmed unchanged from what the Phase 5 report described —
+  none touched by this phase either.
+- **Objective:** give `explain_case` (fully built since Phase 4, no caller
+  outside its own test suite) its first real caller — one read-only HTTP
+  route consumed by one Agent Console panel, with citation navigation into
+  the case's existing audit trail — without redesigning Phases 0-5, without
+  any AI write path, and without a real LLM provider.
+- **Files created:**
+  - `src/torque/api/ai.py` — `GET /ai/{merchant_id}/cases/{case_id}/explain`.
+    `_require_merchant`, `_get_provider` (the single `MockProvider()`
+    construction site), the `explain` handler: `AISettings.enabled` check
+    (`503` if off) -> `explain_case` -> `EvidenceNotFoundError` -> `404` /
+    `NarrativeGenerationError` -> `502`, every `HTTPException.detail` a
+    fixed hand-written string.
+  - `tests/test_ai_api.py` — 10 tests.
+- **Files modified:**
+  - `src/torque/api/app.py` — registers `ai_router`; docstring surface list
+    updated.
+  - `src/torque/ui/static/torque.js` — an "Explain this case" button +
+    `#aiPanel` in `renderConsolePane`; `citationLabel`/`citeGroup`/
+    `claimLine`/`claimList`/`renderPrecedent`/`renderNarrative`/
+    `explainCase`/`focusCitation` (new); `renderEvent`'s `<li>` now carries
+    `data-event-seq="${e.event_seq_id}"`; `renderConsolePane`'s audit trail
+    now renders every event, not `events.slice(-8)` (needed so a citation
+    to an older event always has a DOM target — see Deviations);
+    `barChart()` now left-pads a sparse series to a 7-bar minimum with
+    honest zero-recovery days (the dashboard graph fix — see below).
+  - `src/torque/ui/static/torque.css` — `.ai-narrative`/`.ai-block`/
+    `.ai-summary`/`.claims`/`.cite`/`.cite-hit`/`.ai-loading`/`.ai-error`/
+    `.ai-meta` (new rules only; nothing existing changed).
+  - `tests/test_module10_ui.py` — 6 new tests + a `_strip_js_comments`
+    helper (module docstring extended to describe the Phase 6 additions).
+  - `documentation/ai-memory/{AI_BLUEPRINT.md, DECISIONS.md,
+    INVARIANTS.md}` — Phase 6 documentation (this entry, D-145, and — only
+    if a genuinely new permanent property was found — a new invariant; see
+    below).
+- **Architecture:**
+  ```
+  Agent Console (human queue -> case pane)
+      -> "Explain this case" (on demand only, never on page load)
+      -> GET /ai/{merchant_id}/cases/{case_id}/explain
+      -> AISettings.enabled? no -> 503, nothing else touched
+      -> explain_case()  (Phase 4, unmodified)
+      -> CaseNarrative (JSON)
+      -> rendered in the same case pane; every citation is a button;
+         clicking one locates <li data-event-seq="N"> already in the
+         audit trail below it, scrolls it into view, flashes it
+  ```
+- **Feature flag / provider:** `AISettings.enabled` (Phase 0/4, unmodified)
+  read via `Depends(get_ai_settings)`; disabled -> `503` before any
+  merchant lookup. `MockProvider` remains the only concrete provider —
+  `_get_provider()` is the one seam a future real provider replaces. No new
+  configuration setting was added (`TORQUE_AI_PROVIDER` remains
+  deliberately unadded, per D-142/D-AI-03 — still nothing to select
+  between).
+- **Database dependency:** no `get_ai_db` was needed or built — the
+  endpoint uses the existing `Depends(get_db)`, the same dependency every
+  other read endpoint in `torque.api` uses. No second session/DB
+  architecture.
+- **Dashboard graph investigation and fix:** investigated per the task's
+  own order — what graph (`recovery-over-time`, per the blueprint), what
+  backend data (`GET /reports/{merchant_id}/over-time?bucket=day`, already
+  correct and complete), does the API return what's needed (yes), so the
+  defect had to be data-shape-vs-rendering — confirmed live: the seeded
+  demo's Torque-credited recoveries cluster into one UTC day, so
+  `barChart()`'s `flex:1` stretched a single bar to the panel's full
+  width. **No backend change was needed or made** — `recovery_over_time`
+  is untouched. Fix: `barChart()` left-pads a sparse series with explicit,
+  honest zero-recovery days (a day with no recovery genuinely recovered
+  ₹0) up to a 7-bar minimum before rendering exactly as before. Verified
+  live against the real seeded `acc_demo` dataset: before the fix, exactly
+  1 bar at 118px covering the full container width; after, 7 bars
+  (`9/9`…`15/9`), 6 real zero-height bars and the one real bucket at its
+  correct relative height. No demo-seed data was touched.
+- **Documentation-artifact audit:** grepped `index.html`/`torque.js`/
+  `torque.css` for `§`/`Module N`/`Phase N`/`Blueprint` before changing
+  anything (per the task's own instruction to investigate before acting).
+  **Finding: zero instances rendered anywhere** — every occurrence lives
+  inside a `//`/`/* */` source comment, never in a template-literal string
+  assigned to `innerHTML` or any other user-facing surface; confirmed both
+  by source inspection and by rendering the live dashboard, cases list,
+  case detail, Agent Console, and demo views end to end. **No cleanup edit
+  was made because none was needed** — reported as a zero-finding audit,
+  not skipped, and made a standing, enforced fact going forward via
+  `tests/test_module10_ui.py::test_ui_has_no_documentation_artifacts_outside_comments`.
+- **Live verification (not just automated tests):** ran the real app
+  (`docker compose up -d db redis`, `uv run alembic upgrade head`,
+  `TORQUE_AI_ENABLED=true uv run python -m torque`) against the real
+  seeded `acc_demo` merchant and drove it through the Browser pane:
+  - Agent Console -> selected the escalated "Tara Menon" subscription-
+    failure case -> clicked "Explain this case" -> a real narrative
+    rendered: summary, current-state and root-cause claims each citing
+    "Case snapshot", a three-entry timeline citing "Event 658" / "Event
+    659" / "Event 660", "None recorded" for actions taken, an honest "No
+    comparable resolved case exists yet for this root cause" precedent
+    section, a recommended-attention note, an uncertainty/evidence-gap
+    statement, and a `Generated ... · mock:deterministic-v1 ·
+    narrative-v1` footer.
+  - Clicked the "Event 658" citation — confirmed via direct DOM inspection
+    that `li[data-event-seq="658"]` gained the `.cite-hit` flash class
+    immediately (the exact core-demo-moment behavior the task asked for).
+  - Clicked the "Case snapshot" citation (a non-`case_event` reference,
+    which has no per-row DOM target) — confirmed it fell back to a toast
+    ("Referenced: Case snapshot") rather than a broken navigation or an
+    error.
+  - Confirmed the dashboard's "Recovery over time" panel rendered 7 bars
+    (not 1) with correct relative heights via `getComputedStyle`/DOM
+    inspection.
+  - Confirmed no case/action/event state changed by this session's own
+    interaction (`tests/test_ai_api.py::test_explain_performs_no_write`
+    plus a direct before/after read of the same case's row).
+  - The AI-disabled (`503`) UI copy path was verified by code + by
+    `tests/test_ai_api.py::test_explain_ai_disabled_returns_503_without_touching_anything`,
+    not by a second live server toggle (would have required tearing down
+    the working, already-verified `TORQUE_AI_ENABLED=true` session).
+- **Deliberately not built** (per the task's explicit scope): Phase 7
+  shadow ML; embeddings; vector DB; ML training; LLM-as-judge; any
+  autonomous/AI-controlled action or state transition; any new write
+  endpoint; a new frontend framework or build step; a real external LLM
+  provider; a browser/e2e test harness; any demo-data redesign; any
+  API/UI surface for `EvaluationReport` (Phase 5 remains test-only).
+- **`state_machine.py` / `guards.py` / `narrative.py::_validate_citations`
+  / `tests/test_ai_boundary.py`:** all byte-unchanged vs. the Phase 5
+  commit (`git diff` empty for each).
+- **Tests at completion:** `tests/test_ai_api.py` — **10** passed (new).
+  `tests/test_module10_ui.py` — **10** passed (4 pre-existing + 6 new).
+  The `tests/test_ai_*.py` family (9 files, including the new
+  `test_ai_api.py`) — **123** passed. Full regression suite — **1359**
+  passed (was 1343 after Phase 5, **+16**), 0 failed, 0 skipped, the same
+  1 pre-existing cosmetic `StarletteDeprecationWarning`. `ruff check .`
+  clean. `alembic upgrade head` -> `0018` (no-op — no migration); roundtrip
+  green (`tests/test_zz_migrations_roundtrip.py`, 1 passed).
+- **Verification status:** complete + verified — `uv run pytest
+  tests/test_ai_api.py -q` (10 passed), `uv run pytest tests/test_ai_api.py
+  tests/test_ai_evaluation.py tests/test_ai_narrative.py
+  tests/test_ai_providers.py tests/test_ai_retrieval.py
+  tests/test_ai_citations.py tests/test_ai_evidence.py
+  tests/test_ai_boundary.py tests/test_ai_config.py -q` (123 passed),
+  `uv run pytest -q` (full suite, 1359 passed), `uv run ruff check .`
+  (clean, repository-wide), `uv run alembic upgrade head` (succeeds, no new
+  migration; head `0018_escalation_resolution`), `uv run pytest
+  tests/test_zz_migrations_roundtrip.py -q` (1 passed), `git diff --check`
+  (clean — only pre-existing CRLF/LF advisories), `git diff --
+  src/torque/state_machine.py src/torque/models/guards.py` (both empty).
+- **Deviations from the literal task wording (all additive, all
+  documented):** `renderConsolePane`'s audit trail now renders every event
+  instead of the pre-existing `events.slice(-8)` — a small, necessary
+  adjustment (not a redesign) so a citation to an event older than the
+  last 8 always has a DOM target to navigate to; `503` (not an explicitly
+  pre-existing repository convention, since none existed for "a GET route
+  behind a disabled feature flag") chosen as the closest fit to
+  `torque.api.health`'s existing readiness-probe convention, recorded as
+  D-145 rather than invented silently; the live-verified demo corpus size
+  is 22 cases (not a fixed "16"), measured directly rather than assumed —
+  see AI_BLUEPRINT.md §9a's reconciliation note.
+- **Recommended commit message:**
+  `AI Phase 6: Agent Console integration — GET /ai/{merchant_id}/cases/{case_id}/explain (D-145), Explain-this-case narrative panel + citation-to-audit-trail navigation, dashboard over-time graph zero-padding fix, documentation-artifact audit (zero findings); read-only end to end, zero deterministic-core changes, no migration`
+
+---
+
 ## (historical) What came next after Module 10
 
 **Module 10 — UI/UX — COMPLETE.** Torque is now a runnable, demo-able product:

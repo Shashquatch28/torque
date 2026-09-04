@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "torque-api",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "python", "-m", "torque"],
+      "port": 8000
+    }
+  ]
+}

@@ -232,9 +232,31 @@ function incrementalityCard(inc) {
   </div>`;
 }
 
+// `series` is real backend buckets (one entry per day that has ANY
+// recovered amount, ascending) from /reports/{m}/over-time?bucket=day — this
+// function never invents a value. With few real buckets a naive render
+// stretches a single bar to the full container width (flex:1 on one child),
+// which reads as a decorative block rather than a trend. To keep the chart
+// legible at a glance regardless of how sparse the real data is, left-pad
+// with explicit zero-recovery days immediately before the earliest real
+// bucket (a day with no recovery genuinely recovered ₹0 — this is not a
+// fabricated number, just the true value for days the backend has no row
+// for) up to a minimum bar count, then render the same way as before.
+const MIN_BARS = 7;
 function barChart(series) {
-  const max = Math.max(...series.map((s) => Number(s.recovered_amount)), 1);
-  return `<div class="bars">${series.slice(-14).map((s) => {
+  let padded = series;
+  if (padded.length && padded.length < MIN_BARS) {
+    const earliest = new Date(padded[0].bucket_start);
+    const filler = [];
+    for (let i = MIN_BARS - padded.length; i >= 1; i--) {
+      const d = new Date(earliest);
+      d.setUTCDate(d.getUTCDate() - i);
+      filler.push({ bucket_start: d.toISOString(), recovered_amount: "0" });
+    }
+    padded = filler.concat(padded);
+  }
+  const max = Math.max(...padded.map((s) => Number(s.recovered_amount)), 1);
+  return `<div class="bars">${padded.slice(-14).map((s) => {
     const h = Math.round((Number(s.recovered_amount) / max) * 118);
     const d = new Date(s.bucket_start);
     return `<div class="bar" title="${rupeesExact(s.recovered_amount)} on ${d.toDateString()}">
@@ -364,11 +386,110 @@ function renderEvent(e) {
     extra = `<span class="why">${titleize(p.from_status)} → ${titleize(p.to_status)}</span>`;
   else if (e.event_type === "HUMAN_RESOLVED")
     extra = `<span class="why">${titleize(p.resolution)} by ${esc(p.agent_id)}</span>`;
-  return `<li class="${cls}">
+  return `<li class="${cls}" data-event-seq="${e.event_seq_id}">
     <div class="ts">${when(e.timestamp)} &middot; #${e.event_seq_id} &middot; ${e.actor}</div>
     <div class="ev">${titleize(e.event_type)}</div>
     ${e.reasoning ? `<div class="why">${esc(e.reasoning)}</div>` : extra}
   </li>`;
+}
+
+// --- AI case explanation (Phase 6) --------------------------------
+// Read-only decision support: a citation-grounded narrative fetched only on
+// request (never on page load), rendered from the CaseNarrative schema
+// as-is — no parallel frontend representation, no chat UI. Every citation
+// resolves back to a row already shown in the audit trail below it.
+
+function citationLabel(id) {
+  const [type, ref] = String(id).split(":");
+  const names = {
+    case: "Case snapshot",
+    case_event: `Event ${ref}`,
+    action: `Action ${String(ref || "").slice(0, 8)}`,
+    promise: `Promise ${String(ref || "").slice(0, 8)}`,
+    counterparty_relationship: "Customer relationship",
+  };
+  return names[type] || String(id);
+}
+
+function citeGroup(ids) {
+  if (!ids || !ids.length) return '<span class="faint">(no citation)</span>';
+  return ids.map((id) =>
+    `<button type="button" class="cite" data-cite="${esc(id)}">${esc(citationLabel(id))}</button>`
+  ).join(" ");
+}
+
+function claimLine(nc) {
+  return `<p class="claim">${esc(nc.claim)} ${citeGroup(nc.citation_ids)}</p>`;
+}
+function claimList(arr) {
+  if (!arr.length) return '<div class="faint">None recorded.</div>';
+  return `<ul class="claims">${arr.map((nc) =>
+    `<li>${esc(nc.claim)} ${citeGroup(nc.citation_ids)}</li>`).join("")}</ul>`;
+}
+
+function renderPrecedent(p) {
+  if (!p.found || !p.cases.length) {
+    return `<div class="empty">${esc(p.note)}</div>`;
+  }
+  return `<table><thead><tr><th>Case</th><th>Root cause</th><th>Outcome</th>
+    <th>Evidence</th></tr></thead><tbody>
+    ${p.cases.map((pc) => `<tr>
+      <td class="faint mono">${esc(pc.case_id).slice(0, 8)}</td>
+      <td>${titleize(pc.root_cause_code)}</td>
+      <td>${pc.recovered ? '<span class="pill green">Recovered</span>' : '<span class="pill">Not recovered</span>'}
+        <span class="faint">${esc(pc.outcome_summary)}</span></td>
+      <td>${citeGroup([pc.evidence_id])}</td>
+    </tr>`).join("")}
+  </tbody></table>`;
+}
+
+function renderNarrative(n) {
+  return `
+  <div class="ai-narrative">
+    <p class="ai-summary">${esc(n.summary)}</p>
+    <div class="ai-block"><div class="ai-k">Current state</div>${claimLine(n.current_state)}</div>
+    <div class="ai-block"><div class="ai-k">Root cause</div>${claimLine(n.root_cause_explanation)}</div>
+    <div class="ai-block"><div class="ai-k">Timeline</div>${claimList(n.timeline)}</div>
+    <div class="ai-block"><div class="ai-k">Actions taken</div>${claimList(n.actions_taken)}</div>
+    ${n.guardrail_explanation.length ? `<div class="ai-block"><div class="ai-k">Guardrails</div>${claimList(n.guardrail_explanation)}</div>` : ""}
+    <div class="ai-block"><div class="ai-k">Precedent</div>${renderPrecedent(n.precedent)}</div>
+    ${n.recommended_human_attention ? `<div class="ai-block"><div class="ai-k">Recommended attention</div><p>${esc(n.recommended_human_attention)}</p></div>` : ""}
+    <div class="ai-block"><div class="ai-k">Uncertainty</div><p class="faint">${esc(n.uncertainty)}</p></div>
+    ${n.evidence_gaps.length ? `<div class="ai-block"><div class="ai-k">Evidence gaps</div><ul class="why-lines">${n.evidence_gaps.map((g) => `<li>${esc(g)}</li>`).join("")}</ul></div>` : ""}
+    <div class="faint ai-meta">Generated ${when(n.generated_at)} &middot; ${esc(n.provider_id)} &middot; ${esc(n.prompt_version)}</div>
+  </div>`;
+}
+
+async function explainCase(m, caseId, pane) {
+  const btn = pane.querySelector("#doExplain");
+  const out = pane.querySelector("#aiPanel");
+  btn.disabled = true;
+  out.innerHTML = '<div class="ai-loading">Generating explanation&hellip;</div>';
+  try {
+    const n = await api(`/ai/${m}/cases/${caseId}/explain`);
+    out.innerHTML = renderNarrative(n);
+  } catch (e) {
+    let msg = "Could not generate an explanation right now.";
+    if (e.status === 503) msg = "AI explanations are not enabled for this deployment.";
+    else if (e.status === 404) msg = "This case could not be found.";
+    else if (e.status >= 500) msg = "The AI explanation could not be generated for this case.";
+    out.innerHTML = `<div class="ai-error">${esc(msg)}</div>`;
+  }
+  btn.disabled = false;
+}
+
+// A citation id is only ever `source_type:source_id` from Phase 2's own
+// scheme (torque.ai.schemas.EvidenceReference.reference_id) — validated with
+// a strict pattern before it ever becomes part of a CSS selector, so a
+// citation string can never be used to inject an arbitrary selector.
+function focusCitation(id) {
+  const m = /^case_event:(\d+)$/.exec(String(id));
+  if (!m) { toast("Referenced: " + citationLabel(id)); return; }
+  const li = view.querySelector(`li[data-event-seq="${m[1]}"]`);
+  if (!li) { toast(`Event #${m[1]} is not shown in this view`); return; }
+  li.scrollIntoView({ behavior: "smooth", block: "center" });
+  li.classList.add("cite-hit");
+  setTimeout(() => li.classList.remove("cite-hit"), 1600);
 }
 
 // --- Agent Console (§10.7 / 10.8) --------------------------------
@@ -434,8 +555,17 @@ async function renderConsolePane(caseId) {
       <button id="doUnpause" ${canUnpause ? "" : "disabled"}>Un-pause</button>
     </div>
     <div class="faint" style="margin-top:6px">Resolve is available only for an escalated case; pause only for one still in a playbook.</div>
+    <div class="rowflex mt"><h2>AI explanation</h2>
+      <button id="doExplain">Explain this case</button></div>
+    <div id="aiPanel"></div>
     <h2 class="mt">Audit trail</h2>
-    <ul class="timeline">${events.slice(-8).map(renderEvent).join("")}</ul>`;
+    <ul class="timeline">${events.map(renderEvent).join("") || '<li class="empty">No events</li>'}</ul>`;
+
+  $("#doExplain").onclick = () => explainCase(m, caseId, pane);
+  pane.querySelector("#aiPanel").addEventListener("click", (e) => {
+    const chip = e.target.closest("[data-cite]");
+    if (chip) focusCitation(chip.dataset.cite);
+  });
 
   const act = async (path, body) => {
     try {

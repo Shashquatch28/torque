@@ -786,6 +786,30 @@ violation**.
   id, case ids, amounts, statuses, outcomes, or counts are read or exposed. The
   cohort inputs (`in_control_cohort` / `control_group`) are never written.
   `tests/test_module9b_api.py`, `tests/test_module9b_sutva.py`.
+- **AI Phase 6 extension:** `GET /ai/{merchant_id}/cases/{case_id}/explain`
+  (`torque.api.ai`) follows the same rules, on top of the AI package's own
+  independent, structurally-enforced read-only boundary (INV-60):
+  GET-only (one route, no other HTTP method registered); tenant-scoped —
+  not by a new mechanism, but inherited unchanged from `explain_case`'s own
+  use of `gather_case_evidence`/`find_precedent` (both already
+  `TenantScope`d, INV-60/62), proven at the HTTP boundary by
+  `tests/test_ai_api.py::test_explain_cross_tenant_case_is_404_not_a_leak`;
+  read-only, proven the same way Module 9b's cross-merchant SUTVA read was
+  — a real before/after row-count (`CaseEvent`) plus a
+  `db.new`/`.dirty`/`.deleted` check across a real HTTP request
+  (`tests/test_ai_api.py::test_explain_performs_no_write`), not merely
+  asserted from the handler's own shape. Disabled (`AISettings.enabled=
+  False`) short-circuits to `503` before even a merchant lookup happens —
+  `tests/test_ai_api.py::test_explain_ai_disabled_returns_503_without_touching_anything`.
+  Two respects in which this extension differs from every prior one in this
+  entry, both by design and both already covered elsewhere: the response is
+  not fully deterministic call-to-call (`CaseNarrative.generated_at` is a
+  real timestamp, orchestrator-stamped — see INV-63), and its data derives
+  from a generation step rather than a pure aggregation — but every claim
+  and citation in that generation is still validated against authoritative
+  evidence before being returned (INV-63), so "derived, not authoritative"
+  still holds in substance: nothing in the response is a fact the AI
+  invented.
 
 ## INV-59 — Agent Console human overrides use only legal edges, tenant-scoped, guarded (Module 10)
 - **Domain:** `torque.agent_console.resolve` / `torque.api.agent_console`.

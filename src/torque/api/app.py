@@ -14,6 +14,8 @@ work, no background tasks. Surfaces:
   (recovery report, top-at-risk, human queue, activity feed) — see `reporting.py`.
 * `POST /agent-console/{merchant_id}/...`     — Module 10 human overrides
   (resolve / pause / unpause) — see `agent_console.py`.
+* `GET  /ai/{merchant_id}/cases/{case_id}/explain` — Phase 6 read-only AI case
+  narrative (citation-grounded, `TORQUE_AI_ENABLED`-gated) — see `ai.py`.
 * `POST /demo/...` , `GET /demo/...`          — Module 10 Demo Surface controls
   (seed + one-click synthetic scenarios) — see `demo.py`.
 * `GET  /` , `/ui/`                           — the Module 10 static UI shell —
@@ -25,6 +27,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 
 from torque.api.agent_console import router as agent_console_router
+from torque.api.ai import router as ai_router
 from torque.api.checkout_injection import router as checkout_injection_router
 from torque.api.demo import router as demo_router
 from torque.api.health import router as health_router
@@ -42,6 +45,7 @@ def create_app() -> FastAPI:
     app.include_router(checkout_injection_router)
     app.include_router(reporting_router)
     app.include_router(agent_console_router)
+    app.include_router(ai_router)
     app.include_router(demo_router)
     app.include_router(ui_router)
     mount_ui(app)

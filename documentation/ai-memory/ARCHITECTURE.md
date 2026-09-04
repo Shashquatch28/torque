@@ -27,8 +27,8 @@ Do not describe `PLANNED` / `DEFERRED` behaviour as if it exists.
 | 6 — Compliance & Cross-Leg Guardrail Engine | `GuardrailEngine.check()`, Outreach Coordinator, escalation ceiling, human queue | **`IMPLEMENTED` (Module 6 complete)** — `torque.coordination` package: the `GuardrailEngine` facade (§6.2, returns the four-way `GuardDecision` — D-097); the Outreach Coordinator (4h cross-leg quiet period, live merge in the poll batch, defer, open-conversation — Part A §5); the full WhatsApp gate (opt-in + approved UTILITY template + open-conversation suspend); §6.3 escalation-ceiling → `ESCALATED_TO_HUMAN` in the runner tick; the persistent `human_queue` table (migration 0016) + three feeders. `priority()` is the Module 8 seam (D-098). See §8F |
 | 7 — Reconciliation & Attribution | match payments → cases, `AGENT_ASSISTED` vs `SELF_RECOVERED`, write `credit_weight` | **`IMPLEMENTED` (Module 7 complete)** — `torque.reconciliation`: `reconcile_event()` matches a verified success `Event` (§7.1: direct `PaymentLink` → indirect `(merchant, cp, amount)` → merged-set re-split / `AMBIGUOUS` → `DETECTED/DIAGNOSING → CANCELLED` self-pay); closes cases (§7.2: `RECOVERED` / B2B `PARTIALLY_RECOVERED` with invoice waterfall) + `PAYMENT_RECONCILED`; `recovery_type` / `recovered_amount` via `module7_writer`. Wired into `webhooks.py` (D-104). **`state_machine.py` gained the two U-01 edges** (D-103); no migration. See §8G |
 | 8 — Recovery Scoring | `(probability × amount) ÷ cost`, cold-start lookup | **`IMPLEMENTED` (Module 8 complete)** — `torque.scoring` package: `cold_start_probability` (Decision F's exact 8-value table as a live function), `warm_start_multiplier` (§8.2 linear map, clamped 0.5×–1.3×, D-110), `compute_cost` (forward `ChannelRateCard` sum for the next playbook step, zero-cost floors — D-111), `compute_recovery_score` / `RecoveryScore` (the one formula + §8.7 explainability). Persisted on `revenue_leak_case.recovery_score` / `_breakdown` / `_updated_at` (migration **0017**, D-109). Recompute on creation / diagnosis / daily (D-112). `priority()` seam now returns it (D-113). See §8H |
-| 9 — Reporting & Measurement | ₹ recovered, incrementality lift + CI, exception list | `PLANNED` |
-| 10 — UI/UX | merchant dashboard, agent console, demo surface | `PLANNED` |
+| 9 — Reporting & Measurement | ₹ recovered, recovery rate, by leg/intervention/outcome/time, exception list, case drill-down | **`IMPLEMENTED` (Module 9 complete)** — `torque.reporting` (`metrics.py` derivations + `schemas.py` pydantic contract) + read-only `torque.api.reporting` router (8 `GET` endpoints). Outcome-based (D-116: `recovered_amount` = `recovery_type != SELF_RECOVERED`; `SELF_RECOVERED` reported separately). **No migration** — pure read/derive over the domain tables (D-114). Module 7 stays authoritative for attribution. Incrementality lift / Wilson CI / SUTVA-adjusted lift **deferred** (D-121 / U-10). See §8I |
+| 10 — UI/UX | merchant dashboard, agent console, demo surface | **`IMPLEMENTED` (Module 10 complete)** — a hand-written static SPA (`src/torque/ui/static/`) mounted at `/ui` by `create_app()` (one process, `uv run python -m torque` — D-122); `torque.agent_console` (human resolve/pause/unpause — INV-59, migration **0018** for `escalation_resolution` — D-123); `torque.demo` (deterministic `acc_demo` seed + one-click Decision-K scenarios — D-124/125); Module 9 reporting gains `top-at-risk` / `human-queue` / `activity` + the case-detail score breakdown. `state_machine.py` unchanged; `guards.py` gains `human_resolution_writer`. See §8J |
 | 11 — Tech Stack & Infra | Temporal / BullMQ / polling fallback | `PLANNED` |
 | 12 — Build Roadmap | phase plan (no calendar dates — Part D item 3) | `PLANNED` / `UNRESOLVED` |
 | 13 — Demo Script | judging narrative | `PLANNED` |
@@ -397,13 +397,23 @@ Enum + coherence CHECK only. Webhook-driven transitions are Module 2/7.
 
 ---
 
-## 8A. HTTP surface — `IMPLEMENTED` — the Module 2 routes
+## 8A. HTTP surface — `IMPLEMENTED` — Module 2 ingestion + Module 9/10 reporting + Module 10 console/demo/UI
 
-`src/torque/api/` (M7a + the Module-2 completion run):
+`src/torque/api/` (M7a + the Module-2 completion run + Modules 9–10):
 
 - **`app.py`** — `create_app() -> FastAPI`. Routes only, no startup work.
-  `GET /health` → `{"status": "ok"}`. Includes the webhook router **and the
-  checkout-injection router**. FastAPI auto-docs left enabled.
+  `GET /health` → `{"status": "ok"}`. Includes the webhook, checkout-injection,
+  reporting, **agent-console**, and **demo** routers; **`mount_ui(app)`** attaches
+  the static SPA at `/ui`. FastAPI auto-docs left enabled.
+- **`agent_console.py`** (Module 10) — `POST /agent-console/{merchant_id}/cases/
+  {case_id}/{resolve|pause|unpause}`. Thin: HTTP ↔ `torque.agent_console.resolve`;
+  `CaseNotFoundError` → 404, `HumanResolutionError` / `IllegalTransitionError` →
+  409. `get_db` commits a successful override. INV-59.
+- **`demo.py`** (Module 10) — `POST /demo/seed?reset=`, `GET /demo/scenarios`,
+  `POST /demo/inject/{key}`, `GET /demo/merchant`. Operates only on `acc_demo`.
+- **`ui.py`** (Module 10) — `GET /` → 307 `/ui/`; `mount_ui` = `StaticFiles(
+  directory=src/torque/ui/static, html=True)` at `/ui`. Hash-router SPA; no
+  Node, no build (D-122).
 - **`deps.py`** — `get_db()` request dependency: yields a `SessionLocal` session
   (guards wired), commits on clean return, rolls back on exception, always
   closes. Overridden in tests to yield the harness's joined-transaction session.
@@ -425,6 +435,17 @@ Enum + coherence CHECK only. Webhook-driven transitions are Module 2/7.
   **dedicated** `Settings.checkout_injection_secret` and `X-Torque-Signature` /
   `X-Torque-Event-Id` headers; writes one `Event(type="checkout.abandoned")` +
   enqueues `create_checkout_case_task`. D-074.
+- **`reporting.py`** (Module 9) — a **read-only** `APIRouter`
+  (`prefix="/reports/{merchant_id}"`, `tags=["reporting"]`). 8 `GET` endpoints:
+  `/summary`, `/report` (the §9.4 batch bundle), `/by-intervention`
+  (`?by=leg|action_type`), `/over-time` (`?bucket=day|week|month`,
+  `?closed_from`/`?closed_to`), `/exceptions`, `/cases` (paginated, `?leg`
+  `?status` `?opened_from`/`?opened_to`), `/cases/{case_id}`,
+  `/cases/{case_id}/events` (the explainability stream). `_require_merchant` →
+  404 for an unknown merchant; a cross-tenant `case_id` → 404 (the metrics layer
+  returns `None`); bad `leg`/`status` → 422. Delegates to `torque.reporting.
+  metrics` — no business logic in the router. `get_db` still commits on clean
+  return, but every handler issues only `SELECT`s.
 - **`src/torque/__main__.py`** — `python -m torque` → `uvicorn` (`--factory`),
   dev/preview only.
 - Deps: `fastapi`, `uvicorn[standard]` (runtime); `httpx` (dev, TestClient).
@@ -900,6 +921,108 @@ SHAP / uplift upgrade is 🔮 roadmap, §8.4 / Decision F).
 
 ---
 
+## 8I. Reporting & Measurement — `torque.reporting` + `torque.api.reporting` — `IMPLEMENTED` (Module 9)
+
+Turns the event stream + reconciliation outcomes into a business-level recovery
+report. **Pure read/derive — no persisted aggregate, no migration** (D-114): a
+reported number is always exactly what the live rows say, and is traceable
+aggregate → case → actions → `CaseEvent` stream (§9.8).
+
+- **`metrics.py`** — derivation functions, all tenant-scoped (`TenantScope` for
+  tenant models; `case_event` has no `merchant_id`, so it is filtered by a join
+  to `revenue_leak_case.merchant_id`, and the case is ownership-checked before
+  its stream is returned):
+  - `recovery_summary` (§9.2) — `case_count`, `revenue_at_risk` (D-115: non-B2B
+    `amount_at_risk`; B2B `Σ B2BInvoice.original_amount`), `recovered_amount`
+    (`recovery_type != SELF_RECOVERED` — D-116), `self_recovered_amount`
+    (separate), `unresolved_amount` / `blocked_amount` / `deferred_amount`
+    (D-118), `total_action_cost` (~0 until Module 5 populates `Action.cost`),
+    the case-count buckets, `recovery_rate` (cases) + `amount_recovery_rate`
+    (money) + `cost_efficiency_ratio` (D-117).
+  - `recovery_by_leg` (§9.1 / §9.5) — the primary "by intervention" grouping;
+    amount totals reconcile with the summary. `recovery_by_action_type` (§9.5
+    secondary — overlapping rows, D-120). `recovery_by_recovery_type` (§9.2
+    outcome). `recovery_over_time` (§9.2 — `date_trunc(bucket, closed_at)` UTC,
+    Torque-credited `RECOVERED`, half-open windows — D-119).
+  - `operational_exceptions` (§9.7) — `blocked_by_reason` (the §9.1 exception
+    list), `deferred_action/case_count` (`OUTREACH_COORDINATOR_DEFERRED` only —
+    pure timing defers write no `Action`), `failed_by_type`
+    (`FAILED`/`NO_RESPONSE`), `escalated_case_count` + `escalations_by_reason`
+    (`human_queue.reason`), `terminal_by_status`.
+  - `recovery_report` (§9.4) — the batch bundle (`summary` + `by_leg` +
+    `by_recovery_type` + `operational`) over one `opened_at` window.
+  - `list_cases` / `case_detail` (§9.10) — drill-down; `case_detail` carries a
+    per-action `ActionSummary` incl. this case's `ActionCase.credit_weight`
+    (Module 7's split, surfaced not recomputed). `case_event_stream` (§9.2) —
+    the raw `CaseEvent` stream in `event_seq_id` order (`reasoning` + `payload`).
+  - `ReportWindow(start, end)` — half-open `[start, end)`; naive datetimes read
+    as UTC. Applied to `opened_at` for batch membership, `closed_at` for the
+    time series — separate query params so the two are never confused (D-119).
+- **`schemas.py`** — frozen pydantic models; every money field a `Decimal`.
+  `RecoverySummary`, `LegBreakdown`, `InterventionBreakdown`, `OutcomeBreakdown`,
+  `TimeBucket`, `OperationalReport` (+ its row models), `CaseDetail` /
+  `ActionSummary`, `CaseList` / `CaseListItem`, `CaseEventEntry`,
+  `RecoveryReport`.
+- **`torque.api.reporting`** — the 8 `GET` endpoints (§8A).
+- **Attribution (§9.3):** Module 7 is authoritative — Module 9 reads
+  `recovery_type` / `recovered_amount` / `credit_weight`, never re-matches a
+  payment (INV-53).
+- **Descriptive, not causal (§9.6):** incrementality lift, the Wilson score CI,
+  and SUTVA-adjusted lift (Blueprint §9.1) are **`DEFERRED`** (D-121 / U-10 —
+  "Module 9b — Incrementality"). The `in_control_cohort` / `control_group` data
+  is collected and untouched.
+- **State machine / guards / migrations:** **none.** `alembic head` stays
+  `0017_recovery_score`; `git diff HEAD --` of `state_machine.py` and
+  `guards.py` empty.
+- **Module 10 extension:** the router also serves `GET /reports/{m}/top-at-risk`
+  (`top_at_risk_cases` — open cases `ORDER BY recovery_score DESC NULLS LAST`),
+  `/human-queue` (`human_queue_list` — `human_queue` rows joined to the case,
+  ordered by the entry's stored `priority`), `/activity` (`recent_activity` —
+  recent `CaseEvent`s, newest `event_seq_id` first). `case_detail` returns
+  `recovery_score_breakdown` (Module 8's §8.7 dict, verbatim),
+  `recovery_probability`, `counterparty_label`, `root_cause_code`, and the
+  `escalation_*` fields. Still GET-only, still `TenantScope`d (INV-58).
+
+---
+
+## 8J. UI/UX — `torque.ui` + `torque.agent_console` + `torque.demo` — `IMPLEMENTED` (Module 10)
+
+Makes Torque a runnable, demo-able product. `uv run python -m torque` serves the
+JSON API **and** a static dashboard on one port (`http://127.0.0.1:8000/ui/`).
+
+- **`src/torque/ui/static/`** — `index.html` + `torque.css` + `torque.js`
+  (vanilla, no framework, no bundler — D-122). Mounted with `StaticFiles` at
+  `/ui` by `api.ui.mount_ui`. Hash-router SPA (`#/dashboard`, `#/cases/<id>`,
+  `#/console`, `#/demo`); holds a `merchant_id` in client state and calls only
+  tenant-scoped backend paths; computes **no** metric / score / ranking
+  (all from the API). Live feed = polling `/reports/{m}/activity` every 3 s.
+- **`torque.agent_console`** (`resolve.py`) — `resolve_escalation` /
+  `pause_case` / `unpause_case` (INV-59). `resolve_escalation`:
+  `ESCALATED_TO_HUMAN → {RECOVERED | PARTIALLY_RECOVERED | WRITTEN_OFF}` via
+  `transition_case` (edges already legal), sets `escalation_resolution` /
+  `_by` / `_at`, writes a `HUMAN_RESOLVED` `CaseEvent` (`actor=HUMAN`), and for a
+  recovering resolution sets `recovered_amount` + `recovery_type = AGENT_ASSISTED`
+  inside `guards.human_resolution_writer`; removes the case from the human queue.
+  `EscalationResolution` StrEnum owned here (not a PG enum). "Cancel" (§10.8) =
+  resolve → `WRITTEN_OFF` (D-124). `pause`/`unpause` = `PLAYBOOK_ACTIVE ↔ PAUSED`.
+- **`torque.demo`** — `seed.py` (`seed_demo(session, *, now=DEMO_NOW,
+  reset=False)` — a fixed 16-case `acc_demo` dataset across all 4 legs and every
+  archetype: recovered / self-paid / B2B-partial / blocked / deferred /
+  escalated / exhausted / open, each with a `CaseEvent` trail, all Module-8
+  scored; idempotent, `reset` disables the `case_event` trigger for the wipe —
+  D-125) + `scenarios.py` (`inject_scenario(session, key)` — composes the real
+  `create_or_attach_case` / `create_checkout_case` / `create_subscription_case`
+  ingestion + seeds the blocking budget row + asserts the real compliance
+  predicate refuses, for `hard_stop_mac` / `upi_retry_cap` / `nach_ceiling`; no
+  parallel event mechanism).
+- **`revenue_leak_case`** gains `escalation_resolution` / `escalation_resolved_by`
+  / `escalation_resolved_at` (`VARCHAR(64)` / `VARCHAR(64)` / `TIMESTAMPTZ`,
+  nullable) — migration **0018**. Unguarded columns.
+- **`guards.py`** gains `human_resolution_writer(session)` + the `hr` flag in
+  `_guard_case` (D-123). **`state_machine.py` byte-unchanged.**
+
+---
+
 ## 10. Compliance model — pure predicates `IMPLEMENTED`, enforcement `PLANNED`
 
 `src/torque/compliance/` — all side-effect-free:
@@ -1068,6 +1191,17 @@ case matching, `AGENT_ASSISTED` vs `SELF_RECOVERED`, case closure, the two U-01
 `→ CANCELLED` edges. **Module 8 recovery scoring is now `IMPLEMENTED`** (§8H) —
 `(probability × amount_at_risk) ÷ cost` persisted on `revenue_leak_case`
 (migration 0017), recomputed on creation / diagnosis / daily, driving the
-`priority()` seam. Still absent: **reporting** (Module 9), **UI** (Module 10),
-the `MacCodeRegistry` full seed, real channel adapters, a real Temporal engine,
-and code that drives `PLAYBOOK_ACTIVE → SYSTEMIC_HOLD` (edge legal but dormant).
+`priority()` seam. **Module 9 reporting & measurement is now `IMPLEMENTED`**
+(§8I) — the read-only `torque.reporting` derivations + `/reports/{merchant_id}/…`
+API (outcome-based recovery report, by leg / intervention / outcome / time, the
+operational exception report, case drill-down + the `CaseEvent` explainability
+stream), no migration. **Module 10 UI/UX is now `IMPLEMENTED`** (§8J) — a static
+SPA dashboard served by the same process (`/ui`), the Agent Console
+(`torque.agent_console` — human resolve/pause, `escalation_resolution` +
+`HUMAN_RESOLVED`, migration **0018**, `guards.human_resolution_writer`), and the
+Demo Surface (`torque.demo` — deterministic `acc_demo` seed + one-click
+Decision-K scenarios + a polling live feed). Still absent: **incrementality /
+causal measurement** ("Module 9b" — lift + Wilson CI + SUTVA, D-121), Module 11
+infra consolidation, the `MacCodeRegistry` full seed, real channel adapters,
+`Action.cost` population, a real Temporal engine, and code that drives
+`PLAYBOOK_ACTIVE → SYSTEMIC_HOLD` (edge legal but dormant).

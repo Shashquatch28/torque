@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Torque — AI Revenue Recovery</title>
+  <link rel="stylesheet" href="/ui/torque.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="mark">◧ TORQUE</span>
+      <span class="tag">AI Revenue Recovery</span>
+    </div>
+    <nav class="nav">
+      <a href="#/dashboard" data-nav="dashboard">Dashboard</a>
+      <a href="#/cases" data-nav="cases">Cases</a>
+      <a href="#/console" data-nav="console">Agent Console</a>
+      <a href="#/demo" data-nav="demo">Live Demo</a>
+    </nav>
+    <label class="merchant">
+      merchant
+      <input id="merchant" type="text" spellcheck="false" />
+    </label>
+  </header>
+
+  <div class="flow" title="The Torque recovery loop">
+    <span>Revenue at Risk</span><i>&rarr;</i>
+    <span>AI / Decisioning</span><i>&rarr;</i>
+    <span>Recovery Priority</span><i>&rarr;</i>
+    <span>Guardrails</span><i>&rarr;</i>
+    <span>Action</span><i>&rarr;</i>
+    <span>Recovery</span><i>&rarr;</i>
+    <span class="flow-end">&#8377; Money Recovered</span>
+  </div>
+
+  <main id="view" class="view"><div class="loading">Loading&hellip;</div></main>
+
+  <footer class="foot">
+    <span>Torque · descriptive recovery reporting · every number derives live from case / action / reconciliation records</span>
+  </footer>
+
+  <script src="/ui/torque.js"></script>
+</body>
+</html>

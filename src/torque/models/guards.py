@@ -7,7 +7,9 @@ sanctioned factory runs these checks — there is no bypass through a plain
 Enforced here:
 1. `CaseEvent` rows are never UPDATEd or DELETEd (append-only, Section 2.3).
 2. `RevenueLeakCase.recovery_type` / `.recovered_amount` are writable only
-   inside `module7_writer(session)` (Module 7 is the sole writer).
+   inside `module7_writer(session)` (Module 7 reconciliation) or
+   `human_resolution_writer(session)` (Module 10 Agent Console human
+   resolution) — never a casual write.
 3. `RevenueLeakCase.network_directive_tier` is writable only inside
    `network_directive_writer(session)` and only toward a MORE restrictive tier.
 4. `RevenueLeakCase.context` is validated/normalised against its `leg_type`
@@ -78,6 +80,7 @@ _FULL_WEIGHT = Decimal("1")
 
 _M7_FLAG = "torque.module7_writer"
 _ND_FLAG = "torque.network_directive_writer"
+_HR_FLAG = "torque.human_resolution_writer"
 
 # Higher rank == more restrictive. Downgrades are rejected; equal is allowed
 # (re-receiving the same tier on a later attempt is legitimate).
@@ -118,6 +121,19 @@ def network_directive_writer(session: Session) -> AbstractContextManager[None]:
     return _flag(session, _ND_FLAG)
 
 
+def human_resolution_writer(session: Session) -> AbstractContextManager[None]:
+    """Permit writes to `recovery_type` / `recovered_amount` within the block for
+    a Module 10 Agent Console human resolution (Blueprint §4 / §10.8).
+
+    `ESCALATED_TO_HUMAN` is not terminal — a human agent drives its final
+    transition, and a `→ RECOVERED` / `→ PARTIALLY_RECOVERED` resolution must
+    record the recovered amount (and credit it as `AGENT_ASSISTED` — the human
+    agent is Torque's). Only `torque.agent_console.resolve` should enter this.
+    Reconciliation (Module 7) keeps its own `module7_writer` gate; this is a
+    parallel, equally deliberate entry point, not a widening of Module 7."""
+    return _flag(session, _HR_FLAG)
+
+
 def tier_rank(tier: MacTier | str | None) -> int:
     if tier is None:
         return 0
@@ -151,6 +167,7 @@ def _before_flush(session: Session, flush_context, instances) -> None:
 
     m7 = bool(session.info.get(_M7_FLAG))
     nd = bool(session.info.get(_ND_FLAG))
+    hr = bool(session.info.get(_HR_FLAG))
 
     from torque.models.action import Action
     from torque.models.action_case import ActionCase
@@ -160,7 +177,7 @@ def _before_flush(session: Session, flush_context, instances) -> None:
 
     for obj in [*session.new, *session.dirty]:
         if isinstance(obj, RevenueLeakCase):
-            _guard_case(obj, m7=m7, nd=nd)
+            _guard_case(obj, m7=m7, nd=nd, hr=hr)
         elif isinstance(obj, Playbook) and obj in session.new:
             _guard_playbook(obj)
         elif isinstance(obj, MerchantPlaybookConfig):
@@ -186,14 +203,15 @@ def _before_flush(session: Session, flush_context, instances) -> None:
         _validate_action_case_set(session, aid, action.primary_case_id)
 
 
-def _guard_case(case: RevenueLeakCase, *, m7: bool, nd: bool) -> None:
+def _guard_case(case: RevenueLeakCase, *, m7: bool, nd: bool, hr: bool = False) -> None:
     state = sa_inspect(case)
 
     for field in ("recovery_type", "recovered_amount"):
-        if state.attrs[field].history.has_changes() and not m7:
+        if state.attrs[field].history.has_changes() and not (m7 or hr):
             raise OwnershipViolation(
                 f"RevenueLeakCase.{field} is written only by Module 7 "
-                f"(wrap the write in guards.module7_writer(session))"
+                f"reconciliation (guards.module7_writer) or a Module 10 Agent "
+                f"Console human resolution (guards.human_resolution_writer)"
             )
 
     tier_hist = state.attrs["network_directive_tier"].history

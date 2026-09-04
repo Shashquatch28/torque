@@ -564,3 +564,86 @@ def test_module8_is_one_migration_no_new_enum(engine):
     # Postgres enums and NOT in the ALL_ENUMS column set.
     assert "CostBasis" not in enum_names
     assert "NextStepSource" not in enum_names
+
+
+# --- Module 9 structural invariants (no migration) --------------------
+
+
+def test_module9_is_logic_only_no_schema_change(engine):
+    """Reporting & measurement is a pure read/derive layer (D-114): no table,
+    no enum, no `CaseEventType`, no column, no migration. `alembic head` stays
+    `0017_recovery_score`."""
+    from torque.enums import CaseEventType
+
+    tables = set(inspect(engine).get_table_names())
+    assert not {
+        "recovery_report", "report_snapshot", "metric_rollup", "recovery_metrics",
+    } & tables
+    assert len(list(CaseEventType)) == 10  # closed §4 vocabulary untouched
+
+    # revenue_leak_case column set is exactly what Module 8 left it
+    cols = {c["name"] for c in inspect(engine).get_columns("revenue_leak_case")}
+    assert {
+        "recovery_score", "recovery_score_breakdown", "recovery_score_updated_at",
+        "recovery_type", "recovered_amount", "amount_at_risk", "closed_at",
+    } <= cols
+
+
+def test_module9_reporting_router_is_read_only(engine):
+    from torque.api.reporting import router
+
+    methods = {m for route in router.routes for m in (route.methods or set())}
+    assert methods == {"GET"}  # no POST / PUT / PATCH / DELETE anywhere in reporting
+
+
+# --- Module 10 structural invariants (migration 0018) -----------------
+
+
+def test_module10_escalation_resolution_columns(engine):
+    """Module 10 adds exactly three nullable columns on `revenue_leak_case`
+    (`escalation_resolution` / `_by` / `_at`) — no table, no enum, no
+    `CaseEventType` (`HUMAN_RESOLVED` already existed)."""
+    cols = {c["name"]: c for c in inspect(engine).get_columns("revenue_leak_case")}
+    for name in ("escalation_resolution", "escalation_resolved_by", "escalation_resolved_at"):
+        assert name in cols and cols[name]["nullable"] is True
+
+    from torque.enums import ALL_ENUMS, CaseEventType
+
+    assert len(list(CaseEventType)) == 10  # HUMAN_RESOLVED was already one of the ten
+    # EscalationResolution lives in `torque.agent_console`, not the PG enum set
+    assert "EscalationResolution" not in {e.__name__ for e in ALL_ENUMS}
+
+    tables = set(inspect(engine).get_table_names())
+    assert not {"agent_action", "escalation", "human_action", "ui_state"} & tables
+
+
+def test_module10_escalation_resolution_is_unguarded_shape(engine):
+    cks = {c["name"] for c in inspect(engine).get_check_constraints("revenue_leak_case")}
+    assert not any("escalation_resolution" in n for n in cks)
+
+
+def test_module10_agent_console_router_is_write_only_post(engine):
+    from torque.api.agent_console import router
+
+    methods = {m for route in router.routes for m in (route.methods or set())}
+    assert methods == {"POST"}
+    paths = {route.path for route in router.routes}
+    assert paths == {
+        "/agent-console/{merchant_id}/cases/{case_id}/resolve",
+        "/agent-console/{merchant_id}/cases/{case_id}/pause",
+        "/agent-console/{merchant_id}/cases/{case_id}/unpause",
+    }
+
+
+def test_module10_state_machine_edges_were_already_legal():
+    """Module 10 added NO state-machine edge — the human-resolution targets are
+    the §4 `ESCALATED_TO_HUMAN → {RECOVERED, PARTIALLY_RECOVERED, WRITTEN_OFF}`
+    edges that already existed, and pause/unpause use `PLAYBOOK_ACTIVE ↔ PAUSED`."""
+    from torque.enums import CaseStatus
+    from torque.state_machine import _TRANSITIONS
+
+    assert {CaseStatus.RECOVERED, CaseStatus.PARTIALLY_RECOVERED, CaseStatus.WRITTEN_OFF} <= (
+        _TRANSITIONS[CaseStatus.ESCALATED_TO_HUMAN]
+    )
+    assert CaseStatus.PAUSED in _TRANSITIONS[CaseStatus.PLAYBOOK_ACTIVE]
+    assert _TRANSITIONS[CaseStatus.PAUSED] == {CaseStatus.PLAYBOOK_ACTIVE}

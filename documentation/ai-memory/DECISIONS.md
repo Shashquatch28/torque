@@ -2116,6 +2116,284 @@ BY D-0NN`.
 
 ---
 
+## D-114 — Module 9 is a pure read/derive layer; no persisted aggregate, no migration
+- **Milestone:** Module 9 — Reporting & Measurement
+- **Decision:** Does reporting materialise metrics into a rollup / snapshot
+  table, or derive them on demand from the domain tables?
+- **Chosen:** **Derive on demand.** New package `torque.reporting`
+  (`metrics.py` — the aggregation functions; `schemas.py` — the pydantic
+  result/response contract) + a read-only `torque.api.reporting` router. Every
+  figure is computed live from `revenue_leak_case`, `action` / `action_case`,
+  `b2b_invoice`, `case_event`, `human_queue`. **No new table, no enum, no
+  `CaseEventType`, no column, no migration** — `alembic head` stays
+  `0017_recovery_score`.
+- **Alternatives:** a `metric_rollup` table refreshed by a Celery beat job
+  (rejected — §9.8: "avoid a reporting table that becomes an unexplained source
+  of truth"; a cache needs refresh semantics, idempotency guarantees, and a
+  double-count story it does not need at demo scale); a materialised view
+  (Postgres-specific, same staleness question).
+- **Reasoning:** §9.8 prefers derivation; §9.11 says do not build a warehouse. A
+  reported number is then always exactly what the live rows say and is traceable
+  straight through case → actions → `CaseEvent` stream. The summary path
+  materialises the in-window case rows and aggregates in the service layer —
+  O(cases-in-window) memory; a SQL `GROUP BY` rewrite (and a
+  `(merchant_id, closed_at)` index) is the first, cheapest optimisation if a
+  merchant ever exceeds ~10k open cases. Documented, not built.
+- **Consequence:** `state_machine.py` / `guards.py` byte-unchanged; Module 9
+  adds zero write paths (a structural test asserts the router is GET-only).
+- **Status:** IN FORCE
+
+## D-115 — "revenue at risk" per case: `amount_at_risk` for non-B2B, `Σ B2BInvoice.original_amount` for B2B
+- **Milestone:** Module 9
+- **Decision:** The recovery-rate denominator. `RevenueLeakCase.amount_at_risk`
+  is immutable for three legs but a **mutating residual** for B2B (it decrements
+  as partial payments land — INV-55), and a B2B case settled in one payment can
+  even be left holding its *original* value (Module 7's full-settlement path does
+  not re-zero it). So `SUM(amount_at_risk)` is not a reliable "total at risk".
+- **Chosen:** per case — non-B2B → `amount_at_risk`; B2B → `Σ B2BInvoice.
+  original_amount` for the case (immutable; the invoice table is authoritative
+  for B2B amounts). A B2B case with no invoice rows contributes its
+  `amount_at_risk`. `revenue_at_risk` (report) is the sum over in-scope cases.
+- **Alternatives:** `amount_at_risk + COALESCE(recovered_amount, 0)` (rejected —
+  double-counts the single-payment B2B case and every `CANCELLED` self-paid
+  case); fixing Module 7's B2B residual (out of scope — do not modify Module 7).
+- **Consequence:** the summary and `by_leg` amount fields reconcile exactly
+  (`Σ by_leg == summary`); B2B `recovered_amount` can be reported even when
+  `amount_at_risk` reads 0.
+- **Status:** IN FORCE
+
+## D-116 — "recovered" = Torque-credited only; `SELF_RECOVERED` reported separately, never folded in
+- **Milestone:** Module 9
+- **Decision:** Which recoveries count toward the headline number?
+- **Chosen:** `recovered_amount` sums `recovered_amount` where
+  `recovery_type IS NOT NULL AND recovery_type != 'SELF_RECOVERED'` (Blueprint
+  §9.1 verbatim — i.e. `AGENT_ASSISTED` or `AMBIGUOUS`). `SELF_RECOVERED` money
+  is reported as a **separate** `self_recovered_amount` field and never added to
+  `recovered_amount`. Reconciliation (Module 7) is the sole authority for
+  `recovery_type` / `recovered_amount`; Module 9 never re-matches a payment or
+  re-derives credit (§9.3 / INV-53).
+- **Reasoning:** the north-star is *money Torque brought back* (§9.1 outcome-
+  based). Reporting the self-recovered figure alongside is the honest-reporting
+  differentiator, not a number to hide or inflate.
+- **Status:** IN FORCE
+
+## D-117 — recovery rate is reported both by count (blueprint-literal) and by amount (demo headline)
+- **Milestone:** Module 9
+- **Decision:** §9.1 defines "Recovery rate by leg" as *recovered cases ÷ total
+  cases*; the §9.4 demo headline (43.7% = ₹52.4L ÷ ₹1.20 Cr) is money-weighted.
+- **Chosen:** expose both, labelled. `recovery_rate` = `recovered_case_count ÷
+  case_count` (the §9.1 definition, canonical). `amount_recovery_rate` =
+  `recovered_amount ÷ revenue_at_risk`. Zero cases / zero risk → the respective
+  rate is `Decimal(0)`, never a division error. `recovered_case_count` counts
+  `status = 'RECOVERED'` **and** Torque-credited; a B2B `PARTIALLY_RECOVERED`
+  case is not a "recovered case" (still open) but its banked partials **do**
+  appear in `recovered_amount` — the two figures reconcile by design.
+- **Status:** IN FORCE
+
+## D-118 — "unresolved" / "blocked amount" / "deferred amount" / "escalated" definitions
+- **Milestone:** Module 9
+- **Decision:** §9.2 lists these without formulas.
+- **Chosen:**
+  - **unresolved case** = `status NOT IN ('RECOVERED', 'CANCELLED', 'WRITTEN_OFF')`
+    and not a non-B2B `PARTIALLY_RECOVERED` (terminal). So: every open state
+    **plus `EXHAUSTED`** (automation gave up, no human, no money) **plus B2B
+    `PARTIALLY_RECOVERED`** (still dunning). `WRITTEN_OFF` and self-paid
+    `CANCELLED` are *resolved*. `unresolved_amount` = Σ current `amount_at_risk`
+    of those (the live residual exposure). `exhausted_case_count` /
+    `partially_recovered_case_count` are informational sub-counts.
+  - **blocked amount** = Σ `revenue_at_risk` (D-115) of cases with ≥1 `Action`
+    whose `outcome = 'BLOCKED_BY_GUARDRAIL'` — deduped per case (a case counts
+    once). Zero when there are none ("where applicable").
+  - **deferred amount / count** = same, for `block_reason =
+    'OUTREACH_COORDINATOR_DEFERRED'` — the only defer that writes an `Action`
+    (D-099). A pure timing defer (quiet hours, UPI peak) writes **no row** and is
+    not countable from `Action`; documented as a known limitation of the source
+    data, not a Module 9 gap.
+  - **escalated case** = `status = 'ESCALATED_TO_HUMAN'` **∪** present in
+    `human_queue` (deduped). The queue also holds broken-promise / open-
+    conversation cases not in that status. `escalations_by_reason` is grouped
+    from `human_queue.reason`.
+- **Consequence:** case buckets partition the total:
+  `recovered + self_recovered + written_off + unresolved(incl. exhausted & B2B
+  partial) == case_count`.
+- **Status:** IN FORCE
+
+## D-119 — "recovery over time" buckets on `closed_at` (UTC), half-open windows
+- **Milestone:** Module 9
+- **Decision:** which date column, which timezone, which window semantics for the
+  time series (vs. the `opened_at` window that defines a *batch*).
+- **Chosen:** `date_trunc(bucket, closed_at)` with `bucket ∈ {day, week, month}`,
+  `closed_at` in **UTC** (project storage convention — every timestamp column is
+  `DateTime(timezone=True)` stored UTC; IST localisation is a UI / Module 10
+  concern). Only Torque-credited `RECOVERED` cases contribute (D-116); a case
+  with `closed_at IS NULL` (open, or a B2B partial) never appears — its money is
+  in the summary `recovered_amount`, and lands in a bucket when the case finally
+  closes. The window is half-open `[from, to)` so adjacent windows partition the
+  recoveries with no boundary double-count. The batch window (`opened_at`) and
+  the time-series window (`closed_at`) are exposed as **separate** query params
+  (`opened_from`/`opened_to` vs `closed_from`/`closed_to`) so the two are never
+  confused.
+- **Status:** IN FORCE
+
+## D-120 — "recovery by intervention" = two orthogonal groupings (by leg, by action type)
+- **Milestone:** Module 9
+- **Decision:** §9.1 groups "₹ recovered **by leg**"; §9.5 wants comparison
+  across **intervention types** (payment retry, outreach, …). Same thing or two?
+- **Chosen:** two views. `by_leg` (grouping on `leg_type`) is **primary** and
+  provides the §9.5 intervention-effectiveness columns
+  ({cases_attempted, cases_recovered, revenue_at_risk, recovered_amount,
+  recovery_rate}); its amount totals reconcile with the summary.
+  `by_action_type` is a **secondary** view — for each `ActionType` Torque
+  *executed*, the distinct cases that used it, of which recovered, and their
+  amounts. A case that used both a retry and a WhatsApp send appears in **both**
+  rows, so `by_action_type` rows sum to more than the de-duplicated totals
+  (stated in the schema docstring). `cases_attempted` in `by_leg` = every
+  in-scope case of that leg ("cases analysed"); in `by_action_type` = cases with
+  ≥1 executed action of that type.
+- **Status:** IN FORCE
+
+## D-121 — incrementality lift / Wilson CI / SUTVA-adjusted lift are DEFERRED (intentional deviation from §9.1 as written)
+- **Milestone:** Module 9
+- **Decision:** Blueprint §9.1 lists "Incrementality lift" (with a Wilson score
+  CI) and "SUTVA-adjusted lift" in the Module 9 dashboard-metrics table. Are
+  they in this run?
+- **Chosen:** **No — deferred.** The maintainer's Module 9 instructions scope
+  this run to **descriptive** recovery reporting and explicitly separate it from
+  "incremental causal impact measurement" (§9.6), with the scope-boundary list
+  naming "SUTVA analysis" and "confidence intervals" as not-to-implement.
+  Module 9 reports *what happened*; the causal/experimental layer
+  (incrementality lift, Wilson interval, the cross-merchant SUTVA footnote) is a
+  later scope — provisionally "Module 9b — Incrementality" (see U-10).
+- **Reasoning:** an intentional, documented deviation from the blueprint *as
+  written* (§9.1), made because the two instruction sources conflict and the
+  maintainer's direct instruction governs. The
+  `Merchant_Counterparty.in_control_cohort` / `RevenueLeakCase.control_group`
+  data those metrics need is already collected (Modules 1/2) and is **left
+  untouched** — the deferred work needs no schema change, only a new consumer.
+- **Consequence:** the Module 9 API surface carries no lift / CI / SUTVA
+  endpoint; `learning_log.md` §15 states plainly that Module 9 does not prove AI
+  causality.
+- **Status:** IN FORCE
+
+---
+
+## D-122 — Module 10 UI: a static SPA served by FastAPI, one process, no build step
+- **Milestone:** Module 10 — UI/UX
+- **Decision:** The repo has no frontend and no Node toolchain (§10.14: "choose
+  the simplest free-tier stack ... avoid unnecessary infrastructure ... runnable
+  with a straightforward command"). What stack?
+- **Chosen:** A **hand-written static single-page app** — one `index.html` + one
+  `torque.css` + one `torque.js` (vanilla, no framework, no bundler) under
+  `src/torque/ui/static/`, mounted with `StaticFiles` at `/ui` by the **same**
+  `create_app()` FastAPI app. `GET /` redirects to `/ui/`. The whole product
+  runs with the existing `uv run python -m torque` on one port. Hash routing
+  (`#/dashboard`, `#/cases/<id>`, `#/console`, `#/demo`). No new runtime
+  dependency (Starlette's `StaticFiles` ships with FastAPI; `jinja2` is **not**
+  added).
+- **Alternatives:** a React/Vite/TS SPA (rejected — a whole Node toolchain,
+  `npm install`, a second dev server, a build artefact — exactly the
+  "unnecessary infrastructure" §10.14 warns against for a Python-only backend);
+  server-rendered Jinja templates (rejected — adds `jinja2`, and a static SPA
+  polls the JSON API just as easily).
+- **Consequence:** "frontend lint / typecheck / build" is **N/A** — there is no
+  TS to typecheck and no build; `ruff` covers the Python view/route code, and
+  the templates are static text. The DOM logic is verified through the API
+  contract it depends on plus shell-and-wiring assertions
+  (`tests/test_module10_ui.py`), not a browser harness.
+- **Status:** IN FORCE
+
+## D-123 — Agent Console human resolution: reuse the existing `→ {RECOVERED, PARTIALLY_RECOVERED, WRITTEN_OFF}` edges; add `human_resolution_writer` to `guards.py`; migration 0018
+- **Milestone:** Module 10
+- **Decision:** §10.8 assigns the Agent Console the `escalation_resolution`
+  write-back and the `HUMAN_RESOLVED` event. What changes are needed?
+- **Chosen:**
+  - **`state_machine.py` — UNCHANGED.** The `ESCALATED_TO_HUMAN → {RECOVERED,
+    PARTIALLY_RECOVERED, WRITTEN_OFF}` edges are already legal (§4 diagram,
+    present since M1); pause/unpause use the existing `PLAYBOOK_ACTIVE ↔ PAUSED`.
+    No Module 10 transition is required.
+  - **`HUMAN_RESOLVED` — UNCHANGED.** The `CaseEventType` and its
+    `{resolution, agent_id}` payload schema already exist (M1). `CaseEventType`
+    count stays 10.
+  - **Migration `0018_escalation_resolution`** — three nullable columns on
+    `revenue_leak_case`: `escalation_resolution` (`VARCHAR(64)` — the label:
+    `RECOVERED_BY_HUMAN` / `PARTIALLY_RECOVERED_BY_HUMAN` / `WRITTEN_OFF`, an
+    `EscalationResolution` StrEnum owned in `torque.agent_console`, not a PG
+    enum), `escalation_resolved_by`, `escalation_resolved_at`. Unguarded (like
+    `root_cause_code`).
+  - **`guards.py` — CHANGED (explicitly required, reported).** A recovering
+    resolution must record `recovered_amount` and `recovery_type = AGENT_ASSISTED`
+    (the human agent is Torque's — so it counts in Module 9's `recovered_amount`,
+    D-116), and those two fields are `module7_writer`-guarded. Added
+    `human_resolution_writer(session)` + an `hr` flag threaded into `_guard_case`
+    (`not (m7 or hr)`), mirroring `network_directive_writer` exactly. ~10 lines.
+    Reconciliation keeps its own gate; this is a second deliberate entry point,
+    not a widening of Module 7.
+- **Alternatives:** reuse `module7_writer` from the console (rejected —
+  misrepresents authorship: its docstring says "Module 7 is the only code that
+  should ever enter this"); leave `recovery_type` NULL on a human recovery and
+  special-case NULL in Module 9's `recovered_amount` predicate (rejected —
+  hackier, and it edits accepted Module 9 metric semantics for a new path).
+- **Consequence:** `guards.py` `git diff HEAD` is non-empty for the first time
+  since M6a — exactly the `human_resolution_writer` addition. `state_machine.py`
+  stays byte-stable.
+- **Status:** IN FORCE
+
+## D-124 — Module 10 backend additions: read endpoints on the Module 9 router; a small Agent Console + Demo surface; no business logic in routes
+- **Milestone:** Module 10
+- **Decision:** §10.13 — add backend endpoints only where Module 10 needs
+  something not already exposed; keep domain logic in the modules.
+- **Chosen:**
+  - **`torque.reporting`** gains `top_at_risk_cases` (§10.4 — open cases
+    `ORDER BY recovery_score DESC NULLS LAST`, the frontend never re-derives the
+    formula), `human_queue_list` (§10.7 — `human_queue` rows joined to the case,
+    ordered by the entry's stored `priority` — the Module 8 seam), and
+    `recent_activity` (§10.17 — recent `CaseEvent`s across the merchant, newest
+    `event_seq_id` first). `case_detail` gains `recovery_score_breakdown` +
+    `recovery_probability` (Module 8's stored §8.7 structure, surfaced verbatim
+    for the "WHY THIS CASE?" panel) + `counterparty_label` + `root_cause_code`.
+    All still `GET`, all tenant-scoped (INV-58 extended).
+  - **`torque.agent_console`** — a new package: `resolve_escalation` /
+    `pause_case` / `unpause_case`, exposed as three `POST`
+    `/agent-console/{merchant_id}/cases/{case_id}/{resolve|pause|unpause}`
+    endpoints (`torque.api.agent_console`). Domain logic in the package; the
+    router only maps HTTP ↔ the call and errors to codes
+    (`CaseNotFoundError` → 404, `HumanResolutionError` → 409).
+  - **`torque.demo`** — `seed_demo` (§10.16 deterministic dataset) + `scenarios`
+    (§10.10 one-click injectors composing the *existing* ingestion / compliance
+    code), exposed as `POST /demo/seed`, `GET /demo/scenarios`,
+    `POST /demo/inject/{key}`, `GET /demo/merchant`.
+- **"cancel"** (§10.8) maps to **resolve → `WRITTEN_OFF`** (the "give up"
+  terminal) for an escalated case; there is deliberately no
+  `ESCALATED_TO_HUMAN → CANCELLED` (the blueprint reserves CANCELLED /
+  `SELF_RECOVERED` for genuine customer self-payment via reconciliation). The
+  three controls surfaced are therefore **pause / unpause / resolve{recover,
+  partial, write-off}**.
+- **Live updates (§10.17):** **polling** — `torque.js` GETs `/reports/{m}/activity`
+  every 3 s on the demo page. No WebSocket: the backend has no push channel and
+  the blueprint says use the simplest reliable mechanism.
+- **Status:** IN FORCE
+
+## D-125 — Demo `reset` disables the `case_event` append-only trigger for the wipe
+- **Milestone:** Module 10
+- **Decision:** `POST /demo/seed?reset=true` must clear the demo merchant's data
+  to rebuild deterministically, but `case_event` has a Postgres `BEFORE DELETE`
+  trigger (`case_event_no_mutate`, migration 0005) that rejects **any** delete,
+  raw SQL included.
+- **Chosen:** `_wipe` runs `ALTER TABLE case_event DISABLE TRIGGER
+  case_event_no_mutate`, deletes the demo merchant's rows in FK order, then
+  `ENABLE TRIGGER` — all in the seed's transaction (a rollback reverts both;
+  needs table ownership, which the app/migration user has). Scoped strictly to
+  `merchant_id = 'acc_demo'`. Without `reset`, `seed_demo` is a no-op if already
+  seeded (idempotent). The production append-only guarantee for real merchants
+  is untouched — this is an explicit, demo-only, single-merchant reset.
+- **Alternatives:** `session_replication_role = replica` (rejected — needs
+  superuser); never support reset, require a full DB drop to reseed (rejected —
+  poor demo ergonomics); make every seeded row deterministically keyed and
+  upsert (rejected — a large rewrite of the seed for marginal benefit).
+- **Status:** IN FORCE
+
+---
+
 ## Notes not recorded as decisions
 
 - The **Git-history incident of 2026-09-02** (a bad commit briefly on `main`,

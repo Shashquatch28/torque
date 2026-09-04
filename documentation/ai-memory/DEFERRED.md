@@ -312,20 +312,86 @@ Still deferred within Module 8's area:
   (Module 10). The daily sweep refreshes `human_queue.priority`; a live re-sort
   on every score change is not wired.
 
-## Module 9 — Reporting & Measurement
+## Module 9 — Reporting & Measurement — ✅ COMPLETE (descriptive)
 
-- 🔧 Dashboard metrics (₹ recovered by leg, recovery rate, incrementality lift +
-  Wilson CI, SUTVA-adjusted lift, exception list, cost efficiency).
-- 🔧 Explainability panel (mechanical render of the `CaseEvent` stream).
-- 🔧 Cross-merchant SUTVA footnote logic.
+Built in the Module 9 run (`torque.reporting` package + `torque.api.reporting`
+router; **no migration** — D-114). Now **DONE**:
+- ✅ Outcome-based recovery report — revenue at risk (D-115), recovered amount
+  (Torque-credited; `SELF_RECOVERED` reported separately — D-116), recovery rate
+  (by count **and** by amount — D-117), unresolved / blocked / deferred / escalated
+  (D-118), cost efficiency (`Action.cost` is ~0 until Module 5 populates it —
+  reported honestly).
+- ✅ ₹ recovered **by leg** (§9.1) + **by action type** (§9.5 secondary) + **by
+  recovery type / outcome** (§9.2) + **over time** (`date_trunc` on `closed_at`
+  UTC, half-open windows — D-119).
+- ✅ Operational / exception report (§9.7) — blocked-by-reason (the §9.1 exception
+  list), deferred, failed-by-type, escalations-by-reason, terminal-by-status.
+- ✅ Batch report over an `opened_at` window (§9.4); case-level drill-down
+  (`/cases`, `/cases/{id}`) + the explainability panel (the raw `CaseEvent`
+  stream in `event_seq_id` order — §9.2, "the query IS the feature").
+- ✅ Read-only, tenant-scoped, derived on demand (INV-58) — 8 `GET` endpoints,
+  same FastAPI conventions as Module 2.
 
-## Modules 10–13
+Still deferred within Module 9's area:
+- 🔧 **Module 9b — Incrementality / causal measurement** — treatment-vs-control
+  **lift**, the **Wilson score confidence interval**, and the **cross-merchant
+  SUTVA-adjusted lift** footnote (Blueprint §9.1). Explicitly out of scope for
+  the descriptive Module 9 run (D-121 / U-10). The `in_control_cohort` /
+  `control_group` data is already collected and untouched — no schema change
+  needed, only a new consumer.
+- 🔧 **`Action.cost` population** by Module 5 — until then `total_action_cost` /
+  `cost_efficiency_ratio` are ~0 (a data gap, not a Module 9 gap).
+- 🔧 Pure **timing defers** (quiet hours, UPI peak) write no `Action` row, so
+  they are not countable from `Action` — only `OUTREACH_COORDINATOR_DEFERRED` is
+  (D-118).
+- 🔧 A `(merchant_id, closed_at)` index + a SQL `GROUP BY` rewrite of the summary
+  path if a merchant ever exceeds ~10k open cases (D-114 — demo scale does not
+  need it).
+- 📋 The **merchant dashboard / agent console** UI that consumes these endpoints
+  — Module 10.
 
-- 🔧 All UI (merchant dashboard, agent console, demo surface + synthetic-event
-  injector).
-- 🔧 Infra beyond `docker-compose` (Temporal cluster or fallback, prod queue).
-- 🔧 Build roadmap calendar dates (Part D item 3).
-- 🔧 Demo script finalization (Part D item 4 — judging rubric).
+## Module 10 — UI/UX — ✅ COMPLETE
+
+Built in the Module 10 run (`torque.ui` static SPA + `torque.agent_console` +
+`torque.demo`; migration **0018**). Now **DONE**:
+- ✅ **Merchant dashboard** — Module 9 metrics (₹ recovered dominant,
+  `SELF_RECOVERED` separate, recovery rate, unresolved, escalations,
+  blocked/deferred, cost efficiency), recovery-by-leg, recovery-over-time chart,
+  top-at-risk ranked list (Module 8 `recovery_score` order, backend), exception
+  list surfaced prominently (§10.1–10.3, 10.11).
+- ✅ **Case detail / explainability** — the "WHY THIS CASE?" panel rendering
+  `recovery_score_breakdown.explain` verbatim + the full `CaseEvent` timeline in
+  `event_seq_id` order (§10.5–10.6).
+- ✅ **Agent Console** — human queue (priority order) + **pause / unpause /
+  resolve** write-backs: `torque.agent_console.resolve_escalation`
+  (`ESCALATED_TO_HUMAN → {RECOVERED, PARTIALLY_RECOVERED, WRITTEN_OFF}` +
+  `escalation_resolution` + `HUMAN_RESOLVED` + queue removal), the recovery write
+  guarded by `guards.human_resolution_writer` (§10.7–10.8, INV-59, D-123).
+- ✅ **Demo Surface** — `torque.demo.seed_demo` (deterministic 16-case `acc_demo`
+  dataset) + `inject_scenario` (one-click checkout / payment-failure / Decision-K
+  hard-stop-MAC / UPI-cap / NACH-ceiling, composing the real ingestion +
+  compliance code) + a polling live feed (`/reports/{m}/activity`, 3 s)
+  (§10.9–10.10, 10.16–10.17, D-124/125).
+- ✅ **Runnable** — `uv run python -m torque` serves API + `/ui` on one port
+  (static SPA, no Node, no build — D-122).
+
+Still deferred within Module 10's area:
+- 🔧 A **browser / end-to-end test harness** (Playwright/Selenium) — out of the
+  stack (D-122); the DOM logic is verified through its API contract + shell/
+  wiring assertions.
+- 🔧 Real **live push** (WebSocket / SSE) — polling suffices for the demo
+  (D-124); the backend has no push channel.
+- 🔧 The UI does **not** surface incrementality (Module 9b — D-121 / U-10).
+- 🔧 `escalation_resolution` is a Module-10 vocabulary (`RECOVERED_BY_HUMAN` /
+  `PARTIALLY_RECOVERED_BY_HUMAN` / `WRITTEN_OFF`) — the blueprint names the field
+  but not its values (U-11).
+
+## Modules 11–13
+
+- 🔧 Infra beyond `docker-compose` (Temporal cluster or fallback, prod queue,
+  worker/beat services) — Module 11.
+- 🔧 Build roadmap calendar dates (Part D item 3) — Module 12.
+- 🔧 Demo script finalization (Part D item 4 — judging rubric) — Module 13.
 
 ## Cross-cutting / schema-adjacent deferrals
 

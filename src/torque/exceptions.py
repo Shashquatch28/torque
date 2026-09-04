@@ -129,3 +129,19 @@ class RecoveryScoreError(TorqueError):
     e.g. a negative `amount_at_risk` (structurally impossible via the
     `amount_at_risk >= 0` CHECK, so this signals a corrupted row or a bad
     direct write). Missing/zero cost is NOT an error — it floors (D-111)."""
+
+
+# --- Agent Console (Blueprint Module 10 §10.8) --------------------------
+
+
+class CaseNotFoundError(TorqueError):
+    """An Agent Console operation named a `case_id` that does not exist for the
+    scoping merchant (→ HTTP 404, never a cross-tenant leak)."""
+
+
+class HumanResolutionError(TorqueError):
+    """An Agent Console manual override was rejected: the case is not in a
+    state the control applies to (e.g. `resolve` on a non-`ESCALATED_TO_HUMAN`
+    case, `pause` on a non-`PLAYBOOK_ACTIVE` case), or the resolution inputs are
+    invalid (missing / non-positive recovered amount for a `→ RECOVERED`
+    resolution)."""

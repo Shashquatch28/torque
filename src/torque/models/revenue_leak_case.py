@@ -15,6 +15,11 @@ Every module reads and writes this row. Notable invariants (enforced in
 * `recovery_score` / `recovery_score_breakdown` / `recovery_score_updated_at`
   are a DERIVED cache written by Module 8 (`torque.scoring`) — no guard, no
   `CaseEvent`, no status change; safe for any recompute path to refresh.
+* `escalation_resolution` / `escalation_resolved_by` / `escalation_resolved_at`
+  are written ONLY by the Module 10 Agent Console when a human resolves a case
+  out of `ESCALATED_TO_HUMAN` (Blueprint §4 / §10). `escalation_resolution`
+  itself is unguarded; a resolution that also sets `recovery_type` /
+  `recovered_amount` must enter `guards.human_resolution_writer(session)`.
 """
 
 from __future__ import annotations
@@ -153,5 +158,18 @@ class RevenueLeakCase(Base, TenantScoped, TimestampMixin):
     recovery_score: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
     recovery_score_breakdown: Mapped[dict | None] = mapped_column(JSONB)
     recovery_score_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+
+    # --- Module 10: Agent Console human resolution (Blueprint §4 / §10) ----
+    # `ESCALATED_TO_HUMAN` is not terminal — it "carries `escalation_resolution`,
+    # written by a human agent, driving the final transition" (§4). Set by
+    # `torque.agent_console.resolve.resolve_escalation` alongside the
+    # `ESCALATED_TO_HUMAN → {RECOVERED, PARTIALLY_RECOVERED, WRITTEN_OFF}`
+    # transition and a `HUMAN_RESOLVED` CaseEvent. Nullable — only escalated
+    # cases a human has closed carry it.
+    escalation_resolution: Mapped[str | None] = mapped_column(String(64))
+    escalation_resolved_by: Mapped[str | None] = mapped_column(String(64))
+    escalation_resolved_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True)
     )

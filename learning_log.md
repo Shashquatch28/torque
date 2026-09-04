@@ -1081,3 +1081,365 @@ It does not send anything, it does not build the merchant dashboard or the agent
 console, and it does not add a learned model. It computes and exposes the
 priority number, keeps it fresh, and wires it into the two places that already
 needed it.
+
+---
+
+## 15. Module 9 Additions — Recovery Measurement & Reporting
+
+*(New product knowledge from this module. Pitch language, not implementation.)*
+
+### Why recovery measurement matters
+
+Everything before Module 9 was Torque *doing the work* — detecting leaks,
+diagnosing them, running playbooks, staying compliant, matching payments back to
+cases, prioritising by economic value. Module 9 is Torque **proving it worked**.
+
+A merchant's first question is never "how many messages did you send?" It is
+**"how much money did I get back, and would I have gotten it anyway?"** Module 9
+answers the first half rigorously and is honest about the second.
+
+### Revenue at risk vs revenue recovered — the two numbers that matter
+
+- **Revenue at risk** — the total rupee value of everything that was leaking in
+  the period: failed subscription charges, abandoned carts, degraded payments,
+  overdue invoices. This is the size of the problem.
+- **Revenue recovered** — of that, how much actually came back **because of
+  Torque**. Not "a payment eventually landed" — *Torque caused it* (it acted on
+  the case within the attribution window, or the payment came through a
+  Torque-generated link).
+
+The gap between the two is the opportunity that remains. The ratio is the
+recovery rate.
+
+### How Torque measures recovery
+
+Recovery is grounded in the **reconciliation outcome** already recorded on each
+case (from the payment-attribution module), not re-derived. Every recovered case
+carries:
+
+- **how much** came back,
+- **who caused it** — *Agent-Assisted* (Torque), *Self-Recovered* (the customer
+  paid on their own), or *Ambiguous* (a payment matched more than one case and
+  Torque won't pretend certainty).
+
+The headline "recovered" figure counts **only** Agent-Assisted and Ambiguous.
+Self-Recovered money is shown **separately, next to it** — never folded in. A
+merchant sees exactly what Torque can and cannot take credit for.
+
+### Why "messages sent" is not the success metric
+
+Message volume, retry counts, playbooks started, AI recommendations made — these
+are **activity**, not outcome. A system optimised to send more messages is
+optimised for the wrong thing. Torque's north-star is **revenue recovered**;
+operational activity is *supporting evidence* that explains how the recovery
+happened, and it lives in a separate part of the report. Confusing the two is
+how recovery vendors end up billing for effort instead of results.
+
+### How recovery is attributed to interventions
+
+The report breaks recovered money down two ways:
+
+- **By leg** — payment retry, checkout abandonment, subscription/mandate,
+  B2B receivables. The primary view: for each leg, how many cases, how many
+  recovered, how much was at stake, how much came back, and the rate.
+- **By intervention type** — the kind of action Torque executed (a payment
+  retry, a WhatsApp/email/SMS nudge, a payment link). A case that used more than
+  one shows up under each, so a merchant can see which *tactics* pull their
+  weight.
+
+Attribution itself is not recomputed here — Torque reuses the per-case decision
+the reconciliation module already made, including the proportional credit split
+when one payment settled two merged cases.
+
+### What a merchant sees in a recovery report
+
+```text
+TORQUE RECOVERY REPORT
+
+Cases analysed              1,000
+Revenue at risk          ₹1.20 Cr
+
+Recovered (Torque)        ₹52.4 L
+Self-recovered            ₹11.0 L        (shown, not counted)
+Recovery rate                 43.7%      (by amount)   |   46.3% (by cases)
+
+Recovered cases                463
+Unresolved cases               412        (₹41.2 L still at risk)
+Human escalations               58
+Blocked                         31        (₹6.1 L — deliberate, by rule)
+Deferred                        44
+
+Recovery by leg
+  Subscription/mandate    ₹21.4 L        61% recovery rate
+  Payment retry           ₹18.2 L        54%
+  B2B receivables          ₹9.7 L        38%
+  Checkout abandonment     ₹3.1 L        29%
+
+Where Torque deliberately did NOT act
+  Network hard-stop (do not retry)        18 actions
+  No customer consent on file             9
+  Quiet hours / bad timing                (deferred, retried later)
+```
+
+Two halves: **what recovered money** (top), and **where Torque deliberately
+stopped or escalated** (bottom). The second half is as important as the first —
+it is the "compliance by construction" story made visible: Torque didn't fail to
+act on those cases, it *chose* not to, by rule.
+
+And every number drills down: a merchant can go from a leg → the cases → one
+case → the full, plain-language history of what the agent did and why (the same
+event stream that is the audit trail).
+
+### How batch-level measurement proves the product's value
+
+Run Torque over a batch of a merchant's revenue-at-risk cases and the report
+gives a single, defensible answer: *"of ₹X at risk, Torque recovered ₹Y, at a
+Z% rate, and here is the case-by-case evidence."* That is the pitch — not a
+capability demo, a **measured result** on the merchant's own data, with the
+methodology (what counts as "recovered", who gets credit) stated openly.
+
+### Useful merchant questions Torque can now answer
+
+- "How much of my failed-subscription revenue did you actually recover last
+  month?"
+- "Which leg is worth the most to me — where should I turn Torque up?"
+- "Show me every case you escalated to a human, and why."
+- "How much revenue is still at risk right now, and in which cases?"
+- "Where did you choose not to contact a customer, and on what rule?"
+- "For this specific recovered payment — what did you do, and do you take
+  credit?"
+
+### How this supports the Track 03 hackathon requirement
+
+Track 03 asks for a system that identifies revenue at risk **and** shows what it
+did about it. Module 9 is the "shows what it did" half: it turns the whole
+pipeline's output into a merchant-facing, evidence-backed recovery report, with
+the honest-reporting posture (self-recovered shown separately, exceptions
+surfaced prominently) built in rather than bolted on.
+
+### Descriptive reporting vs causal / incrementality measurement
+
+Two different claims:
+
+- **Descriptive** — "here is what happened: ₹Y recovered, on these cases, by
+  these interventions." Module 9 does this, rigorously.
+- **Causal / incremental** — "here is the recovery **lift** Torque produced
+  versus a held-out control group that got nothing, with a confidence interval."
+  A separate, later capability.
+
+Torque's data model already assigns every merchant-customer relationship to
+treatment or a held-out control, so the causal measurement is a formula away —
+but it is **not** in Module 9. Module 9 does not claim to prove Torque *caused*
+the recovery beyond the per-case attribution; it reports what occurred.
+
+### What Module 9 implements now
+
+The full descriptive report: revenue at risk, recovered (Torque-credited),
+recovery rate (by amount and by case count), unresolved / blocked / deferred /
+escalated, breakdowns by leg / intervention / outcome / time, the operational
+exception report, and case-level drill-down down to the agent's reasoning
+stream. Read-only, per-merchant, and computed live from the system's own records
+— there is no separate "reporting database" that could drift from the truth.
+
+### What later causal / experimental reporting would add
+
+- **Incrementality lift** — treatment recovery rate minus control recovery rate,
+  so the merchant sees the recovery that would *not* have happened without
+  Torque.
+- **A confidence interval** on that lift — honest about small-sample uncertainty
+  rather than a false-precision point number.
+- **A spillover caveat** — flagging the specific B2B cross-merchant cases where a
+  control result may have been contaminated by Torque's outreach for a
+  *different* merchant, and reporting the adjusted figure alongside the headline.
+
+### Likely investor / customer questions — and concise answers
+
+- **"How do you define 'recovered'?"** Money that came back **and** that our
+  attribution model credits to a Torque action (or a Torque payment link). If
+  the customer paid on their own, we show it — separately — and don't count it.
+- **"So you can't prove you caused it?"** Per case, we can — we know whether we
+  acted, and how, before the money landed. Across the book, the *incremental*
+  lift versus a control group is a separate report on the roadmap; the data for
+  it is already being collected.
+- **"Isn't 'messages sent' easier to report?"** Easier and useless. We report
+  the outcome — rupees recovered — and keep the activity as the explanation, not
+  the headline.
+- **"What about the cases you didn't recover?"** They're in the report:
+  unresolved (with the rupees still at risk), exhausted, escalated to a human,
+  or deliberately blocked by a compliance rule — each broken out, not hidden.
+- **"Can I trust the numbers?"** Every figure derives live from the case,
+  action, and payment records, and drills down to the individual case and its
+  full event history. There is no separate rollup table to reconcile.
+- **"Is one merchant's data ever visible to another?"** No — every query is
+  scoped to the merchant, end to end, and that is tested exhaustively.
+
+### What Module 9 did NOT do (be precise in a pitch)
+
+It does not build the dashboard UI (that consumes these numbers — next module),
+it does not compute incrementality lift or confidence intervals (a later causal
+report), and it does not re-run payment matching (it reads the attribution the
+reconciliation module already made). It is the measurement layer: honest,
+outcome-based, and fully auditable.
+
+
+---
+
+## 16. Module 10 Additions — The Product Surface
+
+*(New product knowledge from this module. Pitch language, not implementation.)*
+
+### Why this makes Torque more than a backend
+
+Before Module 10, Torque was a working recovery engine you had to take on
+faith — the intelligence was real but invisible. Module 10 is where a merchant
+or a judge can **open Torque, see it working, and understand it in under a
+minute** without reading a line of code. It turns the pipeline into a product:
+one command starts everything, one screen tells the story.
+
+### What the merchant dashboard tells a customer
+
+At a glance, in order of importance:
+
+- **Revenue recovered by Torque** — the big number, front and centre. Money that
+  actually came back because Torque acted.
+- **Revenue at risk** — the size of the leak Torque is working on.
+- **Recovery rate** — recovered as a share of at-risk.
+- **Recovered cases / unresolved cases / human escalations** — the operational
+  picture.
+- **Blocked and deferred (by rule)** — money Torque deliberately did not chase
+  yet, because a compliance rule said so. Shown as restraint, never as failure.
+- **Cost efficiency** — recovered rupees per rupee spent.
+
+Below the headline: recovery broken down by leg (subscription, payment, checkout,
+B2B), a simple recovery-over-time chart, a ranked top at-risk cases list, and —
+prominently, not buried — the exception list: every place Torque held back and
+why.
+
+### What "revenue at risk" and "revenue recovered" mean, on screen
+
+- **Revenue at risk** is the total value of the failed payments, abandoned carts
+  and overdue invoices Torque has taken on.
+- **Revenue recovered** is the subset of that which came back and which Torque's
+  attribution model credits to a Torque action. Money the customer paid on their
+  own is shown next to it, labelled "self-recovered — not counted".
+
+The dashboard never implies that messages sent, retries attempted, or AI
+recommendations made are the same as money recovered. The north-star is the
+recovered figure; everything else is supporting evidence.
+
+### How the merchant sees Torque prioritising cases
+
+The "top at-risk cases" list is ordered by Torque's recovery priority score —
+likelihood of recovery, size of the exposure, and the cost of the next nudge,
+combined. The merchant sees which cases Torque is working first, and can click
+any one to see why it ranks where it does. The ordering is Torque's decision,
+shown honestly — the screen does not re-rank anything itself.
+
+### How the explainability console answers "why did Torque do this?"
+
+Open any case and two things appear:
+
+1. **"Why this case?"** — the priority calculation laid out plainly: recovery
+   probability, amount at risk, expected intervention cost, and the resulting
+   priority score, with a short plain-English "why" (for example: Subscription
+   failure, 0–48h old, 65% benchmark recovery probability, next intervention:
+   WhatsApp).
+2. **The audit trail** — a chronological timeline of everything Torque did on the
+   case: risk detected, diagnosis with confidence, intervention selected,
+   guardrails checked, action executed, payment reconciled, money recovered.
+   Each step is the agent's own recorded reasoning. This is the primary answer to
+   "why did the agent do this?" — and it is a query over the existing history,
+   not a story reconstructed after the fact.
+
+### How the human agent takes over
+
+Some cases route to a person: a low-confidence diagnosis, a broken promise to
+pay, an automation that hit its ceiling. The Agent Console shows that queue,
+ordered by the same economic priority as everything else. For any case a human
+can:
+
+- pause it (take it out of automated playbook execution) and un-pause it (hand it
+  back);
+- resolve it — mark it recovered (with the amount), partially recovered, or
+  written off.
+
+A resolution is recorded as a first-class outcome: the case closes, the recovered
+amount is booked, an audit entry is written naming the agent, and the case leaves
+the queue. The dashboard reflects it immediately.
+
+### Why manual controls are important
+
+Automation that cannot be overridden is a liability. The console proves Torque is
+operable: a merchant's team keeps final say on the hard cases, every human action
+is audited exactly like an automated one, and "the agent gave up" is a visible,
+deliberate state (written off) rather than a case that silently rots.
+
+### How the live demo proves the system is actually working
+
+The Live Demo view has a button per synthetic scenario and a feed that updates
+every few seconds. Click "Payment failure" and a new case appears in the feed and
+flows through detection and diagnosis. Click "Network hard-stop" and a case
+appears, reaches the playbook stage, and then a guardrail blocks the retry —
+visibly, with the reason. A judge watches cases move through states in real time
+and understands the architecture without a walkthrough.
+
+Crucially, the scenario buttons run the real ingestion and the real compliance
+checks — nothing is faked. The "restraint" scenarios genuinely trip the guardrail
+predicate before the block is recorded.
+
+### How the exception list demonstrates restraint
+
+The dashboard's "Where Torque deliberately held back" panel lists, by reason,
+every action a guardrail blocked or deferred and the revenue it is holding:
+network hard-stops, missing consent, retry caps, quiet-hours deferrals. This is
+the compliance-by-construction differentiator made visible — Torque is not an
+aggressive recovery bot that blasts every customer; it is a system that knows
+when not to act, and shows you.
+
+### What the product demo looks like from beginning to end
+
+1. Start the server (one command). Open the dashboard.
+2. See the headline: revenue recovered against revenue at risk, and the recovery
+   rate.
+3. Open the top at-risk case, read why Torque prioritised it, scroll its audit
+   trail from "risk detected" to "money recovered".
+4. Open the Agent Console, see the human queue, resolve an escalated case, watch
+   the recovered number tick up.
+5. Open Live Demo, inject a payment failure, watch it enter the feed; inject a
+   network hard-stop, watch Torque refuse the retry and log why.
+6. Back to the dashboard: the exception list now shows the block; the numbers
+   have moved. Every figure came from real records.
+
+### Likely customer / investor questions — and concise answers
+
+- "Is this a real UI or a mock?" Real. It reads the live backend on every load;
+  there are no hard-coded numbers anywhere in it.
+- "Can my team actually operate it?" Yes — the Agent Console gives a human final
+  say on escalated cases (pause / resolve / write-off), and every human action is
+  audited exactly like an automated one.
+- "How do I know Torque will not spam my customers?" The exception list is on the
+  dashboard, not hidden — it shows every time a compliance rule stopped or
+  delayed an action, and why.
+- "How do you demo without live traffic?" One-click synthetic scenarios that run
+  the real ingestion and the real guardrail checks — including scenarios where
+  Torque deliberately does nothing.
+- "What does the priority score mean?" It is a ranking number — likelihood times
+  amount divided by next-step cost — not a rupee figure. Higher means chase this
+  first.
+- "Is any of the intelligence in the frontend?" None. The UI fetches, formats and
+  displays; every metric, score and ranking is computed by the backend.
+
+### What is implemented now
+
+A merchant dashboard, a case-explainability view with the full audit timeline, an
+Agent Console with working human overrides, a live demo surface with one-click
+synthetic scenarios and a polling activity feed, and a deterministic seed so the
+product never opens empty — all served by the same process on one port.
+
+### What remains for later modules
+
+- Real-time push (the live feed polls today);
+- incrementality / lift reporting on the dashboard (a later causal-measurement
+  module);
+- production infrastructure (Module 11);
+- a scripted judged-demo narrative (Module 13).

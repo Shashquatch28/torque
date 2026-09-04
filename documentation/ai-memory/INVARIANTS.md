@@ -747,6 +747,66 @@ violation**.
 
 ---
 
+## INV-58 — Reporting is read-only, tenant-scoped, and derives from authoritative data (Module 9)
+- **Domain:** `torque.reporting.metrics` / `torque.api.reporting`.
+- **Invariant:**
+  1. **Read-only** — no Module 9 code path writes any row (no `Action`,
+     `CaseEvent`, case mutation, no persisted aggregate — D-114). The reporting
+     router exposes only `GET` endpoints.
+  2. **Tenant-scoped** — every aggregation filters by `merchant_id`
+     (via `TenantScope`, or a join to `revenue_leak_case.merchant_id` for
+     `case_event`). Merchant A's summary, breakdowns, time series, exception
+     report, case list, case detail, and event stream never include merchant B's
+     rows; a cross-tenant `case_id` returns `None` (→ HTTP 404).
+  3. **Derived, not authoritative** — `recovery_type` / `recovered_amount` come
+     from Module 7 (INV-53) and are read verbatim (§9.3); `revenue_at_risk` is
+     computed per D-115; there is no second definition of "recovered".
+  4. **Deterministic** — repeated queries over an unchanged DB return
+     byte-identical results (exact `Decimal`; no cache to drift or double-count).
+- **Enforcement:** `HELPER` (all reads through `TenantScope` / an explicit
+  `merchant_id` join; a GET-only `APIRouter`) + `TEST` (a schema-introspection
+  test asserts the router's method set is exactly `{"GET"}`; `test_module9_
+  tenant_isolation` exercises every function and endpoint cross-merchant).
+- **Tests:** `tests/test_module9_tenant_isolation.py`,
+  `tests/test_module9_attribution.py`, `tests/test_module9_batch.py`,
+  `tests/test_schema_introspection.py`.
+- **Module 10 extension:** the `top_at_risk_cases` / `human_queue_list` /
+  `recent_activity` reads and the enriched `case_detail` follow the same rules
+  (read-only, `TenantScope`d, `recovery_score` / `recovery_score_breakdown` read
+  verbatim from Module 8). The reporting router stays GET-only.
+  `tests/test_module10_tenant_isolation.py`.
+
+## INV-59 — Agent Console human overrides use only legal edges, tenant-scoped, guarded (Module 10)
+- **Domain:** `torque.agent_console.resolve` / `torque.api.agent_console`.
+- **Invariant:**
+  1. **Legal edges only** — `resolve_escalation` transitions
+     `ESCALATED_TO_HUMAN → {RECOVERED, PARTIALLY_RECOVERED, WRITTEN_OFF}` (edges
+     already in `state_machine.py`); `pause_case` / `unpause_case` use
+     `PLAYBOOK_ACTIVE ↔ PAUSED`. Every transition goes through `transition_case`
+     (validates + writes `STATUS_CHANGED`). Module 10 adds **no** state-machine
+     edge.
+  2. **State-gated** — `resolve` requires `status == ESCALATED_TO_HUMAN`;
+     `pause` requires `PLAYBOOK_ACTIVE`; `unpause` requires `PAUSED`. Any other
+     current state raises `HumanResolutionError` (→ HTTP 409) and writes nothing.
+  3. **Tenant-scoped** — the case is fetched via `TenantScope(session,
+     merchant_id).get(...)`; a case owned by another merchant is
+     `CaseNotFoundError` (→ HTTP 404), never mutated.
+  4. **Guarded recovery write** — a `→ RECOVERED` / `→ PARTIALLY_RECOVERED`
+     resolution records `recovered_amount` + `recovery_type = AGENT_ASSISTED`
+     only inside `guards.human_resolution_writer`; a bare write still raises
+     `OwnershipViolation`.
+  5. **Audited** — every resolution writes exactly one `HUMAN_RESOLVED`
+     `CaseEvent` (`actor = HUMAN`, payload `{resolution, agent_id}`) and removes
+     the case from the human queue.
+- **Enforcement:** `HELPER` (`transition_case` + status checks + `TenantScope` +
+  `human_resolution_writer`) + `DB` (`state_machine` + the `case_event` payload
+  schema) + `TEST` (`tests/test_module10_agent_console.py`,
+  `tests/test_module10_api.py`).
+- **Tests:** `tests/test_module10_agent_console.py`,
+  `tests/test_module10_tenant_isolation.py`, `tests/test_schema_introspection.py`.
+
+---
+
 ## Invariants that are PLANNED (not yet enforced anywhere)
 
 - Pre-debit ≥24h gap actually blocking a retry: **IMPLEMENTED in Module 5**
@@ -765,3 +825,6 @@ violation**.
 - `recovery_type` derivation rules: **IMPLEMENTED in Module 7** (INV-52/53/54).
 - The Module 8 `(probability × amount_at_risk) ÷ cost` score: **IMPLEMENTED in
   Module 8** (INV-56/57) — through the `priority()` seam (D-098 / D-113).
+- Business recovery reporting: **IMPLEMENTED in Module 9** (INV-58) — read-only,
+  tenant-scoped, derived on demand. Incrementality / causal measurement is still
+  planned ("Module 9b" — D-121 / U-10).

@@ -269,6 +269,74 @@ if it produced a design decision, a `DECISIONS.md` entry. Do not delete it.
 
 ---
 
+## U-10 — Incrementality / causal measurement scope and ownership
+
+- **Question:** Blueprint §9.1 lists **incrementality lift** (treatment recovery
+  rate − control recovery rate) with a **Wilson score confidence interval**, and
+  a **SUTVA-adjusted lift** (excluding any control-cohort counterparty that also
+  appears in a treatment cohort for another merchant in the same window — Part A
+  §6) as Module 9 dashboard metrics. Module 9 (this run) implemented **only the
+  descriptive** metrics, per the maintainer's explicit instruction to separate
+  "descriptive recovery reporting" from "incremental causal impact measurement"
+  (§9.6) and the scope-boundary list naming SUTVA and confidence intervals as
+  not-to-implement (D-121). Which milestone owns the causal layer, and when?
+- **Current state:** the **inputs exist and are untouched** —
+  `Merchant_Counterparty.in_control_cohort` (assigned once per relationship,
+  Modules 1/2) and the denormalised `RevenueLeakCase.control_group`. Module 9's
+  `recovery_by_leg` already yields per-leg recovered-case ÷ total-case rates that
+  a lift calculation would difference across cohorts. Nothing computes lift, a
+  CI, or the SUTVA footnote today, and no endpoint exposes them.
+- **Why unresolved:** it is a genuine scope split, not a technical blocker. The
+  Wilson interval is a closed-form formula; the SUTVA footnote is a
+  cross-merchant cohort-overlap query. Both are small. But they change the
+  product claim from "here is what recovered" to "here is what Torque *caused*",
+  which the maintainer deliberately deferred for the descriptive run.
+- **Depends on:** the maintainer scheduling a **"Module 9b — Incrementality"**
+  run (or folding it into Module 13's demo narrative, where §9.3 already places
+  the SUTVA caveat as a deliberate beat).
+- **What would unblock it:** an approved Module 9b scope — the lift + Wilson CI
+  computation over the existing cohort assignment, the cross-merchant SUTVA
+  overlap query, and the endpoint(s) to expose them alongside (not instead of)
+  the descriptive numbers.
+- **Must implementation stop first?** No. Module 9's descriptive report stands on
+  its own; the causal layer is additive.
+
+---
+
+## U-11 — Agent Console override vocabulary and the pause/cancel target states
+
+- **Question:** Blueprint §4 names `escalation_resolution` ("written by a human
+  agent, driving the final transition") and §10 names the Agent Console's
+  "pause / cancel / resolve" controls, but neither pins down (a) the
+  `escalation_resolution` *values*, (b) whether a human `recovery_type` for a
+  resolved-recovered case is `AGENT_ASSISTED` or something new, or (c) what
+  "cancel" and "pause" transition an escalated case *to* (there is no
+  `ESCALATED_TO_HUMAN → CANCELLED` or `→ PAUSED` edge).
+- **Current state (Module 10 choices — D-123 / D-124):**
+  - `escalation_resolution` ∈ `{RECOVERED_BY_HUMAN, PARTIALLY_RECOVERED_BY_HUMAN,
+    WRITTEN_OFF}` — an `EscalationResolution` StrEnum owned in
+    `torque.agent_console`, not a Postgres enum (same posture as
+    `HumanQueueReason`).
+  - A human-resolved recovery is credited `recovery_type = AGENT_ASSISTED` (the
+    human agent is Torque's — so it counts in Module 9's `recovered_amount`,
+    D-116), written inside `guards.human_resolution_writer`.
+  - **"cancel"** = resolve → `WRITTEN_OFF` (the "give up" terminal). There is
+    deliberately no `ESCALATED_TO_HUMAN → CANCELLED` — the blueprint reserves
+    `CANCELLED` / `SELF_RECOVERED` for a genuine customer self-payment detected by
+    reconciliation. **"pause" / "unpause"** = `PLAYBOOK_ACTIVE ↔ PAUSED`, for a
+    queued case still inside a playbook (broken-promise / open-conversation
+    feeds), never for an escalated one.
+- **Why unresolved:** the blueprint underspecifies it; the Module 10 choices are
+  the faithful minimum (only legal edges, no misattribution) but a maintainer may
+  want a distinct `HUMAN_RECOVERED` recovery-type, or an
+  `ESCALATED_TO_HUMAN → PAUSED` edge for "parked" escalations.
+- **Depends on:** the maintainer confirming the vocabulary and the pause target,
+  or a later Agent-Console iteration.
+- **Must implementation stop first?** No — the current model is legal, audited,
+  and tenant-safe (INV-59).
+
+---
+
 ## Resolved (kept for history)
 
 ### U-01 #3 (`PLAYBOOK_ACTIVE → SYSTEMIC_HOLD`) — RESOLVED 2026-09-02 (M7c)

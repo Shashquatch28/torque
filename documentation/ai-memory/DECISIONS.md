@@ -2949,6 +2949,131 @@ BY D-0NN`.
 
 ---
 
+## D-142 — Provider architecture: `LLMProvider` + `MockProvider` only; a real provider is deferred; the async boundary needs no new test dependency
+
+- **Milestone:** AI Phase 4 — LLM Case Explanation (`ai-layer` branch, not
+  `main`).
+- **Decision (three bundled sub-decisions, one milestone):**
+  1. **`LLMProvider` (`src/torque/ai/providers/base.py`) is an `ABC` with
+     exactly two members** — `async structured_generate(*, system, user,
+     schema, max_tokens, timeout_s) -> BaseModel` and `provider_id() ->
+     str` — matching the Phase 4 task's own conceptual interface verbatim.
+     `torque.ai.narrative.explain_case` receives a provider instance by
+     dependency injection and never imports, constructs, or branches on a
+     concrete provider type.
+  2. **`MockProvider` is the only concrete provider built in Phase 4; a
+     real (e.g. Anthropic) provider is deferred, not merely postponed
+     without reason.** The blueprint names Anthropic as the intended
+     primary provider, but provider cost/API-key provisioning is
+     explicitly a human decision this program does not make unilaterally,
+     and the standard test suite must stay network-independent regardless
+     of which real provider is eventually chosen. Adding a real provider
+     now would mean installing an SDK dependency to satisfy an integration
+     nothing in Phase 4 actually exercises — exactly the "theoretical
+     future integration" the task's own instructions warn against. Not
+     built. `MockProvider` is deterministic (same input -> byte-identical
+     output, including a *fixed placeholder* `generated_at` rather than a
+     live timestamp, specifically so provider-level repeatability is
+     testable by plain equality) and genuinely evidence-grounded: it parses
+     the `<evidence>` JSON envelope out of its own `user` message and
+     builds every claim/citation from that real payload, never an
+     arbitrary hard-coded narrative disconnected from the input.
+  3. **The one async boundary (`structured_generate`/`explain_case`) needs
+     no new test dependency.** A real, network-backed provider is
+     necessarily I/O-bound, so the task's own interface specifies `async
+     def` for `structured_generate` — a deliberate divergence from the rest
+     of this (synchronous, `Session`-based) codebase, matched to the one
+     genuinely I/O-bound operation in `torque.ai`. Rather than add
+     `pytest-asyncio` to exercise it, tests drive the coroutine with
+     stdlib `asyncio.run(...)` — zero new dependency, and the sync
+     sub-calls inside `explain_case` (`gather_case_evidence`,
+     `find_precedent`) run exactly as they would if the function were
+     synchronous; only the one provider call is actually awaited.
+- **Alternatives considered:** building a `LocalProvider` (e.g.
+  Ollama-served) alongside `MockProvider` for network-independent-but-more-
+  realistic dev testing — rejected for Phase 4 specifically: it would add a
+  real inference dependency/runtime requirement to satisfy a capability
+  (a more realistic mock) `MockProvider`'s evidence-parsing design already
+  provides for testing purposes; can be reconsidered whenever a real
+  provider is actually built. Adding `TORQUE_AI_PROVIDER` to `AISettings`
+  now — rejected: nothing in Phase 4 has a provider-selection/factory
+  function to consume it, and this module's own convention explicitly
+  forbids unconsumed configuration; deferred to whichever phase adds one
+  (see `torque.ai.config`'s docstring).
+- **Consequence:** the entire Phase 4 test suite (32 new tests) runs with
+  zero network access, zero API keys, and zero new runtime dependencies —
+  `uv run pytest` stays exactly as fast and hermetic as it was before this
+  phase. The real-provider question is left open, explicitly, for the
+  maintainer.
+- **Status:** IN FORCE.
+
+---
+
+## D-143 — Narrative safety architecture: the orchestrator never trusts provider-supplied identity fields; citation validation is an exact-match hard gate; `NarrativeClaim` replaces the task's literal `TimelineEntry` naming
+
+- **Milestone:** AI Phase 4 — LLM Case Explanation (`ai-layer` branch, not
+  `main`).
+- **Decision (three bundled sub-decisions, one milestone):**
+  1. **`explain_case` always overwrites `case_id`, `generated_at`,
+     `provider_id`, and `prompt_version` on the validated `CaseNarrative`
+     (`model_copy(update={...})`) — it never returns what the provider
+     itself supplied for those four fields.** Pydantic still requires the
+     provider to supply *some* schema-valid value for each (there is no
+     schema-level way to mark them "ignored"), but nothing downstream ever
+     reads what it supplied. This is deliberate, structural distrust of the
+     one part of the response a hallucinating or adversarial model could
+     use to misattribute a narrative to the wrong case, claim a fabricated
+     generation time, or claim to be a different provider/prompt version
+     than the one that actually ran. Proven, not merely asserted:
+     `tests/test_ai_narrative.py::
+     test_case_identity_is_correct_even_when_the_provider_lies` configures
+     `MockProvider(wrong_case_id=True)` and confirms the final
+     `CaseNarrative.case_id` is still correct.
+  2. **Citation validation is an exact-match hard gate, not a superset
+     check and not a repair pass.** `_validate_citations` (`torque.ai.
+     narrative`) requires the flat `citations` list to equal — not merely
+     contain — the union of every citation id used by a claim-bearing
+     field plus every precedent case's own `evidence_id`; any missing id,
+     any extra id, or any id that does not resolve (checked against the
+     current case's evidence via Phase 2's real `resolve_citation`, or by
+     exact match against an already-Phase-3-verified precedent
+     `evidence_id`) raises `NarrativeGenerationError` and discards the
+     entire narrative. Nothing is silently dropped, repaired, or replaced
+     with a synthesized substitute — a direct implementation of the Phase
+     4 task's own "hard correctness boundary" instruction.
+  3. **The claim-bearing narrative primitive is named `NarrativeClaim`
+     (`claim: str`, `citation_ids: list[str]`), not `TimelineEntry`, even
+     though the Phase 4 task's own wording suggested reusing that name.**
+     `torque.ai.schemas.TimelineEntry` already means something different
+     and load-bearing since Phase 1 — one raw, uninterpreted `CaseEvent`
+     evidence item (`reference` / `event_type` / `actor` / `timestamp` /
+     `reasoning` / `payload`) inside `CaseEvidence.timeline`. Reusing that
+     name for an unrelated `claim`+`citation_ids` shape would either
+     silently redefine an existing, tested, cross-phase-referenced class
+     (breaking `CaseEvidence.timeline: list[TimelineEntry]`'s established
+     meaning) or collide two incompatible meanings under one identifier —
+     both squarely against the standing instruction to not redesign
+     existing interfaces unnecessarily. `NarrativeClaim` delivers the exact
+     described contract under a name that does not collide.
+- **Alternatives considered:** treating an extra (valid-but-unused) flat
+  citation as merely a warning rather than a hard failure — rejected: the
+  task's own wording ("must be the union") reads as an exact-equality
+  contract, and tolerating drift here would blunt Phase 5's future
+  evaluation signal for "the model padded its citations." Silently
+  computing the flat `citations` list from `used_ids` instead of validating
+  the provider's own attempt — rejected: it would mask a genuinely lazy or
+  broken model response instead of surfacing it, exactly the "silently
+  discard" behavior the task explicitly forbids.
+- **Consequence:** a `CaseNarrative` that successfully leaves
+  `explain_case` is provably self-consistent (every citation resolves,
+  the flat list matches usage exactly) and provably correctly attributed
+  (identity fields are orchestrator-authored, never model-authored) — both
+  properties hold by construction, not by convention, and both are directly
+  exercised by dedicated tests rather than only implied by code review.
+- **Status:** IN FORCE.
+
+---
+
 ## Notes not recorded as decisions
 
 - The **Git-history incident of 2026-09-02** (a bad commit briefly on `main`,

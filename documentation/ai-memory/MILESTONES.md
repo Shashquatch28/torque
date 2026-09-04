@@ -2315,6 +2315,158 @@ explicitly-assigned §10.8 human-resolution write path.)*
 
 ---
 
+## AI Phase 4 — LLM Case Explanation — COMPLETE
+
+- **Branch:** `ai-layer`. **Not on `main`.**
+- **Verified before starting:** `git status`/`git branch --show-current`
+  confirmed `ai-layer`, clean tree, HEAD `b5af313` "feat(ai): add
+  retrieval-grounded precedent engine" (the maintainer's commit of the
+  Phase 3 work — its own message, unlike the earlier `ceafbec`, is
+  accurate). `src/torque/ai/{schemas,config,retrieval}.py` were re-read and
+  found byte-identical to what Phase 0-3 left them — no drift.
+- **Migrations:** **none.** `alembic head` stays `0018_escalation_resolution`.
+- **Objective:** the first real AI-generation capability —
+  `explain_case()`, producing a structured, citation-grounded
+  `CaseNarrative` from authoritative evidence (Phase 1) + retrieved
+  precedent (Phase 3) + LLM synthesis. The LLM's job is synthesis,
+  explanation, and organization only — never diagnosis, scoring, policy,
+  playbook selection, action execution, or state transition; the schema
+  has no field for any of those, and nothing downstream of `explain_case`
+  executes anything it returns.
+- **Scope delivered:**
+  - `src/torque/ai/providers/{__init__,base,mock_provider}.py` (**new
+    package**) — `LLMProvider` (`ABC`: `async structured_generate(*,
+    system, user, schema, max_tokens, timeout_s) -> BaseModel` +
+    `provider_id() -> str`); `MockProvider` — the required,
+    network-independent implementation. Deterministic (fixed placeholder
+    `generated_at`, not a live timestamp) and genuinely evidence-grounded:
+    it parses the `<evidence>` JSON envelope out of its own `user` message
+    (using `rindex` for the closing tag specifically so an adversarial
+    payload containing a literal `</evidence>` string cannot truncate the
+    parse — a real robustness fix found while writing the prompt-injection
+    test, not a hypothetical) and builds every claim/citation from that
+    real payload. Constructor flags (`raise_exception`,
+    `return_malformed`, `return_wrong_type`, `fabricate_citation`,
+    `wrong_case_id`) let tests deliberately simulate every provider
+    failure mode without any network access.
+  - `src/torque/ai/prompts.py` (**new module**) — `PROMPT_VERSION =
+    "narrative-v1"`; `build_narrative_prompt(evidence, precedents) ->
+    (system, user)`. The system message is a fixed module-level constant
+    (role, task, seven hard rules, output-format requirements, and an
+    explicit prompt-injection defense) — never built from or interpolated
+    with evidence. The user message is `<evidence>` + `json.dumps({
+    "current_case": evidence.model_dump(mode="json"), "precedent_cases":
+    [...]}, indent=2, sort_keys=True)` + `</evidence>` — only typed
+    `torque.ai.schemas` DTOs are ever serialized; no ORM object, `Session`,
+    or internal field reaches this module.
+  - `src/torque/ai/narrative.py` (**new module**) — `async
+    explain_case(session, *, merchant_id, case_id, provider, max_tokens=
+    None, timeout_s=None) -> CaseNarrative`. Pipeline: `gather_case_evidence`
+    (Phase 1) -> a bridging `TenantScope.get(RevenueLeakCase, ...)` lookup
+    -> `find_precedent` (Phase 3, unmodified signature, reused not
+    reimplemented) -> `build_narrative_prompt` -> `provider.
+    structured_generate` (wrapped in `try/except Exception`, re-raised as
+    `NarrativeGenerationError`, original chained via `from exc`) ->
+    `_validate_citations` (the Phase 4 hard safety gate — exact-match, not
+    superset, not repair; see D-143) -> `model_copy(update={case_id,
+    generated_at, provider_id, prompt_version})` — the four identity fields
+    are ALWAYS orchestrator-authored, never trusted from the provider.
+  - `src/torque/ai/schemas.py` — `NarrativeClaim` (`claim: str,
+    citation_ids: list[str]` — deliberately NOT named `TimelineEntry`
+    despite the task's own wording; see D-143 sub-decision 3 for why
+    reusing that name would have broken an existing Phase 1 class),
+    `PrecedentSection` (`found`, `cases`, `note`), `NO_PRECEDENT_NOTE`
+    (the fixed, non-LLM-authored empty-precedent text), `CaseNarrative`
+    (the full task-specified contract: `case_id, generated_at, summary,
+    current_state, root_cause_explanation, timeline, actions_taken,
+    guardrail_explanation, precedent, recommended_human_attention,
+    uncertainty, evidence_gaps, citations, provider_id, prompt_version`).
+  - `src/torque/ai/config.py` — `AISettings` gains `max_tokens: int = 2000`
+    and `timeout_s: float = 30.0`, genuinely consumed as `explain_case`'s
+    defaults (not decorative). `TORQUE_AI_PROVIDER` deliberately NOT added
+    — nothing in Phase 4 has a provider-selection factory to consume it
+    (see D-142).
+  - `src/torque/ai/exceptions.py` — `NarrativeGenerationError(AIError)`,
+    the single new exception covering every Phase 4 failure mode (provider
+    exception, schema-invalid response, non-`BaseModel` return, unresolved
+    citation) — no broad new error architecture, per the task's own
+    instruction to reuse the existing convention.
+  - **Tests (NEW, 32):** `tests/test_ai_providers.py` (13 — `LLMProvider`
+    cannot be instantiated directly; `MockProvider` happy path, citation
+    grounding, provider-id disclosure, determinism, no-network behavioral
+    proxy, honest empty-precedent, evidence-gap-not-guess; and all five
+    simulated failure modes). `tests/test_ai_narrative.py` (19 — basic
+    generation, case identity incl. provider-lie correction, citation
+    validity/completeness/de-duplication, precedent present/absent using
+    real `module7_writer`-gated recovered cases, evidence-gap handling,
+    provider disclosure, all four failure modes end-to-end
+    (malformed/exception/wrong-type/fabricated-citation) each asserted to
+    raise `NarrativeGenerationError` without leaking the raw provider
+    exception, unknown-case and cross-tenant `EvidenceNotFoundError`
+    (before any provider call), a prompt-injection test proving the system
+    message never changes and injected evidence survives only as
+    JSON-escaped data, a `db.new`/`db.dirty`/`db.deleted` write-nothing
+    check, and one full end-to-end pipeline test against the real seeded
+    `acc_demo` dataset).
+- **Decisions:** D-142 (provider architecture: `LLMProvider`+`MockProvider`
+  only, real provider deferred, async boundary needs no new dependency),
+  D-143 (narrative safety architecture: orchestrator-authored identity
+  fields, exact-match citation gate, `NarrativeClaim` naming).
+- **Invariants:** INV-63 (generated narratives never carry an unresolved
+  citation or provider-authored identity; narrative generation is
+  mutation-free and unpersisted).
+- **A real robustness bug found and fixed during testing, not merely
+  anticipated:** the first version of `MockProvider._extract_evidence_payload`
+  used `user.index("</evidence>")` (first occurrence) to find the envelope's
+  closing tag. An adversarial `CaseEvent.reasoning` value containing the
+  literal text `</evidence><evidence>fabricated` (part of the deliberate
+  prompt-injection test evidence) matched that search *inside the JSON
+  payload itself*, truncating the parse and raising a `JSONDecodeError`
+  from within `structured_generate` before any citation-validation logic
+  ever ran. Fixed by using `rindex` (last occurrence) for the closing tag —
+  correct because `build_narrative_prompt` always appends the real
+  `</evidence>` exactly once, at the very end, after arbitrarily much
+  untrusted data. Re-verified: the same adversarial input now parses
+  correctly and the pipeline completes and citation-validates cleanly.
+  This was caught by the test suite itself, not by inspection.
+- **Deviations from `AI_BLUEPRINT.md` / the Phase 4 task:** the claim-bearing
+  narrative primitive is named `NarrativeClaim`, not `TimelineEntry` as the
+  task's own wording suggested — see D-143 sub-decision 3 (a name collision
+  with an existing, differently-shaped Phase 1 class, not a redesign of
+  anything). No other deviation.
+- **Deferred work:** everything from Phase 5 onward (faithfulness/
+  evaluation harness, Agent Console integration, shadow ML, hardening, demo
+  polish) — none implemented, none started. Explicitly **not** implemented
+  in this milestone: any real (Anthropic or otherwise) provider; any API
+  endpoint (`api/ai.py`); any frontend/Agent Console change; any embedding
+  or vector search; `evaluation.py` or any citation-coverage/retrieval-
+  precision/unsupported-claim-rate/faithfulness metric; any shadow ML
+  (XGBoost/SHAP/calibration); any narrative persistence (generation is
+  stateless — nothing is written to the database anywhere in this
+  milestone).
+- **Unresolved:** none resolved and none newly introduced by this work.
+- **`state_machine.py` / `guards.py`:** **both byte-unchanged vs HEAD**
+  (`git diff` empty for each).
+- **Tests at completion:** **1321** passed (was 1289 after Phase 3;
+  **+32**), 0 failed, 0 skipped, the same 1 pre-existing cosmetic
+  `StarletteDeprecationWarning`. `ruff check .` clean. `alembic upgrade
+  head` -> `0018` (no-op — no migration); roundtrip green
+  (`tests/test_zz_migrations_roundtrip.py`, 1 passed).
+- **Verification status:** complete + verified — `uv run pytest
+  tests/test_ai_providers.py tests/test_ai_narrative.py
+  tests/test_ai_retrieval.py tests/test_ai_citations.py
+  tests/test_ai_evidence.py tests/test_ai_boundary.py -q` (91 passed),
+  `uv run pytest -q` (full suite, 1321 passed), `uv run ruff check .`
+  (clean, repository-wide), `uv run alembic upgrade head` (succeeds, no new
+  migration), `uv run pytest tests/test_zz_migrations_roundtrip.py -q` (1
+  passed), `git diff --check` (clean — only pre-existing CRLF/LF
+  advisories), `git diff -- src/torque/state_machine.py
+  src/torque/models/guards.py` (both empty).
+- **Recommended commit message:**
+  `AI Phase 4: LLM case explanation — LLMProvider/MockProvider, deterministic prompt builder, explain_case() orchestration, CaseNarrative (D-142/D-143/INV-63); citation existence is a hard gate, provider identity fields never trusted, stateless, zero deterministic-core changes, no migration`
+
+---
+
 ## (historical) What came next after Module 10
 
 **Module 10 — UI/UX — COMPLETE.** Torque is now a runnable, demo-able product:

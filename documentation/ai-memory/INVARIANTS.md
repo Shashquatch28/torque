@@ -955,6 +955,55 @@ violation**.
 
 ---
 
+## INV-63 — A generated `CaseNarrative` never contains an unresolved citation and never carries provider-authored identity (AI Phase 4)
+
+- **Domain:** `src/torque/ai/narrative.py` + `torque.ai.schemas.
+  {CaseNarrative, NarrativeClaim, PrecedentSection}` (branch `ai-layer`, not
+  yet on `main`).
+- **Invariant:**
+  1. **Every citation resolves, or the narrative does not leave
+     `explain_case` at all.** Every id in every claim-bearing field
+     (`current_state`, `root_cause_explanation`, `timeline`,
+     `actions_taken`, `guardrail_explanation`) and every precedent case's
+     `evidence_id` must resolve — via Phase 2's real `resolve_citation`
+     against the current case's evidence, or by exact match against an
+     already-Phase-3-verified precedent `evidence_id`. One unresolved id
+     anywhere raises `NarrativeGenerationError`; nothing is silently
+     dropped, repaired, or replaced with a synthesized substitute.
+  2. **The flat `citations` list exactly equals the set of ids actually
+     used**, no more and no less — enforced, not merely requested of the
+     model.
+  3. **`case_id`, `generated_at`, `provider_id`, and `prompt_version` are
+     never provider-authored in the returned result.** `explain_case`
+     always overwrites these four fields with orchestrator-known-correct
+     values after validation succeeds — a hallucinating or adversarial
+     provider cannot misattribute a narrative to the wrong case, claim a
+     fabricated generation time, or misrepresent which provider/prompt
+     version actually ran.
+  4. **Narrative generation performs no mutation and persists nothing.** No
+     `session.add`/`.delete`/`.commit` anywhere in `torque.ai.narrative`;
+     no `CaseNarrative` is ever written to the database. A failed
+     generation leaves the deterministic evidence (already read,
+     separately, first) completely unaffected.
+  5. **Evidence is always supplied to the provider as explicitly untrusted
+     data**, never as instructions and never interpolated into the system
+     message — the system message is a fixed constant
+     (`torque.ai.prompts._SYSTEM_PROMPT`), byte-identical regardless of
+     evidence content, for every call.
+- **Enforcement:** `HELPER` (`torque.ai.citations.resolve_citation`, reused
+  unmodified) + `TEST` (`tests/test_ai_narrative.py` — unresolved/fabricated
+  citation rejection, exact flat-list-equality rejection, provider-lie
+  correction for all four identity fields, a prompt-injection test proving
+  the system message never changes and evidence text survives only as data,
+  and a `db.new`/`db.dirty`/`db.deleted` empty-check proving zero writes
+  occurred) + `TEST` (`tests/test_ai_boundary.py`'s import-graph check,
+  which covers `narrative.py`, `prompts.py`, and `providers/` exactly as it
+  covers every other module in the package).
+- **Tests:** `tests/test_ai_narrative.py`, `tests/test_ai_providers.py`,
+  `tests/test_ai_boundary.py`.
+
+---
+
 ## Invariants that are PLANNED (not yet enforced anywhere)
 
 - Pre-debit ≥24h gap actually blocking a retry: **IMPLEMENTED in Module 5**

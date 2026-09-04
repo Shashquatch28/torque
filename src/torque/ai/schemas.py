@@ -284,15 +284,126 @@ class CaseEvidence(BaseModel):
     gathered_at: datetime
 
 
+# --- Phase 4: generated-narrative contract ----------------------------------
+
+
+class NarrativeClaim(BaseModel):
+    """One claim-bearing sentence in a generated `CaseNarrative` — the LLM's
+    unit of assertion, always paired with the citation ids that support it.
+
+    **Deliberately NOT named `TimelineEntry`, despite the Phase 4 task's own
+    wording suggesting that name.** `TimelineEntry` (above) already means
+    something structurally different and load-bearing since Phase 1: one
+    raw, uninterpreted `CaseEvent` evidence item inside `CaseEvidence.
+    timeline`, with fields `reference` / `event_type` / `actor` /
+    `timestamp` / `reasoning` / `payload` — nothing like `claim` +
+    `citation_ids`. Reusing that name for this unrelated shape would either
+    silently redefine an existing, tested, Phase 1-3 class (forbidden — "do
+    not redesign existing interfaces unnecessarily") or collide two
+    incompatible meanings under one name. `NarrativeClaim` is the same
+    `claim: str` / `citation_ids: list[str]` contract the task describes,
+    under a name that does not collide. See `documentation/ai-memory/
+    DECISIONS.md` for the recorded reasoning.
+
+    `citation_ids` may be empty ONLY when the claim itself states that
+    evidence is missing (e.g. "no diagnosis has been recorded yet"); a
+    substantive factual claim about the case must cite something. Every id
+    used here must resolve against the evidence actually supplied to the
+    generation call — enforced by `torque.ai.narrative` after generation,
+    not merely requested of the model (§11 of the Phase 4 task).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    claim: str
+    citation_ids: list[str]
+
+
+class PrecedentSection(BaseModel):
+    """The narrative's precedent block — always present, even when empty.
+
+    `found=False` with an empty `cases` list and the fixed note below is the
+    correct, honest representation of "no comparable resolved case exists
+    yet" (Phase 3's `find_precedent() == []`) — never a fabricated case,
+    never `None` standing in for the whole section.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    found: bool
+    cases: list[PrecedentCase]
+    note: str
+
+
+#: The fixed, non-LLM-authored note used whenever `find_precedent` returned
+#: `[]` — the orchestration layer supplies this text; the model is
+#: instructed never to invent its own precedent-not-found phrasing (§19 of
+#: the Phase 4 task).
+NO_PRECEDENT_NOTE = "No comparable resolved case exists yet for this root cause."
+
+
+class CaseNarrative(BaseModel):
+    """Phase 4 — the structured, citation-grounded output of
+    `torque.ai.narrative.explain_case`.
+
+    The LLM's job is synthesis, explanation, and organization of evidence
+    already gathered by the deterministic core (Phase 1) and precedent
+    already retrieved by Phase 3 — never diagnosis, scoring, policy,
+    playbook selection, action execution, or state transition (none of
+    which this schema even has a field for).
+
+    **`case_id` / `generated_at` / `provider_id` / `prompt_version` are
+    never trusted from the provider.** `explain_case` always overwrites
+    these four fields with orchestrator-known-correct values after
+    validation (`model_copy(update={...})`) — a hallucinating or malicious
+    provider cannot misattribute a narrative to the wrong case, claim a
+    fake generation time, or claim to be a different provider/prompt
+    version than the one that actually ran. The provider still must supply
+    *some* schema-valid value for each (Pydantic requires it), but nothing
+    downstream ever reads what it supplied.
+
+    `recommended_human_attention` is plain text only — a suggestion for
+    what a human reviewer might want to look at, grounded in the evidence.
+    It is never parsed as a command and nothing in Torque executes it.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    case_id: str
+    generated_at: datetime
+    summary: str
+    current_state: NarrativeClaim
+    root_cause_explanation: NarrativeClaim
+    timeline: list[NarrativeClaim]
+    actions_taken: list[NarrativeClaim]
+    guardrail_explanation: list[NarrativeClaim]
+    precedent: PrecedentSection
+    recommended_human_attention: str | None
+    uncertainty: str
+    evidence_gaps: list[str]
+    #: The de-duplicated union of every `citation_ids` value used across
+    #: `current_state` / `root_cause_explanation` / `timeline` /
+    #: `actions_taken` / `guardrail_explanation`, plus every `precedent.
+    #: cases[*].evidence_id` — enforced exactly, not just "a superset," by
+    #: `torque.ai.narrative`'s post-generation validation.
+    citations: list[Citation]
+    provider_id: str
+    prompt_version: str
+
+
 __all__ = [
     "ActionEvidence",
     "CaseEvidence",
+    "CaseNarrative",
     "CaseSnapshot",
     "Citation",
     "CounterpartyRelationshipEvidence",
     "EvidenceItem",
     "EvidenceReference",
+    "NarrativeClaim",
+    "NO_PRECEDENT_NOTE",
     "PrecedentCase",
+    "PrecedentSection",
     "PromiseEvidence",
     "SourceType",
     "TimelineEntry",

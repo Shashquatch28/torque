@@ -906,6 +906,55 @@ violation**.
 
 ---
 
+## INV-62 — Precedent retrieval is same-merchant, terminal-only, self-excluding, and bounded (AI Phase 3)
+
+- **Domain:** `src/torque/ai/retrieval.py` (branch `ai-layer`, not yet on
+  `main`).
+- **Invariant:**
+  1. **Same-merchant only.** Every candidate query goes through
+     `torque.db.scoped.TenantScope`; `find_precedent` additionally rejects
+     (raises `ValueError`) a call where `case.merchant_id != merchant_id`,
+     failing fast on a caller bug rather than silently searching the wrong
+     tenant. No cross-merchant precedent search exists anywhere in this
+     module.
+  2. **Terminal/resolved cases only.** A candidate must satisfy the same
+     terminal-status test `torque.state_machine.is_terminal` applies
+     (`_terminal_statuses_for_leg`, cross-tested for exact equivalence —
+     see D-141). An in-flight case is never returned as precedent,
+     regardless of how well its metadata matches.
+  3. **Never its own precedent.** `RevenueLeakCase.case_id != case.case_id`
+     is part of the candidate filter itself — the case being explained can
+     never appear as its own precedent, even when it perfectly matches its
+     own search key (a terminal case with its own root cause).
+  4. **Bounded.** `find_precedent` never returns more than `top_k` results
+     (default 3, hard ceiling `MAX_TOP_K = 10`); an out-of-range `top_k` is
+     rejected, never silently clamped or ignored.
+  5. **Insufficient key -> `[]`, never broadened.** A case with no
+     `root_cause_code` yet returns `[]` immediately — retrieval never falls
+     back to "every case at this merchant."
+  6. **Every precedent's `evidence_id` resolves through the Phase 2
+     citation mechanism.** `PrecedentCase.evidence_id` is always a valid
+     `EvidenceReference.reference_id` for *that precedent case's own*
+     `gather_case_evidence(...)` result — verified by
+     `torque.ai.citations.resolve_citation` in
+     `tests/test_ai_retrieval.py::
+     test_precedent_evidence_id_resolves_via_phase2_citation_resolver`. No
+     second id scheme, no unresolvable citation is ever constructed.
+  7. **Read-only.** No `session.add`/`.delete`/`.commit` anywhere in
+     `torque.ai.retrieval` — every function only ever calls
+     `session.scalars(select(...))` / `session.execute(select(...))`.
+- **Enforcement:** `HELPER` (`TenantScope`, reused unmodified) + `TEST`
+  (`tests/test_ai_retrieval.py` — same-merchant, cross-merchant exclusion,
+  current-case exclusion, in-flight exclusion, top-K, citation-resolution,
+  and two tests against the real seeded `acc_demo` corpus proving both a
+  positive and a zero-result outcome by exact case identity, not just
+  `len() > 0`) + `TEST` (`tests/test_ai_boundary.py`'s import-graph check,
+  which covers `retrieval.py` exactly as it covers `evidence.py` and
+  `citations.py`).
+- **Tests:** `tests/test_ai_retrieval.py`, `tests/test_ai_boundary.py`.
+
+---
+
 ## Invariants that are PLANNED (not yet enforced anywhere)
 
 - Pre-debit ≥24h gap actually blocking a retry: **IMPLEMENTED in Module 5**

@@ -222,6 +222,39 @@ class Citation(BaseModel):
     evidence_id: str
 
 
+class PrecedentCase(BaseModel):
+    """Phase 3 — one comparable, resolved historical case surfaced by
+    `torque.ai.retrieval.find_precedent` for the SAME merchant.
+
+    Deliberately small, mirroring `Citation`'s own minimalism: enough to say
+    *which* prior case, *what* its root cause and outcome were, and *how* to
+    trace that outcome back to authoritative evidence — nothing that reads
+    as a recommendation. Retrieval is informational only; it never answers
+    "what should Torque do," only "has this happened before, and what
+    happened."
+
+    `evidence_id` resolves through the existing Phase 2 `resolve_citation`
+    primitive — but against *that precedent case's own*
+    `gather_case_evidence(...)` result, not the current case's. No new
+    citation mechanism, no new id scheme: this is the same
+    `EvidenceReference.reference_id` format Phase 1/2 already established.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    case_id: str
+    root_cause_code: str
+    #: A short, deterministic, template-derived summary (root cause,
+    #: resolution, recovered amount) — never free-form/LLM-generated prose.
+    outcome_summary: str
+    #: Whether any money came back on this case (`recovered_amount > 0`) —
+    #: independent of who gets attribution credit (Module 9's
+    #: Torque-attributed vs. self-recovered distinction is a separate,
+    #: orthogonal concern this field does not encode).
+    recovered: bool
+    evidence_id: str
+
+
 class CaseEvidence(BaseModel):
     """The complete Phase-1 evidence set for one case.
 
@@ -259,6 +292,7 @@ __all__ = [
     "CounterpartyRelationshipEvidence",
     "EvidenceItem",
     "EvidenceReference",
+    "PrecedentCase",
     "PromiseEvidence",
     "SourceType",
     "TimelineEntry",

@@ -55,7 +55,7 @@ not guessed.
 Phase 0 — AI architectural isolation                COMPLETE
 Phase 1 — AI read model / evidence interface          COMPLETE
 Phase 2 — Evidence normalization + citation model      COMPLETE
-Phase 3 — Retrieval / precedent engine                  NOT STARTED
+Phase 3 — Retrieval / precedent engine                  COMPLETE
 Phase 4 — LLM case explanation                           NOT STARTED
 Phase 5 — Faithfulness / evaluation                       NOT STARTED
 Phase 6 — Agent Console integration                        NOT STARTED
@@ -66,21 +66,24 @@ Phase 9 — Demo polish                                         NOT STARTED
 
 **What exists in the repository right now, concretely:** the `src/torque/ai/`
 package — `__init__.py`, `exceptions.py`, `config.py`, `schemas.py`,
-`evidence.py` (Phase 0+1), and `citations.py` (Phase 2) — plus its test
-suite (`tests/test_ai_boundary.py`, `tests/test_ai_config.py`,
-`tests/test_ai_evidence.py`, `tests/test_ai_citations.py`). The package's
+`evidence.py` (Phase 0+1), `citations.py` (Phase 2), and `retrieval.py`
+(Phase 3) — plus its test suite (`tests/test_ai_boundary.py`,
+`tests/test_ai_config.py`, `tests/test_ai_evidence.py`,
+`tests/test_ai_citations.py`, `tests/test_ai_retrieval.py`). The package's
 public capabilities are: `torque.ai.evidence.gather_case_evidence` (a
 read-only function projecting one case's authoritative Torque state into
-typed, redacted, citation-referenced DTOs) and `torque.ai.citations.
+typed, redacted, citation-referenced DTOs); `torque.ai.citations.
 resolve_citation` / `all_evidence_items` / `citation_for` (a pure,
-no-database citation-resolution primitive operating on that projection).
-There is no retrieval, no embedding, no LLM call, no citation-bearing
-generated prose, no shadow ML model, and no API endpoint. See "Deferred
-Work" in the Phase 2 completion report for the exact, unimplemented list.
+no-database citation-resolution primitive); and `torque.ai.retrieval.
+find_precedent` (a deterministic, Postgres-FTS-assisted search for
+comparable, resolved, same-merchant historical cases). There is no
+embedding, no LLM call, no citation-bearing generated prose, no shadow ML
+model, and no API endpoint. See the Phase 3 completion report for the
+exact, unimplemented list.
 
-No phase beyond 0, 1, and 2 is marked complete merely because its
-architecture is documented below — everything from Phase 3 onward in this
-file is a plan, not a report of what exists.
+No phase beyond 0-3 is marked complete merely because its architecture is
+documented below — everything from Phase 4 onward in this file is a plan,
+not a report of what exists.
 
 ---
 
@@ -125,9 +128,11 @@ at the time `ai-layer` was forked):
   (`src/torque/api/{health,webhooks,checkout_injection,reporting,
   agent_console,demo,ui}.py`).
 - `pyproject.toml` carries zero AI/ML/HTTP-to-LLM dependencies as of Phase
-  0-2 (`sqlalchemy`, `alembic`, `psycopg`, `pydantic`/`pydantic-settings`,
+  0-3 (`sqlalchemy`, `alembic`, `psycopg`, `pydantic`/`pydantic-settings`,
   `fastapi`, `uvicorn`, `celery`, `redis` only). **No dependency was added**
-  — everything needed already exists in the standard library or `pydantic`.
+  — everything needed (including full-text search, native to Postgres)
+  already exists in the standard library, `pydantic`, or the database
+  itself.
 - `CaseEvent` is Torque's sole audit/history mechanism (append-only,
   DB-trigger + guard enforced, INV-02). Any AI evidence representation must
   be *derived from* it, never a second, competing history.
@@ -195,11 +200,11 @@ Enforced, not merely stated:
                             v
                      torque.ai  (this package)
       +----------------------------------------------------+
-      |  IMPLEMENTED (Phase 0-2):                            |
+      |  IMPLEMENTED (Phase 0-3):                            |
       |    exceptions.py  config.py  schemas.py  evidence.py  |
-      |    citations.py                                       |
-      |  NOT YET BUILT (Phase 3+):                            |
-      |    retrieval.py  prompts.py  providers/  narrative.py |
+      |    citations.py  retrieval.py                          |
+      |  NOT YET BUILT (Phase 4+):                            |
+      |    prompts.py  providers/  narrative.py                |
       |    evaluation.py  shadow/                              |
       +----------------------------------------------------+
                             |
@@ -221,7 +226,7 @@ src/torque/ai/
 ├── schemas.py           IMPLEMENTED — evidence DTOs (§7) + Citation/EvidenceItem (Phase 2)
 ├── evidence.py            IMPLEMENTED — gather_case_evidence()
 ├── citations.py            IMPLEMENTED (Phase 2) — resolve_citation(), all_evidence_items(), citation_for()
-├── retrieval.py              NOT BUILT (Phase 3)
+├── retrieval.py              IMPLEMENTED (Phase 3) — find_precedent()
 ├── prompts.py                  NOT BUILT (Phase 4)
 ├── providers/                    NOT BUILT (Phase 4)
 ├── narrative.py                    NOT BUILT (Phase 4)
@@ -341,20 +346,63 @@ only failure signal, so a future faithfulness-evaluation layer (Phase 5) can
 treat it as "unsupported claim" data rather than a control-flow exception.
 See INV-61.
 
-## 8. Planned Retrieval Architecture — **NOT BUILT** (Phase 3)
+## 8. Retrieval Architecture — **Implemented, Phase 3**
 
-**RECOMMENDED**, not yet implemented: Postgres-native full-text search
-(`tsvector`/`plainto_tsquery`) over `CaseEvent.reasoning` + `root_cause_label`,
-combined with a `(merchant_id, leg_type, root_cause_code)` metadata filter as
-the primary relevance signal. **No vector database, no embedding model, no
-ANN index** — the current corpus (dozens to low hundreds of cases) does not
-justify infrastructure that exists to make search sub-linear over millions
-of rows. An empty precedent result is a first-class, expected outcome, not
-an error, for a case whose root cause has no prior match. See the prior
-research phase's architecture comparison for the full evaluated-alternatives
-table (Postgres FTS / BM25 / embeddings+brute-force / vector DB), reproduced
-in spirit here but not re-litigated — nothing has changed about the
-corpus-size argument since that research.
+`torque.ai.retrieval.find_precedent(session, merchant_id, case, *,
+top_k=3) -> list[PrecedentCase]`:
+
+```
+current case
+    v
+merchant_id + leg_type + root_cause_code   (primary, exact-match filter,
+                                             via TenantScope)
+    v
+same-merchant, terminal/resolved historical cases
+    v
+Postgres full-text search (secondary lexical signal — CaseEvent.reasoning +
+                            root_cause_label — ranks WITHIN the already-
+                            filtered candidate set, never a substitute for it)
+    v
+recency (dominant ordering when the lexical signal is flat/tied)
+    v
+top-K (default 3, hard ceiling 10)
+    v
+list[PrecedentCase]
+```
+
+Postgres-native full-text search (`to_tsvector`/`plainto_tsquery`/`ts_rank`),
+never a vector database or embedding model, and never a substitute for the
+primary exact-match metadata filter. **No new index, no migration** — see
+D-141: `EXPLAIN ANALYZE` against the seeded `acc_demo` dataset confirms both
+queries already use the existing `ix_revenue_leak_case_merchant_id` /
+`ix_case_event_case_id` indexes via index scans and complete in well under
+1ms; adding a new index now would optimize a query that already costs
+nothing measurable.
+
+An empty precedent result (`[]`) is a first-class, expected, successful
+outcome — never an error, `None`, or a fabricated synthetic precedent — for:
+a case with no `root_cause_code` yet; a merchant with no other case sharing
+`(leg_type, root_cause_code)`; or every metadata-matching case still being
+in-flight (not yet terminal). The future narrative layer (Phase 4+, not
+built) turns `[]` into an explicit "no comparable resolved case exists yet"
+message — that message is not implemented here.
+
+**`outcome_summary`** is a short, fully deterministic template assembled
+only from case-level fields (`root_cause_label`, `recovered_amount`,
+`status`) and the precedent's own resolution event's locked payload keys
+(`recovery_type` from `PAYMENT_RECONCILED`, `resolution` from
+`HUMAN_RESOLVED`) — never free-form `CaseEvent.reasoning` text, no LLM
+anywhere in Phase 3.
+
+**Terminal-state determination — a documented, cross-tested duplication, not
+an import.** `torque.ai`'s forbidden-import boundary blocks the whole
+`torque.state_machine` module, including its pure `TERMINAL_STATUSES`/
+`is_terminal`. `retrieval.py` mirrors that logic locally
+(`_terminal_statuses_for_leg`) rather than narrowing the "permanent"
+boundary test; `tests/test_ai_retrieval.py::
+test_terminal_mirror_matches_state_machine_exactly` cross-checks the mirror
+against the real function for every `(CaseStatus, LegType)` pair. See D-141
+for the full reasoning and the considered-but-not-taken alternative.
 
 ## 9. Planned LLM Architecture — **NOT BUILT** (Phase 4)
 
@@ -391,24 +439,33 @@ schema so the UI cannot render a number without the caveat attached.
 
 ## 11. Security Model
 
-Implemented (Phase 0-2):
+Implemented (Phase 0-3):
 
 - **Static import-boundary test**, `tests/test_ai_boundary.py` — see §3
   item 2. This is the load-bearing enforcement mechanism; everything else in
   this section is defense-in-depth around it. Covers the entire `torque.ai`
-  package, `citations.py` included.
+  package — `citations.py` and `retrieval.py` included, no per-module
+  allowlists.
 - **Substring write-call sweep** — `tests/test_ai_boundary.py::
   test_ai_package_writes_nothing_at_the_source_level` — an independent,
   deliberately crude second signal (no `.add(`, `.delete(`, `.commit(`, or
   raw SQL mutation keyword anywhere in `src/torque/ai/`).
 - **Read-only by construction, not by a runtime guard** — `torque.ai.evidence`
-  never calls `session.add`/`.delete`/`.commit`; it only calls
-  `TenantScope.select`/`.get` and `session.scalars(...)`. `torque.ai.
-  citations` goes further still: it has no database-access capability to
-  even accidentally exercise — it imports nothing but `torque.ai.schemas`.
-  There is currently no forbidden write *capability* to additionally
-  firewall at the ORM layer, because none of the AI package's code
-  constructs a write in the first place.
+  and `torque.ai.retrieval` never call `session.add`/`.delete`/`.commit`;
+  they only call `TenantScope.select`/`.get`/`session.scalars(select(...))`.
+  `torque.ai.citations` goes further still: it has no database-access
+  capability to even accidentally exercise — it imports nothing but
+  `torque.ai.schemas`. There is currently no forbidden write *capability* to
+  additionally firewall at the ORM layer, because none of the AI package's
+  code constructs a write in the first place.
+- **A boundary held even under real tension (Phase 3).** Retrieval needed
+  Torque's terminal-status logic, which lives in the forbidden
+  `torque.state_machine` module. Rather than weaken the "permanent"
+  boundary test to import it, `torque.ai.retrieval` duplicates the logic
+  locally and a test cross-checks the duplicate against the real function
+  for every status/leg combination — see §8 and D-141. The boundary was not
+  quietly worked around; the tension was documented and resolved without
+  touching the test.
 
 Planned, **NOT YET BUILT**:
 
@@ -444,7 +501,7 @@ yet).
 
 ## 13. Multi-Tenancy / Data-Isolation Requirements
 
-Implemented and tested (Phase 1-2):
+Implemented and tested (Phase 1-3):
 
 - Every read in `torque.ai.evidence` goes through `TenantScope` — `.get()`
   for the case itself (returns `None`, not another tenant's row, for a
@@ -470,10 +527,15 @@ Implemented and tested (Phase 1-2):
   PII across tenants because there is no code path that reads PII, full
   stop.
 
-Not yet relevant: cross-merchant precedent retrieval does not exist (Phase
-3). When it is built, it must remain single-merchant only in its first
-version — Module 9b's one narrow, reviewed cross-merchant SUTVA read is not
-a precedent (no pun intended) the AI layer inherits automatically.
+- **Precedent retrieval (Phase 3) is single-merchant only, as required.**
+  `find_precedent` filters candidates through `TenantScope` and additionally
+  rejects a `case`/`merchant_id` mismatch outright (`ValueError`, fail-fast
+  on a caller bug). There is no cross-merchant search, no shared precedent
+  pool, no global index. `tests/test_ai_retrieval.py::
+  test_cross_merchant_case_never_appears` proves a perfectly-matching case
+  at a different merchant is never returned. Module 9b's one narrow,
+  reviewed cross-merchant SUTVA read is not a precedent (no pun intended)
+  the AI layer inherited automatically — this stays deliberately narrower.
 
 ## 14. Phase Roadmap
 
@@ -482,7 +544,7 @@ a precedent (no pun intended) the AI layer inherits automatically.
 | 0 | AI architectural isolation — package boundary, feature flag, static enforcement test | **COMPLETE** |
 | 1 | AI read model / evidence interface | **COMPLETE** |
 | 2 | Evidence normalization + citation model (`Citation`, `resolve_citation`, stable evidence ids) | **COMPLETE** |
-| 3 | Retrieval / precedent engine (Postgres FTS + metadata filter) | NOT STARTED |
+| 3 | Retrieval / precedent engine (Postgres FTS as a secondary signal over an exact metadata filter) | **COMPLETE** |
 | 4 | LLM case explanation (provider-agnostic, evidence-grounded, citation-bearing) | NOT STARTED |
 | 5 | Faithfulness / evaluation harness (validates generated citations via Phase 2's `resolve_citation`) | NOT STARTED |
 | 6 | Agent Console integration (new read-only API route + UI panel) | NOT STARTED |
@@ -497,9 +559,9 @@ Phase 0 (isolation, boundary test)
    |
 Phase 1 (evidence read model)
    |
-Phase 2 (evidence normalization + citation model)   <- YOU ARE HERE (complete)
+Phase 2 (evidence normalization + citation model)
    |
-Phase 3 (retrieval / precedent)
+Phase 3 (retrieval / precedent)   <- YOU ARE HERE (complete)
    |
 Phase 4 (LLM case explanation) <---+
    |                                |
@@ -518,25 +580,34 @@ Final AI Integration Gate (main-branch merge eligibility)
 
 ## 16. Testing / Evaluation Strategy
 
-Implemented for Phase 0-2 (38 AI-specific tests, all passing — see the
-Phase 2 completion report for exact file/test names): architecture/boundary
+Implemented for Phase 0-3 (59 AI-specific tests, all passing — see the
+Phase 3 completion report for exact file/test names): architecture/boundary
 tests (static import-graph check + write-call substring sweep across the
-whole package, including `citations.py`), evidence-shape tests (snapshot
-correctness, timeline ordering, citation-reference resolvability),
-tenant-isolation tests, PII-exclusion tests (both schema-shape and
-content-substring sweeps), missing-evidence tests, one untrusted-text/
-injection-resilience test, and (Phase 2) citation-schema validation, id
+whole package, including `citations.py` and `retrieval.py`), evidence-shape
+tests (snapshot correctness, timeline ordering, citation-reference
+resolvability), tenant-isolation tests, PII-exclusion tests (both
+schema-shape and content-substring sweeps), missing-evidence tests, one
+untrusted-text/injection-resilience test, citation-schema validation, id
 uniqueness, id stability across repeated gathering, exact resolution for
 every evidence type, fabricated/malformed/cross-case/cross-tenant
-non-resolution, and multi-evidence-type resolution. Full existing
-regression suite (1230 pre-existing tests) re-run and green alongside every
-new AI test added since.
+non-resolution, multi-evidence-type resolution, and (Phase 3) a
+terminal-status mirror cross-check against the real `is_terminal`,
+same-merchant/cross-merchant/current-case/in-flight exclusion tests,
+`PARTIALLY_RECOVERED`'s leg-conditional terminality proven in both
+directions, top-K default/cap/rejection, recency tiebreaking, metadata
+non-matches, missing-root-cause/missing-reasoning handling, citation
+resolution against a precedent's own evidence set (with and without a
+resolution event), empty-corpus handling, and two tests against the real
+seeded `acc_demo` dataset asserting exact case identity for both a positive
+and a zero-result outcome. Full existing regression suite (1230 pre-existing
+tests) re-run and green alongside every new AI test added since.
 
-Not yet built: retrieval-relevance evaluation, citation-precision/coverage
-metrics *for generated prose* (Phase 2 validates the resolution primitive
-itself, not yet any actual generated claim — there is no generated claim
-yet), faithfulness/groundedness scoring, adversarial LLM-facing prompt-
-injection tests, shadow-ML leakage/calibration tests — all Phase 3+.
+Not yet built: retrieval-relevance evaluation *of generated narrative*
+(Phase 3's seed-data tests already prove retrieval quality directly, but
+there is no generated claim yet for a faithfulness harness to check),
+citation-precision/coverage metrics for generated prose, faithfulness/
+groundedness scoring, adversarial LLM-facing prompt-injection tests,
+shadow-ML leakage/calibration tests — all Phase 4+.
 
 ## 17. Git / Branch Strategy
 
@@ -552,7 +623,7 @@ landed directly on `ai-layer`, per explicit instruction for this milestone.
 **RECOMMENDED** (not yet exercised): one phase per feature branch off
 `ai-layer` (`ai-layer/phase-N-<slug>`), each independently reviewable,
 merged into `ai-layer` in dependency order — an option for the maintainer to
-adopt for future phases; Phase 0-2 were each built directly on `ai-layer`
+adopt for future phases; Phase 0-3 were each built directly on `ai-layer`
 instead, per explicit instruction each time.
 
 ## 18. Main-Branch Integration Gate
@@ -563,7 +634,7 @@ performed). Before `ai-layer` is eligible to merge into `main`:
 - [ ] Full existing regression suite green, unmodified.
 - [ ] `uv run ruff check .` clean repository-wide.
 - [ ] `alembic upgrade head` succeeds; zero new migrations introduced by the
-      AI program (true through Phase 2: no migration exists under this work).
+      AI program (true through Phase 3: no migration exists under this work).
 - [ ] Every AI-specific test file green.
 - [ ] `tests/test_ai_boundary.py` green — the forbidden-import and
       forbidden-write-call checks both pass.
@@ -577,16 +648,16 @@ performed). Before `ai-layer` is eligible to merge into `main`:
 - [ ] `documentation/ai-memory/{ARCHITECTURE,DECISIONS,MILESTONES,DEFERRED,
       INVARIANTS}.md` updated to reflect the new module(s), in this
       project's own established style (this document + the accompanying
-      decision/invariant/milestone entries are the Phase 0-2 instance of
+      decision/invariant/milestone entries are the Phase 0-3 instance of
       that requirement).
 
 ## 19. Demo Architecture
 
-Not yet applicable — no user-visible AI capability exists (Phase 0-2 is
-entirely backend, read-only, invisible to any UI). See the prior research
-phase's full demo narrative for the target end-to-end story once Phase 6
-lands; not reproduced here since it describes a UI flow that does not exist
-yet.
+Not yet applicable — no user-visible AI capability exists (Phase 0-3 is
+entirely backend, read-only, invisible to any UI — `find_precedent` has no
+caller yet outside its own tests). See the prior research phase's full demo
+narrative for the target end-to-end story once Phase 6 lands; not
+reproduced here since it describes a UI flow that does not exist yet.
 
 ## 20. Decision Register
 
@@ -599,7 +670,8 @@ yet.
 | D-AI-17 (part 1) | Read-only enforcement: static import-boundary test | **LOCKED** (implemented, non-negotiable per this program's instructions) | Implemented |
 | D-AI-17 (part 2) | Read-only enforcement: dedicated Postgres read-only DB role | **NEEDS HUMAN DECISION** | Not built — Phase 6+ |
 | D-140 | Citation contract: preserve Phase 1's `reference_id` scheme; make `CaseSnapshot` citable; keep `Citation` to one field; keep `resolve_citation` pure | **LOCKED** (implemented; see `DECISIONS.md`) | Implemented |
-| D-AI-01 | Retrieval architecture: Postgres FTS + metadata filter, no vector DB | **RECOMMENDED** | Not built — Phase 3 |
+| D-141 | Retrieval architecture: Postgres FTS as a secondary-only signal over an exact metadata filter, no vector DB, no index/migration at N≈16, terminal-state logic duplicated not imported | **LOCKED** (implemented; see `DECISIONS.md`) | Implemented |
+| D-AI-17 (part 3) | Whether to narrow `test_ai_boundary.py`'s `torque.state_machine` block to a name-level allowlist for `TERMINAL_STATUSES`/`is_terminal` instead of duplicating them | **NEEDS HUMAN DECISION** | Not taken — duplication + cross-test used instead (D-141) |
 | D-AI-03 | LLM provider: Anthropic primary + local/mock fallback | **NEEDS HUMAN DECISION** (API budget/key) | Not built — Phase 4 |
 | D-AI-09 | Persistence vs. stateless generation: regenerate narratives on request, no caching table | **RECOMMENDED** | Not applicable yet — Phase 4 |
 | D-AI-11 | Shadow-model inclusion: build, strictly observational | **RECOMMENDED** | Not built — Phase 7 |
@@ -608,13 +680,15 @@ yet.
 
 ## 21. Risk Register
 
-| Risk | Status at Phase 0-2 |
+| Risk | Status at Phase 0-3 |
 |---|---|
-| AI write-path creep | Mitigated by the static, CI-enforced import-boundary test — present and green, covers `citations.py` too |
+| AI write-path creep | Mitigated by the static, CI-enforced import-boundary test — present and green, covers `citations.py` and `retrieval.py` too |
 | PII leakage into AI evidence | Mitigated by an explicit allowlist + passing content-substring tests; `Counterparty` is never queried |
-| Cross-tenant retrieval / citation resolution | Mitigated by exclusive `TenantScope` use in evidence-gathering + a passing cross-tenant evidence test, and by `resolve_citation`'s complete inability to reach any evidence set other than the one it is given (no DB access at all) + a passing cross-tenant citation test |
-| Fabricated/placeholder "evidence" standing in for missing data | Mitigated — `evidence_gaps` is explicit, `None` stays `None`, tested |
-| A citation silently resolving to the wrong record | Mitigated — exact-match-only resolution, scoped to one evidence set, tested against fabricated/malformed/cross-case/cross-tenant ids (INV-61) |
+| Cross-tenant retrieval / citation resolution | Mitigated by exclusive `TenantScope` use in evidence-gathering and retrieval + a passing cross-tenant evidence test, `resolve_citation`'s complete inability to reach any evidence set other than the one it is given (no DB access at all), a passing cross-tenant citation test, and (Phase 3) a passing cross-merchant precedent test plus a fail-fast `ValueError` on a `case`/`merchant_id` mismatch |
+| Fabricated/placeholder "evidence" standing in for missing data | Mitigated — `evidence_gaps` is explicit, `None` stays `None`, `find_precedent` returns `[]` (never fabricates a synthetic precedent), tested |
+| A citation silently resolving to the wrong record | Mitigated — exact-match-only resolution, scoped to one evidence set, tested against fabricated/malformed/cross-case/cross-tenant ids (INV-61); precedent citations tested to resolve against their own evidence set specifically, not the current case's (INV-62) |
+| An in-flight case surfacing as false precedent, or a case appearing as its own precedent | Mitigated (Phase 3) — terminal-only filter (cross-tested against the real `is_terminal`) + explicit self-exclusion, both tested directly |
+| The duplicated terminal-status mirror drifting from `torque.state_machine` over time | A real, tracked risk (not eliminated) — mitigated by an exhaustive cross-check test (`test_terminal_mirror_matches_state_machine_exactly`) that fails the build the moment the two diverge, rather than silent drift; see D-141 |
 | Prompt injection | Data contract in place (reasoning/payload typed as inert data) and one adversarial test passing; the real risk surface (an actual prompt) does not exist yet |
 | Hallucination, unsupported claims, shadow-model overclaiming, provider outage, latency | Not yet applicable — no LLM call, no shadow model exists |
 
@@ -632,12 +706,13 @@ performs the merge.
 
 ## 23. Future Path Toward the 500+ Resolved-Case Learned Model
 
-Unchanged from the prior research phase: **TODAY** is Phase 0-2 as
-implemented — a read-only evidence foundation with a resolvable citation
-primitive, nothing predictive, nothing generated. **Phase 3-9** (this
-document's roadmap) is what's worth building for a hackathon demo —
-retrieval-grounded narrative, validated against Phase 2's citation contract,
-plus an honestly-caveated shadow model. **FUTURE PRODUCTION** requires real
+Updated from the prior research phase: **TODAY** is Phase 0-3 as
+implemented — a read-only evidence foundation, a resolvable citation
+primitive, and a deterministic same-merchant precedent search; nothing
+predictive, nothing generated. **Phase 4-9** (this document's roadmap) is
+what's worth building for a hackathon demo — an LLM narrative grounded in
+Phase 3's retrieved precedent and validated against Phase 2's citation
+contract, plus an honestly-caveated shadow model. **FUTURE PRODUCTION** requires real
 channel adapters shipping, real merchant traffic accumulating real outcomes,
 and crossing the blueprint's own 500-resolved-case threshold (Blueprint
 §8.4) before any learned signal is even considered for wiring into

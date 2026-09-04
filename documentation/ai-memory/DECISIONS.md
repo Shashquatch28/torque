@@ -2885,6 +2885,70 @@ BY D-0NN`.
 
 ---
 
+## D-141 — Retrieval architecture: Postgres FTS over an already-exact-matched candidate set; no index/migration at N≈16; terminal-state logic duplicated, not imported
+
+- **Milestone:** AI Phase 3 — Retrieval / Precedent Engine (`ai-layer`
+  branch, not `main`).
+- **Decision (three bundled sub-decisions, one milestone):**
+  1. **Postgres-native full-text search (`to_tsvector`/`plainto_tsquery`/
+     `ts_rank`), never a vector database or embedding model, and never a
+     substitute for the primary metadata filter.** `find_precedent`'s
+     candidate set is first narrowed to an *exact* match on
+     `(merchant_id, leg_type, root_cause_code)` plus terminal-only plus
+     self/superseded exclusion — a hard filter, not a similarity score.
+     Lexical relevance (`CaseEvent.reasoning` + `root_cause_label`) only
+     ranks *within* that already-narrow set, as the tiebreaker before
+     recency. No embeddings, no ANN index, no external search engine: the
+     current corpus (dozens to low hundreds of cases) does not justify
+     infrastructure built for sub-linear search over millions of rows.
+  2. **No new index and no migration.** `EXPLAIN ANALYZE` was run against
+     both the metadata-filter query and the lexical-ranking query on the
+     seeded `acc_demo` dataset (16 cases). Both already use the existing
+     `ix_revenue_leak_case_merchant_id` and `ix_case_event_case_id` indexes
+     (from Milestone 1) via index scans, not sequential scans, and complete
+     in well under 1ms (0.114ms and 0.849ms respectively — full plans
+     recorded in `documentation/ai-memory/MILESTONES.md`'s "AI Phase 3"
+     section). No new index is warranted at this scale; adding one now
+     would be optimizing a query that already costs nothing measurable.
+  3. **Terminal-state determination is a duplicated, cross-tested mirror of
+     `torque.state_machine.TERMINAL_STATUSES`/`is_terminal` — not an
+     import.** `torque.ai`'s forbidden-import boundary
+     (`tests/test_ai_boundary.py`) blocks the entire `torque.state_machine`
+     module, including its pure, non-mutating terminal-state logic, and
+     this program's own governing instructions describe that boundary as
+     "permanent." Rather than narrow the boundary test to a name-level
+     allowlist (a live, considered alternative — see below), `torque.ai.
+     retrieval` reimplements the exact same logic locally
+     (`_terminal_statuses_for_leg`), and `tests/test_ai_retrieval.py::
+     test_terminal_mirror_matches_state_machine_exactly` — a test file, not
+     `src/torque/ai/*`, so free to import the real thing — exhaustively
+     cross-checks the mirror against `is_terminal` for every
+     `(CaseStatus, LegType)` combination. Any future drift between the two
+     breaks the build loudly instead of silently.
+- **Alternatives considered:** narrowing `test_ai_boundary.py`'s
+  `torque.state_machine` entry from a full block to a name-level allowlist
+  permitting only `TERMINAL_STATUSES`/`is_terminal` (both provably pure —
+  no I/O, no mutation, no side effects) — genuinely defensible (the
+  program's own instructions distinguish "state-machine *mutation*" from
+  state-machine access generally), but touches a security-relevant test
+  this phase's instructions call "permanent," so it was NOT taken
+  unilaterally; left for the maintainer to authorize explicitly if the
+  duplication-and-cross-test approach ever proves insufficient. A
+  database-backed precomputed "terminal cases" view or materialized table —
+  rejected (new persistence, explicitly out of scope for retrieval). Scoring
+  the lexical signal with a weighted formula combining rank + recency into
+  one number — rejected per the task's own explicit "no complex scoring
+  formulas" instruction; a plain `(lexical_rank, opened_at)` tuple sort is
+  simpler and equally correct at this scale.
+- **Consequence:** retrieval has no new operational surface (no index to
+  maintain, no migration to review) and stays honestly bounded to what the
+  current corpus can support. The terminal-state duplication is a tracked,
+  tested, documented risk (not a silent one) — the cross-check test is the
+  actual safety net, not just this paragraph.
+- **Status:** IN FORCE.
+
+---
+
 ## Notes not recorded as decisions
 
 - The **Git-history incident of 2026-09-02** (a bad commit briefly on `main`,

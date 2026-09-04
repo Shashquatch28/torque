@@ -2182,6 +2182,139 @@ explicitly-assigned §10.8 human-resolution write path.)*
 
 ---
 
+## AI Phase 3 — Retrieval / Precedent Engine — COMPLETE
+
+- **Branch:** `ai-layer`. **Not on `main`.**
+- **Verified before starting (per this milestone's own governing
+  instructions):** `git status`/`git branch --show-current` confirmed
+  `ai-layer`, clean tree. `src/torque/ai/{schemas,evidence,citations}.py`
+  and all three prior AI test files were re-read and found byte-identical
+  to what Phase 0-2 left them — no drift, no discrepancy requiring a STOP.
+  One git-history observation (not a code defect): the commit that landed
+  Phase 0-2's work on `ai-layer` (`ceafbec`) is titled "Phase 2 — Retrieval
+  / precedent engine: Postgres full-text search" — a mislabeling using the
+  pre-correction phase numbering; its actual diff contains only the Phase
+  0-2 evidence/citation files, no `retrieval.py`. Recorded here for the
+  record; not something this milestone rewrites (Git history is the
+  maintainer's).
+- **Migrations:** **none.** `alembic head` stays `0018_escalation_resolution`.
+- **Objective:** answer "has this merchant previously experienced a
+  comparable resolved case, and if so, what happened?" — deterministically,
+  read-only, informational only. Never "what should Torque do."
+- **A real architectural tension found and resolved, not silently:** the
+  task's own instruction to "use the existing source of truth" for terminal
+  states collides with `torque.ai`'s forbidden-import boundary, which blocks
+  the whole `torque.state_machine` module (including its pure,
+  non-mutating `TERMINAL_STATUSES`/`is_terminal`) and which this program's
+  instructions describe as "permanent." Resolved by duplicating the exact
+  logic locally in `retrieval.py`, cross-tested for byte-for-byte
+  equivalence against the real function in a test file (which, unlike
+  `src/torque/ai/*`, is free to import it) — see D-141 for the full
+  reasoning and the considered-but-not-taken alternative (narrowing the
+  boundary test to a name-level allowlist).
+- **Scope delivered:**
+  - `src/torque/ai/schemas.py` — new `PrecedentCase` DTO (`case_id,
+    root_cause_code, outcome_summary, recovered, evidence_id` — frozen,
+    `extra="forbid"`, deliberately small, mirroring `Citation`'s own
+    minimalism).
+  - `src/torque/ai/retrieval.py` (**new module**) — `find_precedent
+    (session, merchant_id, case, *, top_k=3) -> list[PrecedentCase]`.
+    Pipeline: exact-match filter on `(merchant_id via TenantScope, leg_type,
+    root_cause_code)` + terminal-only + self/superseded exclusion ->
+    Postgres full-text search (`to_tsvector`/`plainto_tsquery`/`ts_rank`
+    over `CaseEvent.reasoning` + `root_cause_label`, MAX-aggregated per
+    candidate case) as a secondary ranking signal within that already-exact
+    set -> recency tiebreak -> top-K. `outcome_summary` is a deterministic
+    template over case-level fields + the resolution event's locked payload
+    keys (`recovery_type`/`resolution`) — never free-form `reasoning` text,
+    no LLM anywhere. `evidence_id` is computed via the real
+    `EvidenceReference` model (Phase 1/2's own id-format source of truth),
+    pointing at the precedent's resolution event
+    (`PAYMENT_RECONCILED`/`HUMAN_RESOLVED`) if one exists, else its case
+    snapshot.
+  - **No new index, no migration** — `EXPLAIN ANALYZE` against the seeded
+    `acc_demo` dataset confirms both the metadata-filter query and the
+    lexical-ranking query already use the existing
+    `ix_revenue_leak_case_merchant_id` / `ix_case_event_case_id` indexes
+    (Milestone 1) and complete in well under 1ms:
+    ```
+    Metadata filter: Index Scan using ix_revenue_leak_case_merchant_id
+      Execution Time: 0.114 ms
+    Lexical FTS ranking: HashAggregate over a Nested Loop of two
+      index scans (ix_revenue_leak_case_merchant_id, ix_case_event_case_id)
+      Execution Time: 0.849 ms
+    ```
+  - **Tests (NEW, 21):** `tests/test_ai_retrieval.py` — the terminal-mirror
+    cross-check against the real `is_terminal`; same-merchant match with
+    exact-identity assertions (not just `len() > 0`); cross-merchant
+    exclusion; a merchant/case-mismatch defensive `ValueError`;
+    current-case self-exclusion; in-flight exclusion;
+    `PARTIALLY_RECOVERED` terminal-for-non-B2B / not-terminal-for-B2B (both
+    directions, exercising the leg-conditional terminal logic directly);
+    zero-match on a unique root cause; top-K default and capped, plus
+    out-of-range rejection; recency tiebreak when lexical rank is flat;
+    different-leg / different-root-cause non-matches; missing-root-cause ->
+    `[]`; missing-`reasoning` does not crash; citation resolution against
+    the precedent's own evidence set (both with and without a resolution
+    event, proving the case-snapshot fallback); empty corpus -> `[]`; and
+    two tests against the real seeded `acc_demo` dataset (§23/§25 of the
+    task) — see "Seed Verification" below.
+- **Decisions:** D-141 (Postgres FTS as a secondary-only signal, no
+  index/migration at N≈16, terminal-state duplication).
+- **Invariants:** INV-62 (same-merchant / terminal-only / self-excluding /
+  bounded / citation-resolvable / read-only retrieval).
+- **Seed verification (exact identities, not just pass/fail):**
+  - **Positive:** `acc_demo` carries a `RECOVERED`
+    `SUBSCRIPTION_FAILURE`/`NSF_SOFT_DECLINE` case (Aarav Mehta) and an
+    open, in-flight `PLAYBOOK_ACTIVE` case with the identical
+    `(leg_type, root_cause_code)` (Diya Kapoor — Sara Khan shares the same
+    pair too but is excluded by the terminal filter same as Diya's own
+    search would exclude her). Searching precedent for the open case
+    surfaces Aarav Mehta's case by exact `case_id`, `root_cause_code =
+    "NSF_SOFT_DECLINE"`, `recovered = True` — correct, because it is the
+    only terminal case sharing that exact metadata pair at that merchant.
+  - **Zero:** `acc_demo` carries exactly one
+    `PAYMENT_DEGRADATION`/`GATEWAY_TIMEOUT` case (Priya Nair) — no other
+    case at `acc_demo` shares that pair (verified by an explicit
+    no-duplicate assertion in the test itself, so the test fails loudly if
+    the seed ever changes shape rather than passing vacuously). Searching
+    precedent for it returns `[]` — correct, because no comparable resolved
+    case exists.
+- **Deviations from `AI_BLUEPRINT.md`:** none in scope or architecture. The
+  terminal-state duplication (documented above and in D-141) is a
+  deliberate implementation choice within an area the blueprint left open
+  ("NEEDS HUMAN DECISION" on narrowing the boundary test), not a deviation
+  from anything it locked.
+- **Deferred work:** everything from Phase 4 onward (LLM case explanation,
+  faithfulness evaluation, Agent Console integration, shadow ML, hardening,
+  demo polish) — none implemented, none started. Explicitly **not**
+  implemented in this milestone: any LLM provider/prompt/call, any
+  embedding or vector search, `CaseNarrative` or any generated prose, any
+  API endpoint, any UI change.
+- **Unresolved:** none resolved and none newly introduced by this work.
+- **`state_machine.py` / `guards.py`:** **both byte-unchanged vs HEAD**
+  (`git diff` empty for each).
+- **Tests at completion:** **1289** passed (was 1268 after Phase 2;
+  **+21**), 0 failed, 0 skipped, the same 1 pre-existing cosmetic
+  `StarletteDeprecationWarning`. `ruff check .` clean. `alembic upgrade
+  head` -> `0018` (no-op — no migration); roundtrip green
+  (`tests/test_zz_migrations_roundtrip.py`, 1 passed).
+- **Verification status:** complete + verified — `uv run pytest
+  tests/test_ai_retrieval.py tests/test_ai_citations.py
+  tests/test_ai_evidence.py tests/test_ai_boundary.py -q` (56 passed),
+  `uv run pytest -q` (full suite, 1289 passed), `uv run ruff check .`
+  (clean, repository-wide), `uv run alembic upgrade head` (succeeds, no new
+  migration), `uv run pytest tests/test_zz_migrations_roundtrip.py -q` (1
+  passed), `git diff --check` (clean — only pre-existing CRLF/LF
+  advisories), `git diff -- src/torque/state_machine.py
+  src/torque/models/guards.py` (both empty), `EXPLAIN ANALYZE` against the
+  seeded dataset (recorded above — index scans, sub-millisecond, no
+  sequential scan concern to act on).
+- **Recommended commit message:**
+  `AI Phase 3: retrieval / precedent engine — find_precedent(), Postgres FTS as secondary signal over an exact metadata match, PrecedentCase (D-141/INV-62); no index/migration, no embeddings, no LLM, zero deterministic-core changes`
+
+---
+
 ## (historical) What came next after Module 10
 
 **Module 10 — UI/UX — COMPLETE.** Torque is now a runnable, demo-able product:

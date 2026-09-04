@@ -29,7 +29,7 @@ Do not describe `PLANNED` / `DEFERRED` behaviour as if it exists.
 | 8 — Recovery Scoring | `(probability × amount) ÷ cost`, cold-start lookup | **`IMPLEMENTED` (Module 8 complete)** — `torque.scoring` package: `cold_start_probability` (Decision F's exact 8-value table as a live function), `warm_start_multiplier` (§8.2 linear map, clamped 0.5×–1.3×, D-110), `compute_cost` (forward `ChannelRateCard` sum for the next playbook step, zero-cost floors — D-111), `compute_recovery_score` / `RecoveryScore` (the one formula + §8.7 explainability). Persisted on `revenue_leak_case.recovery_score` / `_breakdown` / `_updated_at` (migration **0017**, D-109). Recompute on creation / diagnosis / daily (D-112). `priority()` seam now returns it (D-113). See §8H |
 | 9 — Reporting & Measurement | ₹ recovered, recovery rate, by leg/intervention/outcome/time, exception list, case drill-down | **`IMPLEMENTED` (Module 9 complete)** — `torque.reporting` (`metrics.py` derivations + `schemas.py` pydantic contract) + read-only `torque.api.reporting` router (8 `GET` endpoints). Outcome-based (D-116: `recovered_amount` = `recovery_type != SELF_RECOVERED`; `SELF_RECOVERED` reported separately). **No migration** — pure read/derive over the domain tables (D-114). Module 7 stays authoritative for attribution. Incrementality lift / Wilson CI / SUTVA-adjusted lift **deferred** (D-121 / U-10). See §8I |
 | 10 — UI/UX | merchant dashboard, agent console, demo surface | **`IMPLEMENTED` (Module 10 complete)** — a hand-written static SPA (`src/torque/ui/static/`) mounted at `/ui` by `create_app()` (one process, `uv run python -m torque` — D-122); `torque.agent_console` (human resolve/pause/unpause — INV-59, migration **0018** for `escalation_resolution` — D-123); `torque.demo` (deterministic `acc_demo` seed + one-click Decision-K scenarios — D-124/125); Module 9 reporting gains `top-at-risk` / `human-queue` / `activity` + the case-detail score breakdown. `state_machine.py` unchanged; `guards.py` gains `human_resolution_writer`. See §8J |
-| 11 — Tech Stack & Infra | Temporal / BullMQ / polling fallback | `PLANNED` |
+| 11 — Tech Stack & Infra | reproducible local/demo runtime: db + redis + api + worker + beat | **`IMPLEMENTED` (Module 11 complete)** — one reusable `Dockerfile` (D-128); `docker-compose` now defines the whole runtime behind a `full` profile — `migrate` (one-shot `alembic upgrade head`, D-130) + `api` + `worker` + `beat`, while a bare `up` still starts only `db` + `redis` (D-129); `Settings.api_host`/`api_port` (D-131); `GET /health/ready` = Postgres `SELECT 1` + Redis `PING` (D-132); `.env.example` covers the full `Settings` + `PolicyConfig` surface, no secrets. **No migration.** Redis stays broker-only; `scheduled_job` + `execute_due_job` stay the durable execution driver (D-090 / D-127 — no Temporal). Backend language = Python, made explicit (D-126). See §8K |
 | 12 — Build Roadmap | phase plan (no calendar dates — Part D item 3) | `PLANNED` / `UNRESOLVED` |
 | 13 — Demo Script | judging narrative | `PLANNED` |
 
@@ -577,8 +577,9 @@ not `ORM-GUARD`.
 **Not here:** `ISSUER_SPECIFIC` systemic detection (U-08); systemic rollup for
 `subscription.charged.failed` (D-073); per-decline budget increments /
 `mandate_cancelled_at` (Module 5); real NACH return code (Module 5); a real
-storefront pixel (Part D item 1); token hashing; dispatch to Module 3 (D-080); a
-`docker-compose` worker/beat service.
+storefront pixel (Part D item 1); token hashing; dispatch to Module 3 (D-080).
+*(Module 11 update: the `docker-compose` `worker` / `beat` services now exist —
+see §8K.)*
 
 ---
 
@@ -1023,6 +1024,82 @@ JSON API **and** a static dashboard on one port (`http://127.0.0.1:8000/ui/`).
 
 ---
 
+## 8K. Runtime topology & infra — `IMPLEMENTED` (Module 11)
+
+Makes the runtime the code already expects **reproducible from the repository**,
+free-tier, no new infrastructure class. **No schema change** (`alembic head`
+stays `0018`); `state_machine.py` / `guards.py` byte-unchanged.
+
+### The five processes
+
+| Process | Command | Responsibility | Durable state |
+|---|---|---|---|
+| **PostgreSQL 16** | compose `db` (host `:5442` → container `5432`) | **the single source of truth** — case spine, `CaseEvent` ledger, `scheduled_job` execution timers, `human_queue`, retry budgets, everything | authoritative |
+| **Redis 7** | compose `redis` (host `:6389` → `6379`) | **Celery broker transport only** — `result_backend=None`, no persistence configured, no volume. Nothing durable ever lives here (D-057) | none |
+| **api** | `python -m torque` → uvicorn `torque.api.app:create_app` (`--factory`), bind `Settings.api_host:api_port` (`TORQUE_API_HOST`/`_PORT`, def `127.0.0.1:8000`; container `0.0.0.0:8000`) | the FastAPI JSON API **and** the mounted static UI (`/`, `/ui/`), one process, one port | none (stateless) |
+| **worker** | `celery -A torque.ingestion.celery_app:celery_app worker` | executes **every** `torque.*` Celery task: the four ingestion buffers, `detect_systemic`, the two §5.6 execution pollers' work, `recompute_*` scoring, plus the invocable-but-not-auto-dispatched `diagnose_case` / `activate_case` / `reconcile_event` | none |
+| **beat** | `celery -A …:celery_app beat --schedule=/tmp/celerybeat-schedule` | the **repeatable-timer trigger only** — enqueues `systemic-detection` (60 s), `execution-poll-payment` (10 s), `execution-poll-other` (60 s), `recovery-score-daily-recompute` (crontab 02:00 UTC). Holds no domain state; `--schedule` file is local bookkeeping on a writable path (non-root container) | none |
+
+**Execution durability is unchanged (D-090 / D-127):** `beat` only fires the poll
+tasks; `worker` runs `execute_due_jobs`, which claims due `scheduled_job` rows
+`… FOR UPDATE SKIP LOCKED`, executes each step in one transaction (nested
+SAVEPOINT per job), and advances/deletes the row. `scheduled_job` (migration
+0015, `UNIQUE(run_id)`) remains the authoritative timer. **No Temporal** — it is
+documented only as a possible future driver swap behind the same
+`execute_due_job` seam.
+
+### Files
+
+- **`Dockerfile`** (new) — one `python:3.11-slim` image, `uv sync --frozen`
+  from `uv.lock` (reproducible), runtime deps only (`--no-dev`), non-root
+  `USER torque`. Reused by `api` / `worker` / `beat` (D-128); default `CMD` is
+  the API, compose overrides `command:` for the other two.
+- **`.dockerignore`** (new) — trims the build context (`.git`, `.venv`,
+  `tests/`, `documentation/`, blueprints, `.env`).
+- **`docker-compose.yml`** (rewrite) — `db` + `redis` unchanged and
+  profile-free (a bare `docker compose up` = infra only, so the host loop
+  `docker compose up -d db redis` + `uv run python -m torque` is untouched —
+  D-129). `migrate` (one-shot `alembic upgrade head`, `restart: "no"`),
+  `api`, `worker`, `beat` sit behind `profiles: ["full"]`; `api`/`worker`/`beat`
+  `depends_on` `db` + `redis` healthy **and** `migrate` completed (D-130). One
+  YAML anchor (`x-torque-app`) supplies the shared `build` / `image` /
+  compose-network `DATABASE_URL=…@db:5432` / `REDIS_URL=redis://redis:6379/0`.
+  `api` publishes `8000:8000`, sets `TORQUE_API_HOST=0.0.0.0`, and its
+  healthcheck probes `/health/ready`.
+- **`src/torque/api/health.py`** (new) — `health_router`: `GET /health`
+  (liveness, the Milestone-7a `{"status":"ok"}` moved here verbatim) +
+  `GET /health/ready` (readiness — `check_database()` `SELECT 1` +
+  `check_redis(url)` 1 s `PING`; `200` both-ok / `503` naming the failure).
+  Probe functions are module-level (test-substitutable); `redis` imported
+  lazily. No metrics/tracing (D-132).
+- **`src/torque/api/app.py`** — now pure wiring: `include_router(health_router)`
+  first, then the existing routers + `mount_ui`. The inline `/health` is gone
+  (moved, not changed).
+- **`src/torque/config.py`** — `Settings.api_host` / `api_port` added
+  (`AliasChoices("<field>", "TORQUE_API_<HOST|PORT>")`) so the one config value
+  `__main__` was reading from `os.environ` now flows through `Settings` (D-131).
+- **`src/torque/__main__.py`** — reads `get_settings().api_host/.api_port`;
+  behaviour and defaults identical.
+- **`.env.example`** (rewrite) — every `Settings` field + every `PolicyConfig`
+  field (prefix `TORQUE_POLICY_`), each with a default and a comment; secrets
+  blank; compose-network alternates noted. Parity is test-enforced
+  (`tests/test_config_env_parity.py`).
+
+### Tests (new, Docker-free)
+
+`tests/test_infra_compose.py` (14 — compose/Dockerfile/.dockerignore contract:
+the five services, profiles, ports 5442/6389/8000, `depends_on` conditions,
+Redis no-persistence, single non-root image, no Temporal/k8s/monitoring),
+`tests/test_infra_celery.py` (9 — Celery loads, broker-only + no result backend,
+all 12 `torque.*` tasks registered, beat schedule 10 s/60 s/60 s/crontab,
+`scheduled_job` shape + `FOR UPDATE SKIP LOCKED` still in `scheduler.py`, no
+`temporalio`), `tests/test_config_env_parity.py` (6 — `.env.example` ↔
+`Settings`/`PolicyConfig`, no committed secrets, fail-closed defaults),
+`tests/test_health_endpoints.py` (6 — liveness unchanged, readiness 200/503,
+core surfaces still routed).
+
+---
+
 ## 10. Compliance model — pure predicates `IMPLEMENTED`, enforcement `PLANNED`
 
 `src/torque/compliance/` — all side-effect-free:
@@ -1159,13 +1236,14 @@ Circular-import care points (already handled in code, do not "fix"):
 
 ## 14. What is explicitly NOT here
 
-See `DEFERRED.md` for the full register. Highlights: the HTTP routes are
-`GET /health`, `POST /webhooks/razorpay/{merchant_id}`, and
-`POST /internal/checkout-abandoned/{merchant_id}` — no other endpoint, no auth
-layer. **Celery + Redis** (broker only) + **Celery beat** run the four inbound
-ingestion tasks and the M7c §2.5 job — but no Temporal, no `PlaybookRun`
-workflow engine, no Postgres-polling job table (U-07 remaining half), no
-`docker-compose` worker/beat service. Module 2 is complete for all four legs;
+See `DEFERRED.md` for the full register. Highlights: there is no auth layer on
+any route. **Celery + Redis** (broker only) + **Celery beat** run the ingestion
+tasks, the M7c §2.5 job, the §5.6 execution pollers, and the daily recovery-score
+recompute — but **no Temporal** and no other workflow engine (D-090 / D-127). The
+durable `PlaybookRun` execution driver **is** the Postgres-polling `scheduled_job`
+table (Module 5). *(Module 11 update: `docker-compose` now defines the full
+`db + redis + api + worker + beat` runtime behind a `full` profile — §8K.)*
+Module 2 is complete for all four legs;
 what remains is **not Module 2's job**: no `ISSUER_SPECIFIC` systemic detection
 (U-08), no systemic rollup over `subscription.charged.failed` (D-073), no
 per-decline budget increments / `mandate_cancelled_at` (Module 5), no real NACH

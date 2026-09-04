@@ -12,7 +12,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -53,6 +53,19 @@ class Settings(BaseSettings):
     # When true the Celery task runs inline (no broker, no worker) — set by the
     # test harness for deterministic tests; never in a real deployment.
     celery_task_always_eager: bool = False
+
+    # API bind address for `python -m torque` (uvicorn). Env TORQUE_API_HOST /
+    # TORQUE_API_PORT (Module 11 — one config object instead of __main__ reading
+    # os.environ directly). 127.0.0.1 for host dev; the `api` container overrides
+    # to 0.0.0.0 so its published port is reachable.
+    api_host: str = Field(
+        default="127.0.0.1",
+        validation_alias=AliasChoices("api_host", "TORQUE_API_HOST"),
+    )
+    api_port: int = Field(
+        default=8000,
+        validation_alias=AliasChoices("api_port", "TORQUE_API_PORT"),
+    )
 
     def active_razorpay_webhook_secret(self) -> str | None:
         """The one webhook secret for this deployment's configured mode.

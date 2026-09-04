@@ -1,0 +1,20 @@
+# Keep the build context small and deterministic. The Dockerfile copies only
+# pyproject.toml / uv.lock / README.md / src / migrations / alembic.ini.
+.git/
+.venv/
+venv/
+**/__pycache__/
+**/*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.log
+.env
+tests/
+documentation/
+Torque_Blueprint_v4.md
+Torque_Blueprint_v5.md
+Torque_Blueprint_v7_FullSystem.md
+learning_log.md

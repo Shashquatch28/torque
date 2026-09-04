@@ -8,77 +8,108 @@ B2B receivables — with one case object and one ledger.
 `v4` / `v5` are historical Module-1 revision logs; consult them for rationale
 only, never as current spec.
 
-## Status — Milestone 1 (Core Data Model, partial)
+## Status
 
-This milestone delivers the **case spine, multi-tenancy, and atomic history**
-only. There is **no ingestion, diagnosis, playbook, execution, scoring, or
-reporting logic** — those are Modules 2–13, built in later milestones.
+Modules **1–11 complete** (Module 11 uncommitted at time of writing). The
+authoritative, always-current snapshot — what is built, the migration head, the
+test count, unresolved items — is
+[`documentation/ai-memory/CURRENT_STATE.md`](documentation/ai-memory/CURRENT_STATE.md).
+The rest of `documentation/ai-memory/` is the derived project memory
+(`ARCHITECTURE.md`, `DECISIONS.md`, `MILESTONES.md`, `INVARIANTS.md`,
+`DEFERRED.md`, `UNRESOLVED.md`).
 
-Delivered:
-
-| Area | What |
-|---|---|
-| Enums | All Blueprint §4 enums (`torque/enums.py`); Postgres types in migration `0001` |
-| Multi-tenancy | `TenantScope` — always injects `merchant_id`; `Counterparty` / static config exempt (R3) |
-| Identity & consent | `Merchant`, `Counterparty` (single PII source, `redact_pii()`), `Merchant_Counterparty` (cohort assigned once) |
-| Signal log | `Event` (unique `idempotency_key`) + `verify_razorpay_signature()` (raw-body HMAC-SHA256, constant-time) |
-| Case spine | `RevenueLeakCase` + typed leg contexts (`PaymentDegradation` / `CheckoutAbandonment` / `SubscriptionFailure`), `B2BInvoice` |
-| State machine | Blueprint §4 + Part C edge + confirmed R4 (`PARTIALLY_RECOVERED` non-terminal for B2B only) |
-| Event sourcing | `CaseEvent` — append-only (DB trigger + flush guard), 10 locked payload schemas, `atomic()` write primitive |
-| Invariant guards | most-restrictive `network_directive`; Module-7-only `recovery_type` / `recovered_amount`; typed `context` on every flush |
-
-Not in this milestone (Milestone 2/3): retry-budget entities, `MacCodeRegistry`,
-`SystemicEvent`, `Playbook`/`PlaybookRun`/`Action`/`ActionCase`, `PaymentLink`,
-`PromiseToPay`, `MerchantWhatsAppTemplate`, `ChannelRateCard`, the webhook HTTP
-endpoint, FastAPI.
+Highlights: shared case spine + append-only `CaseEvent` ledger, application-layer
+multi-tenancy, four-leg signal ingestion (Celery + Redis broker), rule-based
+diagnosis, the playbook catalog + version-pinned runs, the **Postgres-polling**
+execution driver (`scheduled_job` + stratified Celery-beat pollers — Temporal was
+the alternative; D-090), the compliance / cross-leg guardrail engine + human
+queue, payment reconciliation, `(probability × amount) ÷ cost` recovery scoring,
+the read-only reporting API, a static SPA dashboard + Agent Console + demo
+surface on one port, and (Module 11) a reproducible `docker-compose` runtime.
 
 ## Stack
 
-Python ≥ 3.11 · SQLAlchemy 2.0 · Alembic · Pydantic v2 · PostgreSQL 16.
-(FastAPI + Celery/Redis + Temporal enter with Module 2.)
+Python ≥ 3.11 · SQLAlchemy 2.0 · Alembic · Pydantic v2 · FastAPI + uvicorn ·
+Celery + Redis (**broker only**, no result backend) · PostgreSQL 16 · `uv` ·
+pytest · ruff. Containerised with one `Dockerfile` (`uv`-locked). **No Node. No
+Temporal** (Postgres-polling is the durable execution driver — D-090).
 
-## Setup
+## Runtime topology
+
+Five processes: **PostgreSQL** (the single durable source of truth) · **Redis**
+(Celery broker transport only) · **api** (`python -m torque` — FastAPI + the
+static UI, one port) · **worker** (`celery … worker` — runs every `torque.*`
+task) · **beat** (`celery … beat` — the repeatable-timer trigger: systemic 60s,
+execution poll 10s/60s, daily recovery-score recompute).
+
+## Setup — host dev loop
 
 ```bash
-# 1. infrastructure (Postgres + Redis)
-docker compose up -d db
+# 1. infrastructure
+docker compose up -d db redis        # Postgres :5442, Redis :6389 (offset ports)
 
 # 2. environment
-python -m venv .venv && . .venv/Scripts/activate   # Windows: .venv\Scripts\activate
-pip install -e ".[dev]"
-cp .env.example .env                                # adjust credentials if needed
+uv sync                              # or: python -m venv .venv && pip install -e ".[dev]"
+cp .env.example .env                 # fill secrets only if you need the webhook / injection paths
 
 # 3. schema
-alembic upgrade head
+uv run alembic upgrade head          # -> 0018
 
-# 4. tests  (creates/uses the `torque_test` database)
-pytest
+# 4a. run the app (API + UI on http://127.0.0.1:8000)
+uv run python -m torque
+#    (Celery, if needed:  uv run celery -A torque.ingestion.celery_app:celery_app worker
+#                         uv run celery -A torque.ingestion.celery_app:celery_app beat)
+
+# 4b. tests  (creates/uses the `torque_test` database)
+uv run pytest
+uv run ruff check .
 ```
 
-The docker-compose `db` service publishes on host port **5442** (not 5432) so it
-never collides with a local Postgres install. `TEST_DATABASE_URL` (default
+## Run the full stack in containers
+
+```bash
+cp .env.example .env
+docker compose --profile full up --build
+```
+
+Brings up `db + redis + migrate + api + worker + beat`. `migrate` runs
+`alembic upgrade head` once; `api` waits for it, then serves
+`http://127.0.0.1:8000` (`/` → `/ui/`, `/health`, `/health/ready`). A bare
+`docker compose up` (no `--profile full`) still starts only `db` + `redis`, so
+the host loop above is unaffected.
+
+The `db` / `redis` services publish on host ports **5442** / **6389** (not the
+standard 5432 / 6379) so they never collide with a local install.
+`TEST_DATABASE_URL` (default
 `postgresql+psycopg://postgres:postgres@localhost:5442/torque_test`) controls
-where the suite runs; it drops and recreates the `public` schema there on every
-run and applies migrations.
+where the suite runs; it drops/recreates the `public` schema there and applies
+migrations on every run.
 
 ## Layout
 
 ```
 src/torque/
   enums.py            Blueprint §4 enum reference
-  config.py           Settings + PolicyConfig (tunable windows, consumed later)
+  config.py           Settings (env-driven) + PolicyConfig (tunable windows/thresholds)
   exceptions.py       domain errors
   db/                 Base, session factory, TenantScope
   models/             ORM models + guards.py (flush-time invariant enforcement)
   contexts/           typed leg-context models + validate_context
   events/             CaseEvent payload schemas + append_case_event + atomic
-  security/           razorpay_signature (pure HMAC helper)
   state_machine.py    status transitions, apply_network_directive, sync_control_group
-migrations/           Alembic (0001 enums → 0005 case_event)
+  security/           razorpay_signature (pure HMAC helper)
+  ingestion/ diagnosis/ policy/ execution/ coordination/ reconciliation/
+  scoring/ reporting/ agent_console/ demo/     the module 2–10 packages
+  api/                FastAPI app, routers (webhooks, reporting, agent console,
+                      demo, health), static UI mount
+Dockerfile           one reusable image (api / worker / beat)
+docker-compose.yml    db + redis (+ migrate/api/worker/beat behind `--profile full`)
+migrations/           Alembic (0001 … 0018)
 tests/                Postgres-backed; skips cleanly if no server
 ```
 
 ## Version control
 
-This repo is not yet under git. Nothing here is staged or committed — the
-maintainer handles all VCS operations.
+The **maintainer performs all Git operations.** Contributors (human or agent)
+never `commit`, `push`, or otherwise write to Git — see
+[`documentation/ai-memory/CONTINUATION_PROTOCOL.md`](documentation/ai-memory/CONTINUATION_PROTOCOL.md).

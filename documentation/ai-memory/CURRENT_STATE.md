@@ -1,9 +1,9 @@
 # CURRENT STATE — read this first
 
-**Last updated:** 2026-09-04, after the **Module 10 — UI/UX** run (uncommitted,
-on top of accepted-but-uncommitted Module 9, on committed Module 8 `8fbd97b`).
-**Reconstructed from:** committed Modules 1–8 (HEAD `8fbd97b`) + the uncommitted
-Module 9 + Module 10 changes + `Torque_Blueprint_v7_FullSystem.md`.
+**Last updated:** 2026-09-04, after the **Module 11 — Tech Stack & Infra** run
+(**uncommitted**, on top of committed Modules 1–10).
+**Reconstructed from:** committed Modules 1–10 (HEAD `7b89e36`) + the uncommitted
+Module 11 changes + `Torque_Blueprint_v7_FullSystem.md`.
 **This file is derived documentation, not authoritative.** The repo and blueprint win.
 
 ---
@@ -15,150 +15,160 @@ A revenue-leakage recovery agent closing the loop across four funnel legs —
 receivables** — with **one shared case object and one shared event ledger**. It
 diagnoses root cause, runs a bounded recovery playbook under hard compliance
 guardrails, reconciles incoming payments back to the leaking case, scores every
-open case by its economic recovery opportunity, reports the business outcome, and
-— new in Module 10 — **presents all of it as a runnable product**: a merchant
-dashboard, an agent console, and a live demo surface, served by the same process
-on one port. Full vision: `PROJECT_CONTEXT.md` §1. Spec:
+open case by its economic recovery opportunity, reports the business outcome,
+presents all of it as a runnable product (dashboard + agent console + live demo
+on one port), and — new in Module 11 — **ships that runtime as a reproducible,
+free-tier `docker-compose` stack**. Full vision: `PROJECT_CONTEXT.md` §1. Spec:
 `Torque_Blueprint_v7_FullSystem.md`. Product-pitch knowledge base:
 `learning_log.md` (root).
 
 ## Where we are
 
-**Modules 1–8 — COMPLETE & committed** (`8fbd97b`).
-**Module 9 — Reporting & Measurement — COMPLETE, accepted, uncommitted.**
-**Module 10 — UI/UX — §10 — COMPLETE** (this run, **uncommitted**).
+**Modules 1–8 — COMPLETE & committed** (`8fbd97b` = Module 8).
+**Modules 9 + 10 — COMPLETE & committed** (`7b89e36`, one squashed commit —
+descriptive reporting + Agent Console UI/UX).
+**Module 11 — Tech Stack & Infra — COMPLETE** (this run, **uncommitted**).
 
-| Module 10 capability | Behaviour |
+| Module 11 capability | Behaviour |
 |---|---|
-| Frontend stack (D-122) | A hand-written **static SPA** — `src/torque/ui/static/{index.html,torque.css,torque.js}` (vanilla JS, no framework, no bundler), mounted with `StaticFiles` at `/ui` by `create_app()`. `GET /` → `/ui/`. Hash routing. **No new runtime dependency.** Runs with `uv run python -m torque` (one process, one port). |
-| Merchant Dashboard (§10.1–10.3, 10.11) | Hero ₹-recovered (dominant); stat tiles (revenue at risk, recovery rate, unresolved, human escalations, blocked/deferred amount, cost efficiency); recovery-by-leg table; a CSS bar chart of recovery-over-time; the top-at-risk ranked list (Module 8 `recovery_score` order, backend); "Where Torque deliberately held back" (exception list, surfaced prominently). `SELF_RECOVERED` shown separately, never in the headline; no "actions = revenue" framing. |
-| Case detail / explainability (§10.5–10.6) | Overview card + a "WHY THIS CASE?" panel rendering `recovery_score_breakdown.explain` **verbatim** (probability × amount ÷ expected cost = priority score + the "why" lines) + the full `CaseEvent` timeline in `event_seq_id` order. |
-| Agent Console (§10.7–10.8) | The human queue (priority order from the backend) + a case pane with pause / unpause / **resolve** controls. `torque.agent_console.resolve_escalation`: `ESCALATED_TO_HUMAN → {RECOVERED | PARTIALLY_RECOVERED | WRITTEN_OFF}` (edges already legal — §4), sets `escalation_resolution` / `_by` / `_at`, writes a `HUMAN_RESOLVED` `CaseEvent` (`actor=HUMAN`), a recovering resolution also sets `recovered_amount` / `recovery_type = AGENT_ASSISTED` inside `guards.human_resolution_writer`, and the case leaves the queue. "Cancel" = resolve → `WRITTEN_OFF` (D-124). pause/unpause = `PLAYBOOK_ACTIVE ↔ PAUSED`. INV-59. |
-| Demo Surface (§10.9–10.10, 10.16) | `torque.demo.seed_demo` — a fixed 16-case `acc_demo` dataset (all 4 legs; recovered / self-paid / B2B-partial / blocked / deferred / escalated / exhausted / open; each with a `CaseEvent` trail; all Module-8 scored; deterministic clock `DEMO_NOW`; idempotent; `reset=true` disables the `case_event` trigger for the wipe — D-125). `torque.demo.inject_scenario` — one-click checkout / payment-failure / Decision-K hard-stop-MAC / UPI-cap / NACH-ceiling, composing the **real** ingestion + compliance code (each restraint scenario asserts the real predicate blocks). Live feed = polling `/reports/{m}/activity` every 3 s. |
-| New backend endpoints (§10.13) | `GET /reports/{m}/top-at-risk` · `/human-queue` · `/activity` (Module 9 router, GET, tenant-scoped); `POST /agent-console/{m}/cases/{cid}/{resolve\|pause\|unpause}`; `POST /demo/seed`, `GET /demo/scenarios`, `POST /demo/inject/{key}`, `GET /demo/merchant`. `case_detail` enriched (`recovery_score_breakdown`, `recovery_probability`, `counterparty_label`, `root_cause_code`, `escalation_*`). |
-| Migration | **`0018_escalation_resolution`** — 3 nullable `VARCHAR(64)`/`TIMESTAMPTZ` columns on `revenue_leak_case`. No table, no enum, no `CaseEventType` (`HUMAN_RESOLVED` already existed; count stays 10). D-123. |
-| State machine | **byte-unchanged** — the resolve targets and `PLAYBOOK_ACTIVE ↔ PAUSED` are already-legal §4 edges. |
-| `guards.py` | **CHANGED** — `human_resolution_writer(session)` + an `hr` flag in `_guard_case` (`not (m7 or hr)`), mirroring `network_directive_writer`. Required (a human `→ RECOVERED` writes guarded fields), reported, D-123. First `guards.py` change since M6a. |
-| Live updates (§10.17) | **Polling** — no WebSocket (backend has no push channel; simplest reliable — D-124). |
+| Reproducible runtime (D-128/129/130) | One reusable **`Dockerfile`** (`python:3.11-slim`, `uv sync --frozen` from `uv.lock`, `--no-dev`, non-root `USER torque`) builds the API, the Celery worker, and Celery beat. **`docker-compose.yml`** now defines the whole runtime: `db` + `redis` (unchanged, **profile-free**) and, behind **`profiles: ["full"]`**, `migrate` (one-shot `alembic upgrade head`), `api` (`8000:8000`, `TORQUE_API_HOST=0.0.0.0`), `worker`, `beat`. `docker compose --profile full up` = the five-process runtime; a bare `docker compose up` = infra only, so the host loop (`… up -d db redis` + `uv run python -m torque`) is untouched. |
+| Config coherence (D-131) | **`Settings.api_host` / `api_port`** added (alias `TORQUE_API_HOST` / `TORQUE_API_PORT`, defaults `127.0.0.1:8000`) — the one value `__main__` read straight from `os.environ` now flows through `Settings`. **`.env.example` rewritten** to document every `Settings` field + every `PolicyConfig` field (prefix `TORQUE_POLICY_`), with defaults, comments, compose-network alternates, and **no secrets** (parity + fail-closed defaults are test-enforced). |
+| Minimal operability (D-132) | **`GET /health/ready`** — `SELECT 1` on Postgres + a 1 s Redis `PING`; `200 {"status":"ready","checks":{…}}` or `503` naming the failed component. **`GET /health` unchanged** (still `{"status":"ok"}`). Both now live in `torque.api.health` (`health_router`); `create_app()` is pure wiring. No metrics / tracing / observability stack. |
+| Backend language (D-126) | **Python**, made explicit — resolves Blueprint Part D item 2 / U-05 (decided-by-implementation since M1). |
+| Durable execution (D-090 / D-127) | **Unchanged.** `scheduled_job` + `execute_due_job` (Postgres-polling, `FOR UPDATE SKIP LOCKED`) stay the durable `PlaybookRun` driver. Redis stays **broker-only** (`result_backend=None`, no persistence, no volume). **No Temporal** — documented only as a future driver swap. |
+| Migration | **none.** `alembic head` stays `0018_escalation_resolution`. |
+| State machine / guards | **`state_machine.py` and `guards.py` byte-unchanged vs HEAD.** Module 11 adds no transition, no guard, no guarded field. |
 
-**Modules 11–13 not started.**
+**Modules 12–13 (Build Roadmap, Demo Script) and Module 9b (Incrementality) not started.**
 
 ## Verified facts (checked this session against the repo)
 
 | Fact | Value |
 |---|---|
-| Git HEAD (`main`) | **`8fbd97b`** (committed Module 8). Module 9 + Module 10 changes sit uncommitted on top. |
-| Working tree | Module 9 (uncommitted, accepted) + Module 10. New (Module 10): `src/torque/agent_console/` (2 files), `src/torque/demo/` (3 files), `src/torque/ui/static/` (3 files), `src/torque/api/{agent_console,demo,ui}.py`, `migrations/versions/0018_escalation_resolution.py`, 6 `tests/test_module10_*.py`. Modified (Module 10): `src/torque/api/app.py`, `src/torque/api/reporting.py`, `src/torque/reporting/{metrics,schemas,__init__}.py`, `src/torque/models/{revenue_leak_case,guards}.py`, `src/torque/exceptions.py`, `tests/test_schema_introspection.py`. |
-| Alembic head | **`0018_escalation_resolution`** — Module 10 added one migration (3 nullable columns, no enum). |
-| Test suite | **1109 passed** (`uv run pytest -q`), 0 fail / 0 skip. 1 cosmetic `StarletteDeprecationWarning` (pre-existing). *(Pre-existing intermittent cross-test isolation flakiness — see Module 9 notes — still present; unrelated to Module 10.)* |
-| Lint | `uv run ruff check .` → clean. No frontend lint/typecheck/build (D-122 — no TS, no build). |
-| Migration roundtrip | green (up→down→up incl. 0018) |
-| `src/torque/state_machine.py` | **`git diff HEAD --` empty** — byte-unchanged. |
-| `src/torque/models/guards.py` | **CHANGED** — the `human_resolution_writer` addition only (D-123). |
-| Stack | Python 3.11, SQLAlchemy 2.0, Alembic, Pydantic v2, FastAPI + StaticFiles, Celery + Redis + beat, PostgreSQL 16, `uv`, pytest, ruff. **No Node.** |
-| DB / infra | Postgres host **5442**; Redis host **6389**. **25 tables** (unchanged — Module 10 added columns, not a table). |
+| Git HEAD (`main`) | **`7b89e36`** "Module 9–10: descriptive reporting + Agent Console UI/UX". Module 11 changes sit **uncommitted** on top. |
+| Working tree (Module 11) | **New:** `Dockerfile`, `.dockerignore`, `src/torque/api/health.py`, `tests/test_infra_compose.py`, `tests/test_infra_celery.py`, `tests/test_config_env_parity.py`, `tests/test_health_endpoints.py`. **Modified:** `docker-compose.yml`, `.env.example`, `src/torque/config.py`, `src/torque/__main__.py`, `src/torque/api/app.py`, plus the six `documentation/ai-memory/*` files. |
+| Alembic head | **`0018_escalation_resolution`** — Module 11 adds no migration. |
+| Test suite | **1144 passed** (`uv run pytest -q`), 0 fail / 0 skip. 1 pre-existing cosmetic `StarletteDeprecationWarning`. Was 1109 at `7b89e36`; `+35` (14 compose + 9 celery + 6 config-parity + 6 health). |
+| Lint | `uv run ruff check .` → clean. No frontend lint/build (D-122). |
+| Migration roundtrip | green (`tests/test_zz_migrations_roundtrip.py`, up→down→up incl. 0018). |
+| `src/torque/state_machine.py` | **`git diff HEAD --` empty** — byte-unchanged (unchanged since M1). |
+| `src/torque/models/guards.py` | **`git diff HEAD --` empty** — the `human_resolution_writer` addition (D-123) is committed at `7b89e36`; Module 11 does not touch it. |
+| Stack | Python 3.11, SQLAlchemy 2.0, Alembic, Pydantic v2, FastAPI + StaticFiles, Celery + Redis (broker only) + beat, PostgreSQL 16, `uv`, pytest, ruff. **+ `Dockerfile` / `.dockerignore` / full `docker-compose`.** **No Node.** No Temporal. |
+| DB / infra | Postgres host **5442**; Redis host **6389**; API host **8000** (compose `full` profile). **25 tables** (unchanged). |
 
-## What is implemented (new in Module 10)
+## What is implemented (new in Module 11)
 
-- **`torque.ui`** — `mount_ui(app)` + the static SPA (`ui/static/`).
-- **`torque.agent_console`** — `resolve.py` (`resolve_escalation`, `pause_case`,
-  `unpause_case`, `EscalationResolution`).
-- **`torque.demo`** — `seed.py` (`seed_demo`, `DEMO_MERCHANT_ID`, `DEMO_NOW`),
-  `scenarios.py` (`inject_scenario`, `DEMO_SCENARIOS`).
-- **`torque.api.{agent_console,demo,ui}`** — the routers, wired into `app.py`.
-- **`torque.reporting`** — `top_at_risk_cases`, `human_queue_list`,
-  `recent_activity`; `case_detail` enriched.
-- **Migration 0018** + `guards.human_resolution_writer` +
-  `exceptions.{CaseNotFoundError,HumanResolutionError}`.
+- **`Dockerfile` + `.dockerignore`** — one reusable image for api / worker / beat.
+- **`docker-compose.yml`** — `db` + `redis` (profile-free) + `migrate` + `api` +
+  `worker` + `beat` (profile `full`); one YAML anchor for the shared build /
+  image / compose-network env; explicit `depends_on` health/completion gates.
+- **`torque.api.health`** — `GET /health` (moved, unchanged) + `GET /health/ready`
+  (`check_database` / `check_redis`, 200/503).
+- **`Settings.api_host` / `api_port`**; `__main__` reads them via `Settings`.
+- **`.env.example`** — full `Settings` + `PolicyConfig` surface, no secrets.
+- Four Docker-free infra/config tests.
 
-Full breakdown: `ARCHITECTURE.md` §8J.
+Full breakdown: `ARCHITECTURE.md` §8K.
 
 ## How to run the product locally
 
+**Host dev loop (unchanged):**
+
 ```
-docker compose up -d db                    # Postgres on :5442
+docker compose up -d db redis              # Postgres :5442, Redis :6389
 uv run alembic upgrade head                # → 0018
 uv run python -m torque                    # API + UI on http://127.0.0.1:8000
 curl -X POST http://127.0.0.1:8000/demo/seed        # deterministic acc_demo dataset
-# open http://127.0.0.1:8000/  → redirects to /ui/  (defaults to acc_demo)
+# open http://127.0.0.1:8000/  → redirects to /ui/
 ```
 
-Or skip the `curl`: open `/ui/`, go to **Live Demo**, click **Seed demo data**,
-then **Dashboard**. `POST /demo/seed?reset=true` rebuilds from scratch.
+**Full containerised runtime (new — Module 11):**
+
+```
+cp .env.example .env                       # fill secrets if you need the webhook / injection paths
+docker compose --profile full up --build   # db + redis + migrate + api + worker + beat
+# migrate runs `alembic upgrade head` once; api waits for it, then serves :8000
+curl http://127.0.0.1:8000/health/ready    # {"status":"ready","checks":{"database":"ok","redis":"ok"}}
+curl -X POST http://127.0.0.1:8000/demo/seed
+# open http://127.0.0.1:8000/
+```
 
 ## Next milestone
 
-**Module 11 — Tech Stack & Infra** (consolidate deployment: Temporal-vs-fallback
-go/no-go, prod queue, `docker-compose` worker/beat services) and/or **Module 13
-— Demo Script**, plus **Module 9b — Incrementality** (D-121 / U-10). Do not start
-without an approved scope.
+**Module 12 — Build Roadmap** (phase → calendar plan; needs Part D item 3 — build
+window length) and/or **Module 13 — Demo Script** (needs Part D item 4 — judging
+rubric), plus **Module 9b — Incrementality** (D-121 / U-10 — lift + Wilson CI +
+SUTVA). Do not start without an approved scope.
 
 ## Never-violate rules (short form — full list in CONTINUATION_PROTOCOL.md)
 
 1. **No Git write operations.** The maintainer does all VCS.
 2. **The blueprint is law.** Deviations only if proposed, justified, approved,
-   documented in code + `DECISIONS.md`. (Module 10: no substantive deviation —
-   the blueprint's §10 is 3 bullets; D-122/D-124 pick the faithful minimum.)
+   documented in code + `DECISIONS.md`. (Module 11: no deviation — the
+   blueprint's Module 11 is a consolidation table; D-126/127 confirm the
+   already-made choices, D-090 stays IN FORCE.)
 3. **One module = one implementation run = one audit.**
 4. **Do not implement `DEFERRED.md` work as a side effect.**
-5. **Do not resolve `UNRESOLVED.md` questions unilaterally.** (Module 10 surfaced
-   U-11 — the Agent Console override vocabulary / pause target — rather than
-   claiming it settled.)
-6. `state_machine.py` / `guards.py` are load-bearing. **Module 10 changed
-   `guards.py`** (the one §10.8-assigned human-resolution write path — D-123,
-   diff shown); `state_machine.py` byte-unchanged.
+5. **Do not resolve `UNRESOLVED.md` questions unilaterally.** (Module 11 resolved
+   only U-05's Part D item 2 — the maintainer's locked decision — and left every
+   other U-item untouched.)
+6. `state_machine.py` / `guards.py` are load-bearing. **Module 11 touched
+   neither** (`git diff HEAD --` empty for both). `state_machine.py` unchanged
+   since M1; `guards.py` last changed by Module 10 (`human_resolution_writer`,
+   committed at `7b89e36`).
 7. Every run verifies: `pytest`, `ruff`, migration roundtrip, `git diff HEAD` of
    `state_machine.py` **and** `guards.py`.
 
 ## Unresolved decisions / questions right now
 
 - **U-01 / U-02 / U-07** — RESOLVED.
-- **U-03 / U-04 / U-05 / U-06 / U-08** — open (MAC precedence, systemic numbers,
-  Part D items, issuer extraction).
+- **U-05** — Part D item 1 (synthetic injection) and **item 2 (backend = Python,
+  D-126)** RESOLVED. Items 3–4 (build window, judging rubric) open — Modules
+  12–13.
+- **U-03 / U-04 / U-06 / U-08** — open (MAC precedence, systemic N/M numbers,
+  Part D residue, issuer extraction). None constrain Modules 12–13.
 - **U-09** — Module 8 calibration values are stated defaults. Not blocking.
 - **U-10** — incrementality / causal measurement deferred to "Module 9b". Not
   blocking.
-- **U-11** — **NEW** — Agent Console `escalation_resolution` vocabulary and the
-  pause/cancel target states are Module-10 choices the blueprint underspecifies
-  (D-123 / D-124). Not blocking.
+- **U-11** — Agent Console `escalation_resolution` vocabulary / pause target are
+  Module-10 choices the blueprint underspecifies (D-123 / D-124). Not blocking.
+- **D-090 (Postgres-polling over Temporal)** — **IN FORCE.** Module 11 reaffirmed
+  it (D-127); do not reopen.
 
 ## Known contradictions / caveats
 
-- **`README.md` is stale.** Trust `CURRENT_STATE.md` / the code.
-- **Module 9 + Module 10 are uncommitted** on top of committed Module 8. Every
-  "verified fact" (1109 tests) reflects the working tree.
-- **`guards.py` changed** — `human_resolution_writer`, the parallel gate to
-  `module7_writer` for a human resolution's `recovery_type` / `recovered_amount`
-  write (D-123). `state_machine.py` untouched.
-- **The UI computes nothing** — every metric, score and ranking comes from the
-  backend; `torque.js` only fetches, formats and renders (§10.4 / §10.13).
-- **"Cancel" is a write-off** — an escalated case a human gives up on goes to
-  `WRITTEN_OFF`, not `CANCELLED` (which is reserved for reconciliation-detected
-  self-payment). D-124 / U-11.
-- **Live feed is polling** (3 s) — no push channel exists (D-124).
-- **No browser/e2e test harness** — the DOM logic is verified via its API
-  contract + shell/wiring assertions (D-122); a Playwright layer is deferred.
-- **Demo `reset` disables the `case_event` trigger** for its scoped wipe (D-125)
-  — demo-only, single-merchant; the production append-only guarantee is untouched.
-- **`recovery_score` values look large** next to `amount_at_risk` for open cases
-  whose next step has no priced channel (cost floors to ₹0.01 — Module 8 D-111).
-  The UI labels the column "Score" (a priority ordinal), not "₹". Faithful to
-  Module 8; a NOTE, not a bug.
-- **Pre-existing suite flakiness** (celery-eager `session_scope()` commits +
-  `test_module6_merge`'s two-connection cleanup) — occasionally fails a small,
-  different set of Module 2/4/6 tests across full runs; reproduces without
-  Module 10; all pass in isolation.
+- **`README.md` refreshed for Module 11** (Setup / Stack / run paths). The
+  historical "Milestone 1" framing higher up is superseded by this file — trust
+  `CURRENT_STATE.md` / the code.
+- **Module 11 is uncommitted** on top of committed Modules 1–10 (`7b89e36`).
+  Every "verified fact" (1144 tests) reflects the working tree.
+- **Redis is broker-only** — `result_backend=None`, no persistence, no
+  `docker-compose` volume. No durable application state is ever in Redis.
+- **`docker compose --profile full up` needs a `.env` file** (compose `env_file:
+  .env`); `cp .env.example .env` first. The compose `environment:` block still
+  injects the critical compose-network `DATABASE_URL` / `REDIS_URL` /
+  `TORQUE_API_HOST` overrides regardless.
+- **`beat` writes its schedule bookkeeping to `/tmp/celerybeat-schedule`** (the
+  container runs non-root with a read-only working dir). It holds no durable
+  state — the source of truth for execution timers is `scheduled_job`.
 - **The executor is still a stub (§5.4).** Torque still fires no real messages /
-  charges; execution is not auto-triggered (D-080/D-088/D-093). The demo
-  scenarios compose ingestion + compliance directly.
-- Module 1–9 caveats still stand.
+  charges; execution is not auto-triggered (D-080/D-088/D-093). Module 11 changed
+  nothing about this.
+- **No Temporal.** D-090 / D-127 — the Postgres-polling driver is the durable
+  execution mechanism; Temporal is a future driver swap only.
+- **No browser/e2e harness** (D-122); a Dockerised `--profile full` smoke test is
+  a manual maintainer step, not in the pytest suite (the infra tests assert the
+  config/command contract without Docker).
+- Module 1–10 caveats still stand (UI computes nothing; "Cancel" = `WRITTEN_OFF`;
+  demo `reset` disables the `case_event` trigger for its scoped wipe; large
+  `recovery_score` values for unpriced open cases; pre-existing suite flakiness
+  under load).
 
 ## What to do next (for the agent reading this)
 
 Follow `CONTINUATION_PROTOCOL.md`: verify this snapshot against the live repo
 (`git log`, `git status`, `alembic heads/current`, `pytest`, `ruff`,
-`git diff HEAD -- src/torque/state_machine.py` — expect **empty**;
-`git diff HEAD -- src/torque/models/guards.py` — expect the
-`human_resolution_writer` addition only), report any drift, then — once the
-maintainer has committed Modules 9 + 10 — propose **Module 11 — Tech Stack &
-Infra** (or Module 13 / Module 9b) as one continuous scope.
+`git diff HEAD -- src/torque/state_machine.py` and `-- src/torque/models/guards.py`
+— **both expected empty**), report any drift, then — once the maintainer has
+committed Module 11 — propose **Module 12 — Build Roadmap** or **Module 13 —
+Demo Script** (or **Module 9b — Incrementality**) as one continuous scope.

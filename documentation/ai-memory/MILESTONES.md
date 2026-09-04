@@ -1595,7 +1595,99 @@ explicitly-assigned §10.8 human-resolution write path.)*
 
 ---
 
-## What comes next
+## Module 11 — Tech Stack & Infra — COMPLETE
+
+- **Commit:** *(uncommitted — maintainer commits)*. HEAD at implementation time:
+  `7b89e36` (Module 9–10). Recommended message below.
+- **Migrations:** **none.** Module 11 is infrastructure + config + a readiness
+  endpoint; zero schema change. `alembic head` stays `0018_escalation_resolution`.
+- **Objective:** make the runtime the code already expects **reproducible from
+  the repository alone**, free-tier, with no new infrastructure class:
+  `docker-compose` stands up the exact five-process runtime (db + redis + api +
+  worker + beat); one image builds api/worker/beat; every config value has a
+  coherent, documented local **and** container setting with no committed
+  secrets; `/health` gains a minimal readiness sibling. Blueprint Module 11's
+  consolidation table is recorded as settled — **Temporal stays unimplemented**
+  (D-090 / D-127), documented only as a future driver swap.
+- **Scope delivered:**
+  - **`Dockerfile`** (new) — one `python:3.11-slim` image, `uv sync --frozen`
+    from `uv.lock` (reproducible), runtime deps only (`--no-dev`), non-root
+    `USER torque`. Reused by api / worker / beat (D-128); default `CMD` is
+    `python -m torque`, compose overrides `command:` for worker / beat.
+  - **`.dockerignore`** (new) — trims the build context.
+  - **`docker-compose.yml`** (rewrite) — `db` (host `:5442`) and `redis`
+    (host `:6389`) unchanged and **profile-free**, so a bare `docker compose up`
+    still starts only infra and the host loop (`… up -d db redis` +
+    `uv run python -m torque`) is untouched (D-129). New services behind
+    `profiles: ["full"]`: `migrate` (one-shot `alembic upgrade head`,
+    `restart: "no"`, D-130), `api` (`python -m torque`, `8000:8000`,
+    `TORQUE_API_HOST=0.0.0.0`, healthcheck → `/health/ready`), `worker`
+    (`celery … worker`, `inspect ping` healthcheck), `beat` (`celery … beat
+    --schedule=/tmp/celerybeat-schedule`). One YAML anchor (`x-torque-app`)
+    supplies the shared build / image / compose-network `DATABASE_URL=…@db:5432`
+    / `REDIS_URL=redis://redis:6379/0`. `api`/`worker`/`beat` `depends_on`
+    `db` + `redis` healthy **and** `migrate` completed.
+  - **`src/torque/api/health.py`** (new) — `health_router`: `GET /health`
+    (liveness — the Milestone-7a `{"status":"ok"}` moved here **verbatim**) +
+    `GET /health/ready` (readiness — `check_database()` `SELECT 1` +
+    `check_redis(url)` 1 s `PING`; `200` both-ok / `503` naming the failed
+    component). Probe functions module-level (test-substitutable); `redis`
+    imported lazily. No metrics / tracing (D-132).
+  - **`src/torque/api/app.py`** — now pure wiring: `include_router(health_router)`
+    first, then the existing routers + `mount_ui`. The inline `/health` is gone
+    (relocated, byte-identical behaviour).
+  - **`src/torque/config.py`** — `Settings.api_host` (`127.0.0.1`) /
+    `api_port` (`8000`), each `validation_alias=AliasChoices("<field>",
+    "TORQUE_API_<HOST|PORT>")` so the established env names keep working (D-131).
+  - **`src/torque/__main__.py`** — reads `get_settings().api_host / .api_port`
+    instead of `os.environ` directly; defaults and behaviour identical.
+  - **`.env.example`** (rewrite) — every `Settings` field + every `PolicyConfig`
+    field (prefix `TORQUE_POLICY_`), each with default + comment; secrets blank;
+    compose-network alternates noted.
+  - **Tests** (new, Docker-free): `tests/test_infra_compose.py` (14),
+    `tests/test_infra_celery.py` (9), `tests/test_config_env_parity.py` (6),
+    `tests/test_health_endpoints.py` (6).
+- **Decisions:** D-126 (backend = Python, Part D item 2 / U-05), D-127 (no
+  Temporal; D-090 stands), D-128 (one image), D-129 (compose profiles), D-130
+  (one-shot `migrate`), D-131 (`Settings` owns API bind address), D-132
+  (`/health/ready`; no observability stack).
+- **Deviations from blueprint:** none. Blueprint Module 11's table is a
+  consolidation of already-made choices; the one open item (Part D item 2) is
+  resolved to the de-facto Python (D-126). "Temporal (OSS) … or polling
+  fallback" resolves to the polling fallback already built in Module 5 (D-090),
+  reaffirmed here (D-127) — not a deviation, the blueprint offers both.
+- **Deferred work removed from `DEFERRED.md`:** the `docker-compose` Celery
+  worker/beat service (Module 2 list); "Infra beyond `docker-compose` … prod
+  queue, worker/beat services" (Modules 11–13 list).
+- **Deferred work introduced / still open:** real Temporal engine / self-hosted
+  cluster (🔮 — D-090/D-127, future driver swap only); production process
+  manager / autoscaling / multi-host orchestration (🔮 — no Kubernetes); secrets
+  management (🔮 — `.env` + compose `env_file` only); a CI/CD pipeline + image
+  registry (🔧, no owner); a Dockerised `docker compose --profile full up` smoke
+  test in CI (🔧 — the infra tests assert the config contract without Docker).
+- **Unresolved:** **U-05 D item 2 RESOLVED** (Python — D-126). D-090 **not
+  reopened** (D-127). No new unresolved question — the runtime is fully
+  specified. U-03 / U-04 / U-06 / U-08 / U-09 / U-10 / U-11 untouched (none
+  constrain Module 11).
+- **`state_machine.py` / `guards.py`:** **both byte-unchanged vs HEAD**
+  (`git diff HEAD --` empty for each). Module 11 adds no transition, no guard,
+  no guarded field.
+- **Tests at completion:** **1144** passed (was 1109 at `7b89e36`), 0 failed,
+  0 skipped, 1 pre-existing cosmetic `StarletteDeprecationWarning`. `+35` tests
+  (14 + 9 + 6 + 6 new). `ruff check .` clean. `alembic upgrade head` → `0018`
+  (no-op — no Module 11 migration); `tests/test_zz_migrations_roundtrip.py`
+  green.
+- **Verification status:** complete + verified against a live Postgres
+  (docker-compose `db`, host 5442). `pytest` 1144 green, `ruff` clean, roundtrip
+  green, `state_machine.py` / `guards.py` diffs empty, no migration. Docker
+  `--profile full` smoke test: see the milestone report (reported separately
+  from the code/test result per the maintainer's instruction).
+- **Recommended commit message:**
+  `Module 11: tech stack & infra — reproducible runtime (Dockerfile, compose api/worker/beat behind a full profile, /health/ready, .env.example + Settings audit); no schema change`
+
+---
+
+## (historical) What came next after Module 10
 
 **Module 10 — UI/UX — COMPLETE.** Torque is now a runnable, demo-able product:
 `uv run python -m torque` serves the JSON API **and** a static dashboard on one

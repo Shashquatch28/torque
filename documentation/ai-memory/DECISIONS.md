@@ -2392,6 +2392,137 @@ BY D-0NN`.
   upsert (rejected — a large rewrite of the seed for marginal benefit).
 - **Status:** IN FORCE
 
+## D-126 — Backend language/framework is Python (Part D item 2 / U-05), decided-by-implementation
+- **Milestone:** Module 11
+- **Decision:** Blueprint Part D item 2 ("backend language/framework was never
+  chosen") is the one open item in the Module 11 scope. Pick it now.
+- **Chosen:** **Python** — recorded explicitly, not as a new choice but as the
+  one the repository has been committed to since M1 (SQLAlchemy 2.0, Pydantic v2,
+  Alembic, Celery, FastAPI, pytest — no Node anywhere). The blueprint's
+  "Pydantic (Python) or Zod (TypeScript)" fork resolves to Pydantic; the
+  Temporal-SDK-language question is moot while Temporal is not implemented
+  (D-090 / D-127).
+- **Alternatives:** TypeScript/Node (would require rewriting the entire
+  codebase); Go/Java (never in play).
+- **Reasoning:** Making the de-facto choice explicit closes Part D item 2 so a
+  future contributor does not treat the language as still-open. Nothing in the
+  system now depends on the choice being re-litigated.
+- **Consequence:** U-05's language/framework sub-item is resolved. Build tooling
+  (`uv`, the lockfile-reproducible Docker image) is Python-native.
+- **Status:** IN FORCE
+
+## D-127 — No Temporal in Module 11; Postgres-polling stays; Temporal is a documented future driver-swap only
+- **Milestone:** Module 11
+- **Decision:** Blueprint Module 11's table lists "Temporal (OSS, self-hosted)
+  for `PlaybookRun`; Postgres-polling fallback if infeasible". Does Module 11
+  stand up a Temporal cluster / add the SDK?
+- **Chosen:** **No.** D-090 (Postgres-polling chosen over Temporal, Module 5)
+  **remains IN FORCE**. Module 11 adds no Temporal dependency, no Temporal
+  container, and does not reopen the decision. The `execute_due_job` tick +
+  `scheduled_job` table stay the durable execution mechanism; Temporal is
+  mentioned in `ARCHITECTURE.md` only as a possible future driver swap behind
+  that same seam.
+- **Alternatives:** stand up self-hosted Temporal now (rejected — the fallback
+  is built, working, and tested; a cluster is real operational weight for no
+  demo-scope benefit; Part E item 8's go/no-go stays "no").
+- **Reasoning:** The maintainer's Module 11 instructions lock this. Blueprint
+  Part E already frames Temporal go/no-go as non-blocking with a working
+  fallback in place.
+- **Consequence:** `DEFERRED.md` keeps "real Temporal engine" as an explicit
+  future (🔮) item. No `pyproject.toml` / compose change toward Temporal.
+- **Status:** IN FORCE
+
+## D-128 — One reusable application image for api / worker / beat
+- **Milestone:** Module 11
+- **Decision:** Package the three Python processes (FastAPI API, Celery worker,
+  Celery beat) as one image or three?
+- **Chosen:** **One `Dockerfile`** → image `torque-app:local`, reused by all
+  three compose services, which differ only by their `command:` (`python -m
+  torque` / `celery … worker` / `celery … beat`). `uv sync --frozen` installs
+  from `uv.lock` for reproducibility; non-root `USER torque`; runtime deps only
+  (`--no-dev`).
+- **Alternatives:** three Dockerfiles (rejected — identical dependency closures,
+  triple the build/maintenance surface); a `pip install .` without the lockfile
+  (rejected — not reproducible; `uv.lock` is committed for exactly this).
+- **Reasoning:** The maintainer's Module 11 instruction: "reuse the same Python
+  application image/code where practical rather than creating unnecessary
+  duplicated Dockerfiles."
+- **Consequence:** `Dockerfile` + `.dockerignore` added. `beat` runs with
+  `--schedule=/tmp/celerybeat-schedule` because the image's working dir is
+  read-only to the non-root user.
+- **Status:** IN FORCE
+
+## D-129 — docker-compose profiles: bare `up` = infra only; `--profile full` = whole runtime
+- **Milestone:** Module 11
+- **Decision:** Adding `api`/`worker`/`beat` to compose must not break the
+  existing host dev loop (`docker compose up -d db` + `uv run python -m torque`).
+- **Chosen:** `db` and `redis` carry **no** `profiles:` key, so a bare
+  `docker compose up` still starts only the infrastructure. `migrate`, `api`,
+  `worker`, `beat` sit behind `profiles: ["full"]` — `docker compose --profile
+  full up` brings the whole containerised runtime.
+- **Alternatives:** put everything in the default set (rejected — every bare
+  `up` would build the image and run 4 extra containers, breaking the
+  lightweight loop); a second compose file (rejected — drift risk, more to keep
+  in sync).
+- **Reasoning:** Satisfies both "reproduce the real runtime" and "the demo /
+  dev loop still starts simply".
+- **Status:** IN FORCE
+
+## D-130 — Schema is applied by a one-shot `migrate` service the app services depend on
+- **Milestone:** Module 11
+- **Decision:** How does the containerised runtime reach `alembic upgrade head`
+  before the app starts?
+- **Chosen:** A `migrate` service (`command: alembic upgrade head`,
+  `restart: "no"`) that runs once and exits; `api`, `worker`, and `beat`
+  `depends_on: { migrate: { condition: service_completed_successfully } }` (and
+  `db` / `redis` healthy). No app process runs migrations itself.
+- **Alternatives:** each service runs `alembic upgrade head` in its entrypoint
+  (rejected — three concurrent upgraders racing on first boot); a manual
+  out-of-band step (rejected — defeats "reproducible from the repo alone");
+  migrations on FastAPI startup (rejected — `create_app()` is deliberately
+  side-effect-free, M7a).
+- **Consequence:** Exactly one upgrade per `up`; `migrate` exits 0 and the
+  others proceed.
+- **Status:** IN FORCE
+
+## D-131 — `Settings` owns the API bind address; `__main__` stops reading `os.environ`
+- **Milestone:** Module 11
+- **Decision:** `src/torque/__main__.py` read `TORQUE_API_HOST` / `TORQUE_API_PORT`
+  directly from `os.environ`; every other config value goes through
+  `torque.config.Settings`. Make it coherent.
+- **Chosen:** Add `Settings.api_host` (default `127.0.0.1`) and
+  `Settings.api_port` (default `8000`), each with
+  `validation_alias=AliasChoices("<field>", "TORQUE_API_<HOST|PORT>")` so the
+  established `TORQUE_API_*` env names keep working. `__main__.main()` now reads
+  `get_settings().api_host / .api_port`. Behaviour and defaults are identical;
+  the compose `api` service sets `TORQUE_API_HOST=0.0.0.0`.
+- **Alternatives:** leave `__main__` reading `os.environ` (rejected — the one
+  config value not flowing through `Settings`); rename the env vars to
+  `API_HOST` / `API_PORT` (rejected — `TORQUE_`-prefixed is the house
+  convention: `TORQUE_POLICY_*`, `TORQUE_ALEMBIC_URL`, `TORQUE_TEST_ADMIN_URL`).
+- **Status:** IN FORCE
+
+## D-132 — Minimal readiness endpoint `GET /health/ready`; `/health` unchanged; no observability stack
+- **Milestone:** Module 11
+- **Decision:** `GET /health` is a static liveness probe. Does Module 11 need a
+  readiness check, and how much?
+- **Chosen:** Add **`GET /health/ready`** in `torque.api.health` — a `SELECT 1`
+  against Postgres and a 1-second-timeout `PING` against the Redis broker;
+  `200 {"status":"ready","checks":{…}}` when both answer, `503 {"status":"not
+  ready", …}` naming the failed component otherwise. `GET /health` keeps its
+  exact Milestone-7a contract (`200 {"status":"ok"}`). The compose `api`
+  healthcheck probes `/health/ready`. **Nothing else** — no Prometheus, Grafana,
+  ELK, OpenTelemetry, tracing, or structured-log shipping.
+- **Alternatives:** no readiness endpoint (rejected — compose needs a real
+  "is the API wired to its infra" signal to gate `depends_on` / show healthy);
+  a deep dependency graph / metrics surface (rejected — explicitly out of scope,
+  free-tier, minimal-operability instruction).
+- **Consequence:** `torque.api.app` includes a `health_router` (the inline
+  `/health` moved into it verbatim); `redis` (already a dependency) is imported
+  lazily inside the probe. The two probe functions are module-level so tests can
+  substitute them without a live Redis.
+- **Status:** IN FORCE
+
 ---
 
 ## Notes not recorded as decisions

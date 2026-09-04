@@ -152,16 +152,21 @@ if it produced a design decision, a `DECISIONS.md` entry. Do not delete it.
   HMAC via `Settings.checkout_injection_secret`) — is now **built** (D-074).
   Leg 2 ingestion is live. A real per-merchant storefront pixel remains a
   separate future build item (🔮, `DEFERRED.md`), not a blocker for anything.
-- **D item 2 — backend language/framework:** never formally chosen in the
-  blueprint. **In practice the repo is committed to Python** (SQLAlchemy,
-  Pydantic, Alembic, pytest). Treat Python as decided-by-implementation; the
-  Temporal SDK choice (Python) follows. Note this if the maintainer ever
-  reconsiders.
+- **D item 2 — backend language/framework:** **RESOLVED (2026-09-04, Module 11;
+  D-126).** Python, made explicit — the repo has been committed to it since M1
+  (SQLAlchemy 2.0, Pydantic v2, Alembic, Celery, FastAPI, pytest; no Node). The
+  "Pydantic (Python) or Zod (TypeScript)" fork resolves to Pydantic. The
+  Temporal-SDK-language question is moot while Temporal is not implemented
+  (D-090 / D-127). *(Original note kept below.)*
+  - In practice the repo is committed to Python (SQLAlchemy, Pydantic, Alembic,
+    pytest). Treat Python as decided-by-implementation; the Temporal SDK choice
+    (Python) follows. Note this if the maintainer ever reconsiders.
 - **D item 3 — build-window length:** unknown. Module 12's roadmap has no
   calendar dates. Does not block milestone work.
 - **D item 4 — judging rubric:** unknown. Only matters for Module 13.
-- **Must implementation stop first?** No. D item 1 is resolved (synthetic
-  injection built). The rest do not block schema/logic milestones.
+- **Must implementation stop first?** No. D item 1 (synthetic injection) and
+  D item 2 (Python — D-126) are resolved. D items 3–4 (build-window length,
+  judging rubric) only matter for Modules 12–13.
 
 ## U-06 — `MacCodeRegistry` unseeded codes
 

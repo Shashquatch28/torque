@@ -1,7 +1,46 @@
-# Local dev infrastructure. Free / self-hosted only (Blueprint v7 build constraint).
-# Host ports are offset (5442 / 6389) so a pre-existing local Postgres/Redis on
-# the standard ports does not conflict. Container-internal ports are unchanged.
-# Redis is declared now for Module 2's ingestion queue; it is unused in Milestone 1.
+# Local / demo runtime. Free / self-hosted only (Blueprint v7 build constraint).
+#
+# Two ways to run Torque, both reproduced here:
+#
+#   docker compose up -d db redis          # infra only — then run the app on the
+#   uv run python -m torque                # host (the original dev loop)
+#
+#   docker compose --profile full up       # the whole runtime in containers:
+#                                          # db + redis + migrate + api + worker + beat
+#
+# `db` and `redis` have no profile, so a bare `docker compose up` still starts
+# only the infrastructure. `migrate`, `api`, `worker`, and `beat` sit behind the
+# `full` profile so the host dev loop above is untouched.
+#
+# Host ports are offset (5442 / 6389) so a pre-existing local Postgres / Redis on
+# the standard ports does not conflict. Container-internal ports are unchanged;
+# the app services reach the infra by service name on the compose network
+# (db:5432, redis:6379).
+#
+# Runtime topology (Module 11):
+#   - PostgreSQL — the single durable source of truth (case spine, CaseEvent
+#     ledger, scheduled_job execution timers, human_queue, …).
+#   - Redis      — Celery broker transport ONLY. No result backend; no durable
+#     application state ever lives here.
+#   - api        — FastAPI + the static UI, one process (`python -m torque`).
+#   - worker     — the Celery worker: executes every torque.* task (ingestion
+#     buffers, systemic detection, the §5.6 execution poll, recovery scoring).
+#   - beat       — the Celery beat scheduler: the repeatable-timer trigger only
+#     (systemic 60s, execution poll 10s/60s, daily recovery-score recompute).
+#     Durable execution state stays in scheduled_job; beat holds no state.
+
+x-torque-app: &torque-app
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: torque-app:local
+  env_file: .env
+  environment: &torque-app-env
+    # Compose-network addresses (override the .env / Settings localhost defaults).
+    DATABASE_URL: postgresql+psycopg://postgres:postgres@db:5432/torque
+    REDIS_URL: redis://redis:6379/0
+  restart: unless-stopped
+
 services:
   db:
     image: postgres:16-alpine
@@ -20,6 +59,8 @@ services:
       retries: 10
 
   redis:
+    # Celery broker transport only — no persistence configured, nothing durable
+    # is kept here (Blueprint Decision C / D-057).
     image: redis:7-alpine
     ports:
       - "6389:6379"
@@ -28,6 +69,92 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  # One-shot: bring the schema to head, then exit. api / worker / beat wait for
+  # this to complete so they never race a half-migrated database.
+  migrate:
+    <<: *torque-app
+    profiles: ["full"]
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    <<: *torque-app
+    profiles: ["full"]
+    command: ["python", "-m", "torque"]
+    environment:
+      <<: *torque-app-env
+      # Bind on all interfaces inside the container so the published port works.
+      TORQUE_API_HOST: "0.0.0.0"
+      TORQUE_API_PORT: "8000"
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3).status == 200 else 1)"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  worker:
+    <<: *torque-app
+    profiles: ["full"]
+    command:
+      - "celery"
+      - "-A"
+      - "torque.ingestion.celery_app:celery_app"
+      - "worker"
+      - "--loglevel=info"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "celery -A torque.ingestion.celery_app:celery_app inspect ping -t 5 >/dev/null 2>&1 || exit 1"
+      interval: 15s
+      timeout: 10s
+      retries: 6
+      start_period: 25s
+
+  beat:
+    <<: *torque-app
+    profiles: ["full"]
+    # --schedule points at a writable path (the container runs as a non-root
+    # user; the working dir is read-only). beat keeps no durable state — this
+    # file is just its local "last fired" bookkeeping.
+    command:
+      - "celery"
+      - "-A"
+      - "torque.ingestion.celery_app:celery_app"
+      - "beat"
+      - "--loglevel=info"
+      - "--schedule=/tmp/celerybeat-schedule"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
 volumes:
   torque_pgdata:

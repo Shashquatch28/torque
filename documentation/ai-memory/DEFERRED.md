@@ -100,8 +100,9 @@ Legend: 🔧 build (planned) · 📋 design-only for demo · 🔮 roadmap / out 
   ingestion-created case is left in `DETECTED` (or `DIAGNOSING` after systemic
   resolution) for a separate orchestration step to pick up (D-080, moved here from
   "Dispatch to Module 3"). Wiring the enqueue is an orchestration-layer concern.
-- 🔧 **A `docker-compose` Celery worker/beat service** — M7b/M7c ship the dev
-  commands (`... worker`, `... beat`) and eager-mode tests only.
+- ✅ **DONE in Module 11:** the `docker-compose` `worker` / `beat` services (and
+  `api` + one-shot `migrate`) — behind a `full` profile, one reusable
+  `Dockerfile`. See `MILESTONES.md` "Module 11 — Tech Stack & Infra".
 
 ## Module 3 — Diagnosis Engine — ✅ COMPLETE
 
@@ -386,10 +387,38 @@ Still deferred within Module 10's area:
   `PARTIALLY_RECOVERED_BY_HUMAN` / `WRITTEN_OFF`) — the blueprint names the field
   but not its values (U-11).
 
-## Modules 11–13
+## Module 11 — Tech Stack & Infra — ✅ COMPLETE
 
-- 🔧 Infra beyond `docker-compose` (Temporal cluster or fallback, prod queue,
-  worker/beat services) — Module 11.
+Built in the Module 11 run (`Dockerfile` + `.dockerignore` + rewritten
+`docker-compose.yml` + `.env.example`; `torque.api.health`; `Settings.api_host`/
+`api_port`). Now **DONE**:
+- ✅ The reproducible local/demo runtime — `docker compose --profile full up` →
+  `db + redis + migrate + api + worker + beat` from one reusable image
+  (D-128/129/130); a bare `docker compose up` still starts only `db` + `redis`
+  so the host `uv run python -m torque` loop is untouched.
+- ✅ Config coherence — `.env.example` covers the full `Settings` + `PolicyConfig`
+  surface (test-enforced parity), no committed secrets, fail-closed defaults;
+  `Settings` now owns the API bind address (D-131).
+- ✅ Minimal operability — `GET /health/ready` (Postgres `SELECT 1` + Redis
+  `PING`), `GET /health` unchanged (D-132).
+- ✅ Backend language recorded as **Python** (Part D item 2 / U-05, D-126).
+
+Still deferred / future within Module 11's area:
+- 🔮 **Real Temporal engine / self-hosted cluster** — D-090 stands; Temporal is a
+  future driver-swap behind `execute_due_job` only, never implemented (D-127).
+- 🔮 **Production process manager / autoscaling / multi-host orchestration** —
+  compose is the demo/local runtime; no Kubernetes, no Nomad, no ECS.
+- 🔮 **Secrets management** (Vault / SOPS / cloud KMS) — `.env` + compose
+  `env_file` only.
+- 🔧 **CI/CD pipeline** + container-image registry publishing — no owner yet;
+  out of the Module 11 scope (build/lint/test contracts are covered by the
+  pytest suite).
+- 🔧 **Container smoke test in CI** — the infra tests parse the config contract
+  without Docker; an actual `docker compose --profile full up` smoke test is a
+  manual maintainer step.
+
+## Modules 12–13
+
 - 🔧 Build roadmap calendar dates (Part D item 3) — Module 12.
 - 🔧 Demo script finalization (Part D item 4 — judging rubric) — Module 13.
 

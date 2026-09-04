@@ -4,6 +4,8 @@
 work, no background tasks. Surfaces:
 
 * `GET  /health`                              — liveness for the runner / preview.
+* `GET  /health/ready`                        — readiness: the API can reach
+  PostgreSQL + the Redis broker (Module 11) — see `health.py`.
 * `POST /webhooks/razorpay/{merchant_id}`     — the Razorpay webhook (Legs 1, 3,
   4 + the success signals) — see `webhooks.py`.
 * `POST /internal/checkout-abandoned/{merchant_id}` — the signed synthetic
@@ -25,6 +27,7 @@ from fastapi import FastAPI
 from torque.api.agent_console import router as agent_console_router
 from torque.api.checkout_injection import router as checkout_injection_router
 from torque.api.demo import router as demo_router
+from torque.api.health import router as health_router
 from torque.api.reporting import router as reporting_router
 from torque.api.ui import mount_ui
 from torque.api.ui import router as ui_router
@@ -34,10 +37,7 @@ from torque.api.webhooks import router as webhooks_router
 def create_app() -> FastAPI:
     app = FastAPI(title="Torque", version="0.1.0")
 
-    @app.get("/health")
-    def health() -> dict[str, str]:
-        return {"status": "ok"}
-
+    app.include_router(health_router)
     app.include_router(webhooks_router)
     app.include_router(checkout_injection_router)
     app.include_router(reporting_router)

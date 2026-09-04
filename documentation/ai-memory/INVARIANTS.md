@@ -818,6 +818,94 @@ violation**.
 
 ---
 
+## INV-60 — `torque.ai` is structurally read-only: no case transition, no action execution, no CaseEvent/Action write, ever (AI Phase 0)
+
+- **Domain:** `src/torque/ai/*` (branch `ai-layer`, not yet on `main`).
+- **Invariant:**
+  1. **No mutation-capable import.** `torque.ai.*` never imports
+     `torque.state_machine`, `torque.coordination`, `torque.events`,
+     `torque.agent_console`, `torque.execution`, `torque.ingestion`,
+     `torque.policy`, `torque.diagnosis`, `torque.scoring`,
+     `torque.reconciliation`, `torque.promises`, or `torque.api`.
+  2. **No write-shaped call in source.** No file under `src/torque/ai/`
+     contains `.add(`, `.delete(`, `.commit(`, or a raw SQL mutation
+     keyword (`INSERT INTO`, `UPDATE `, `DELETE FROM`) anywhere in its text.
+  3. **Reads only through `TenantScope`.** Every query in
+     `torque.ai.evidence` goes through `torque.db.scoped.TenantScope` — the
+     same, unmodified tenant-isolation facade every other Torque read path
+     uses (INV-01) — except `CaseEvent` (not `TenantScoped` at the column
+     level), which is filtered by an already-ownership-verified `case_id`,
+     the same posture INV-58 documents for `torque.reporting.metrics`
+     reading this same table.
+  4. **DTOs only, never an ORM row, cross the package boundary.**
+     `torque.ai.evidence.gather_case_evidence` returns
+     `torque.ai.schemas.CaseEvidence` — a frozen, `extra="forbid"` Pydantic
+     object — never a `RevenueLeakCase`/`CaseEvent`/`Action` instance.
+  5. **No PII field is ever read.** `Counterparty.name` / `.phone` /
+     `.email` are never queried by anything under `torque.ai` (the package
+     never queries `Counterparty` at all); `Action.content_sent` is
+     excluded from `torque.ai.schemas.ActionEvidence`.
+- **Enforcement:** `TEST` (`tests/test_ai_boundary.py` — a static `ast`-based
+  import-graph check plus an independent substring write-call sweep, both
+  CI-run on every change to `src/torque/ai/`) + `HELPER`
+  (`torque.db.scoped.TenantScope`, reused unmodified) + `TEST`
+  (`tests/test_ai_evidence.py`'s cross-tenant and PII-exclusion cases).
+  Unlike every other invariant in this document, this one has **no DB-level
+  enforcement** (no CHECK constraint, no trigger) — there is no schema for
+  it to constrain; the entire mechanism is the static test plus the absence
+  of any write capability in the package's code. See D-139 for why a
+  runtime/DB-role mechanism was considered and deferred, not adopted, at
+  this phase.
+- **Tests:** `tests/test_ai_boundary.py`, `tests/test_ai_evidence.py`,
+  `tests/test_ai_config.py`.
+
+---
+
+## INV-61 — AI citation resolution is deterministic, pure, and never silently fabricates a match (AI Phase 2)
+
+- **Domain:** `src/torque/ai/citations.py` + `torque.ai.schemas.{Citation,
+  EvidenceReference}` (branch `ai-layer`, not yet on `main`).
+- **Invariant:**
+  1. **Evidence ids are deterministic.** `EvidenceReference.reference_id`
+     is derived solely from an authoritative Torque primary key or sequence
+     value (`CaseEvent.event_seq_id`, `Action.action_id`,
+     `PromiseToPay.promise_id`, `MerchantCounterparty.id`, or
+     `RevenueLeakCase.case_id` for the snapshot itself) — never from array
+     position, a timestamp, or randomly generated data. Calling
+     `torque.ai.evidence.gather_case_evidence` twice for the same,
+     unchanged case produces byte-identical ids both times.
+  2. **Ids are unique within (in fact, across) an evidence set.** No two
+     `EvidenceItem`s returned for one case ever share a `reference_id` —
+     verified globally unique in practice, since every underlying source id
+     already is.
+  3. **Resolution is exact-match only, and scoped to the evidence set it is
+     given.** `resolve_citation(evidence, evidence_id)` returns an item only
+     when `evidence_id` equals that item's own `reference_id` exactly — no
+     fuzzy matching, no partial matching, no fallback heuristic. It searches
+     only the one `CaseEvidence` object passed to it; an id that is valid
+     for a *different* case's (or a different tenant's) evidence set never
+     resolves, because no other evidence set is ever consulted.
+  4. **Unresolved is `None`, never an exception.** An unknown, fabricated,
+     malformed, or empty `evidence_id` returns `None`. This is deliberate:
+     a future faithfulness-evaluation layer (not built yet) must be able to
+     check many citations from one generated narrative and record each
+     unresolved one as "unsupported claim" data, not as a per-citation
+     `try`/`except`.
+  5. **Resolution performs no I/O and no mutation.** `torque.ai.citations`
+     imports nothing beyond `torque.ai.schemas` — no `sqlalchemy`, no
+     `Session`, no `torque.db`, no `torque.models`. It cannot query the
+     database because it has no code path to reach one.
+- **Enforcement:** `TEST` (`tests/test_ai_citations.py` — id uniqueness,
+  repeated-gathering stability, exact-match resolution, fabricated/
+  malformed/cross-case/cross-tenant non-resolution, all against real,
+  database-backed `CaseEvidence` objects) + `TEST`
+  (`tests/test_ai_boundary.py`'s import-graph check, which also covers
+  `torque.ai.citations` — proving item 5 structurally, not just by
+  inspection).
+- **Tests:** `tests/test_ai_citations.py`, `tests/test_ai_boundary.py`.
+
+---
+
 ## Invariants that are PLANNED (not yet enforced anywhere)
 
 - Pre-debit ≥24h gap actually blocking a retry: **IMPLEMENTED in Module 5**

@@ -307,6 +307,18 @@ note).
   status sync.** No current use case (D-041).
 - **D8. Cross-stratum merge widening** (Module 6 residual, D-102). A
   documented, safe fallback (solo send) already exists at demo scale.
+- **D9. The AI layer, Phase 2 onward** (retrieval, LLM case-narrative
+  generation, citation/faithfulness evaluation, Agent Console AI
+  integration, the shadow ML model, adversarial hardening). **Phase 0
+  (architectural foundation) and Phase 1 (read-only evidence interface) are
+  COMPLETE**, on the `ai-layer` branch, not `main` — see
+  `documentation/ai-memory/AI_BLUEPRINT.md` for the full phase roadmap,
+  decision register, and current implementation status. Do not treat this
+  one line as the deferred-work record for the AI program: `AI_BLUEPRINT.md`
+  §14/§20/§22 is the authoritative, non-duplicated source for what remains
+  unbuilt and why. This entry exists only so a reader of this register's
+  D-track knows the AI program is tracked, without this file re-stating
+  content that already lives, in full, in its own document.
 
 ### Dependency graph (not a priority ranking — an ordering constraint)
 

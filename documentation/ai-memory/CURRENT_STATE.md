@@ -1,10 +1,22 @@
 # CURRENT STATE — read this first
 
-**Last updated:** 2026-09-04, after the **Module 12a — Close the Autonomous
-Loop** run (**uncommitted**, on top of committed Modules 1–12).
+**Last updated:** 2026-09-04 (Module 12a run), amended below (post-Module-12a
+commit + AI Phase 0+1) — see the "Post-Module-12a-commit amendment" note
+right after "Where we are".
 **Reconstructed from:** committed Modules 1–12 (HEAD `fc813ab`) + the
 uncommitted Module 12a changes + `Torque_Blueprint_v7_FullSystem.md`.
 **This file is derived documentation, not authoritative.** The repo and blueprint win.
+
+> **Amendment note (superseding the "uncommitted" framing below):** Module
+> 12a is **now committed** on `main` as `a0fb0f3` "Module 12a: close the
+> autonomous loop" — every "uncommitted" reference in this file's original
+> Module 12a section below is historical (accurate at the time it was
+> written) and describes what that commit *contains*, not its current
+> commit status. `main` was clean at `a0fb0f3` when the `ai-layer` branch
+> was forked from it for **AI Phase 0 + Phase 1 — COMPLETE** (read-only AI
+> evidence foundation; see `documentation/ai-memory/AI_BLUEPRINT.md` and the
+> matching `MILESTONES.md` section). That work lives on `ai-layer`, not
+> `main` — nothing below about `main`'s own state is affected by it.
 
 ---
 
@@ -91,12 +103,21 @@ guardrail block, synchronously, before this run).
 
 ## Next milestone
 
-**Module 13 — Demo Script** — not started. Needs Part D item 4 (a real judging
-rubric, if one exists — U-05) to set the ordering/emphasis; otherwise ready to
-proceed using the five locked differentiators, now with a genuinely autonomous
-live flow to show alongside the Decision-K restraint scenarios and the static
-seed. Category C (production-hardening) and D (future/optional) items from
-Module 12's roadmap remain roadmapped, not scheduled.
+**On `main`: Module 13 — Demo Script** — not started. Needs Part D item 4 (a
+real judging rubric, if one exists — U-05) to set the ordering/emphasis;
+otherwise ready to proceed using the five locked differentiators, now with a
+genuinely autonomous live flow to show alongside the Decision-K restraint
+scenarios and the static seed. Category C (production-hardening) and D
+(future/optional) items from Module 12's roadmap remain roadmapped, not
+scheduled.
+
+**On `ai-layer` (separate from `main`): AI Phase 2 — Retrieval / precedent
+engine** is the next recommended AI-program step, per
+`documentation/ai-memory/AI_BLUEPRINT.md` §14/§15 — Postgres full-text
+search + `(merchant_id, leg_type, root_cause_code)` metadata filtering over
+the evidence Phase 1 already exposes. No vector database, no embedding
+model, no LLM call yet. Do not start it without the maintainer's explicit
+go-ahead, same discipline as every other module.
 
 ## Never-violate rules (short form — full list in CONTINUATION_PROTOCOL.md)
 

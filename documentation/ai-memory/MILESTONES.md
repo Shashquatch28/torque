@@ -1985,6 +1985,203 @@ explicitly-assigned §10.8 human-resolution write path.)*
 
 ---
 
+## AI Phase 0 + Phase 1 — AI Architectural Foundation & Read-Only Evidence Interface — COMPLETE
+
+- **Branch:** `ai-layer` (forked from `main` at `a0fb0f3`, after Module 12a
+  was committed). **Not on `main`** — this milestone does not exist there
+  until an explicit, maintainer-performed merge passes the Integration Gate
+  documented in `AI_BLUEPRINT.md` §18.
+- **Migrations:** **none.** `alembic head` stays `0018_escalation_resolution`.
+- **Objective:** stand up the durable architectural foundation for a future
+  AI layer — a structurally read-only package, a static test enforcing that
+  boundary, and the evidence interface every later AI phase (retrieval, LLM
+  narrative generation, citations, Agent Console integration, shadow ML)
+  will read through. No retrieval, no LLM call, no embeddings, no shadow ML,
+  and no API/UI surface were built — see `AI_BLUEPRINT.md` "Current
+  Implementation Status" for the exact boundary.
+- **Scope delivered:**
+  - **Phase 0 — architectural foundation:** `src/torque/ai/__init__.py`
+    (package boundary statement), `exceptions.py` (`AIError`,
+    `EvidenceNotFoundError`, both subclassing `torque.exceptions.TorqueError`),
+    `config.py` (`AISettings` — `TORQUE_AI_ENABLED`, default `False`, same
+    `BaseSettings`/`SettingsConfigDict`/`lru_cache` pattern as
+    `torque.config.Settings`/`PolicyConfig`). `documentation/ai-memory/
+    AI_BLUEPRINT.md` — the reviewed 23-section AI architecture document,
+    with every entry marked LOCKED / RECOMMENDED / DEFERRED / NEEDS HUMAN
+    DECISION.
+  - **Phase 1 — read-only evidence interface:** `src/torque/ai/schemas.py`
+    (`EvidenceReference` with a stable `reference_id` citation identifier;
+    `TimelineEntry`, `ActionEvidence`, `PromiseEvidence`,
+    `CounterpartyRelationshipEvidence`, `CaseSnapshot`, `CaseEvidence` —
+    frozen, `extra="forbid"` Pydantic DTOs, never an ORM row) and
+    `src/torque/ai/evidence.py` (`gather_case_evidence(session, *,
+    merchant_id, case_id) -> CaseEvidence` — the package's only public
+    capability). Reads exclusively through `torque.db.scoped.TenantScope`;
+    excludes `Counterparty.{name,phone,email}` (never queries `Counterparty`
+    at all) and `Action.content_sent`; represents missing evidence as an
+    explicit `None`/`[]` plus a plain-English `evidence_gaps` entry, never a
+    fabricated placeholder; treats `CaseEvent.reasoning`/`.payload` as inert
+    data (typed `str`/`dict`, never parsed or interpolated).
+  - **The read-only boundary is enforced by a test, not just a docstring:**
+    `tests/test_ai_boundary.py` statically parses every file under
+    `src/torque/ai/` with `ast` and fails the build if it imports
+    `torque.state_machine`, `torque.coordination`, `torque.events`,
+    `torque.agent_console`, `torque.execution`, `torque.ingestion`,
+    `torque.policy`, `torque.diagnosis`, `torque.scoring`,
+    `torque.reconciliation`, `torque.promises`, or `torque.api` — plus an
+    independent substring sweep for any raw write-shaped call (`.add(`,
+    `.delete(`, `.commit(`, raw SQL mutation keywords) anywhere in the
+    package.
+  - **Tests (NEW, 23):** `tests/test_ai_boundary.py` (4 — import-boundary
+    enforcement, detector self-test, write-call sweep), `tests/
+    test_ai_config.py` (3 — flag defaults/override/caching), `tests/
+    test_ai_evidence.py` (16 — tenant isolation incl. cross-tenant
+    invisibility, evidence-shape/ordering/citation-reference correctness,
+    missing-evidence gap reporting, PII exclusion incl. content-substring
+    sweeps for `Action.content_sent` and `Counterparty` PII, and an
+    injected-instruction-text resilience test proving arbitrary
+    `CaseEvent.reasoning` content cannot alter the evidence structure).
+- **Decisions:** none required a new `DECISIONS.md` entry beyond
+  documenting the read-only-enforcement mechanism itself — see D-139.
+  `AI_BLUEPRINT.md` §20's Decision Register carries the fuller set (most
+  RECOMMENDED or NEEDS HUMAN DECISION, none yet exercised beyond Phase 0+1's
+  own choices).
+- **Deviations from the (conversation-produced) AI blueprint:** none in
+  substance. One scope reduction, explicitly recorded rather than silent:
+  `pyproject.toml` was **not** touched — the blueprint's Phase 0 named an
+  `ai` optional-dependency extras group, but Phase 0+1 needed zero new
+  dependencies (only `pydantic`, already present, was used), so the empty
+  group was not added; it will be introduced by whichever future phase
+  first needs a real dependency (see `AI_BLUEPRINT.md` D-AI-18).
+- **Deferred work:** everything from Phase 2 onward (retrieval, LLM
+  narrative generation, citation-bearing prose, faithfulness evaluation,
+  Agent Console integration, shadow ML, adversarial hardening, demo polish)
+  — none implemented, none started. See `AI_BLUEPRINT.md` §14.
+- **Unresolved:** none resolved and none newly introduced by this work.
+- **`state_machine.py` / `guards.py`:** **both byte-unchanged vs HEAD**
+  (`git diff HEAD --` empty for each) — this milestone added a purely new,
+  additive package and touched no existing tracked file.
+- **Tests at completion:** **1253** passed (was 1230 at `a0fb0f3`; **+23**),
+  0 failed, 0 skipped, the same 1 pre-existing cosmetic
+  `StarletteDeprecationWarning`. `ruff check .` clean. `alembic upgrade
+  head` → `0018` (no-op — no migration).
+- **Verification status:** complete + verified — `uv run pytest -q` (full
+  suite, 1253 passed), `uv run ruff check .` (clean, repository-wide),
+  `uv run alembic upgrade head` (succeeds, no new migration), `git diff
+  HEAD -- src/torque/state_machine.py src/torque/models/guards.py` (both
+  empty), `git status` (purely new untracked files: `src/torque/ai/`,
+  `tests/test_ai_boundary.py`, `tests/test_ai_config.py`, `tests/
+  test_ai_evidence.py`, `documentation/ai-memory/AI_BLUEPRINT.md`, plus the
+  additive `DECISIONS.md`/`INVARIANTS.md`/`CURRENT_STATE.md`/`DEFERRED.md`
+  entries recorded alongside this section — no existing tracked source file
+  modified).
+- **Recommended commit message:**
+  `AI Phase 0+1: read-only AI evidence foundation — torque.ai package, gather_case_evidence(), AI_BLUEPRINT.md; structurally enforced (tests/test_ai_boundary.py), zero deterministic-core changes, no migration`
+
+---
+
+## AI Phase 2 — Evidence Normalization + Citation Model — COMPLETE
+
+- **Branch:** `ai-layer`. **Not on `main`.**
+- **Sequencing correction:** an earlier Phase 0+1 completion report
+  incorrectly named "Phase 2 — Retrieval / precedent engine" as the next
+  step. The authoritative sequence (per the corrected instruction this
+  milestone was built against, now reflected in `AI_BLUEPRINT.md`) inserts
+  **Evidence Normalization + Citation Model** as Phase 2, pushing retrieval
+  to Phase 3 and every phase after it down by one. This milestone is that
+  corrected Phase 2 — not retrieval, which remains entirely unbuilt.
+- **Migrations:** **none.** `alembic head` stays `0018_escalation_resolution`.
+- **Objective:** turn the Phase 1 evidence representation into a stable,
+  resolvable citation system — `EvidenceSet -> evidence_id -> Citation ->
+  resolve_citation() -> exact EvidenceItem -> authoritative Torque record` —
+  with no retrieval, no LLM call, and no generated-narrative contract.
+- **Discrepancy found during verification (§2 of the task) and how it was
+  resolved:** `CaseSnapshot` (Phase 1) had no `reference: EvidenceReference`
+  field, even though `SourceType` already reserved a `"case"` literal for
+  it — the case's own current-state facts (status, root cause, recovery
+  score, ...) were the one evidence type with no citation target. This is
+  not a defect in anything Phase 1 already cited (every `CaseEvent`/
+  `Action`/`PromiseToPay`/`MerchantCounterparty` reference was already
+  correct), so it did not meet the task's STOP threshold ("a correctness
+  problem that materially affects citation integrity") — it was an
+  omission, not a bug. Closed as part of Phase 2's own mandate (see
+  `DECISIONS.md` D-140 sub-decision 2) rather than deferred, since making
+  evidence referenceable is exactly what this milestone is for.
+- **Scope delivered:**
+  - `src/torque/ai/schemas.py` — new `Citation` DTO (`evidence_id: str`
+    only, frozen, `extra="forbid"`); new `EvidenceItem` type alias (`
+    CaseSnapshot | TimelineEntry | ActionEvidence | PromiseEvidence |
+    CounterpartyRelationshipEvidence` — no new evidence type invented,
+    purely a union of what Phase 1 already produces); `CaseSnapshot` gains
+    `reference: EvidenceReference` (`source_type="case"`).
+  - `src/torque/ai/evidence.py` — `_snapshot()` now populates the new
+    `reference` field (`source_id=case_id`, `timestamp=case.opened_at`); no
+    other change.
+  - `src/torque/ai/citations.py` (**new module**) — `all_evidence_items
+    (evidence) -> list[EvidenceItem]` (flattens snapshot + timeline +
+    actions + promises + counterparty relationship, deterministic order,
+    lookup never by position); `resolve_citation(evidence, evidence_id) ->
+    EvidenceItem | None` (pure, exact-match only, scoped to the one
+    `CaseEvidence` given, never raises); `citation_for(item) -> Citation`
+    (the inverse convenience). Imports nothing beyond `torque.ai.schemas` —
+    no database access is even reachable from this module, let alone used.
+  - **Preserved unchanged:** `EvidenceReference.reference_id`'s scheme
+    (`f"{source_type}:{source_id}"`) — evaluated against the task's four
+    required properties and found to already satisfy all of them; not
+    replaced with the task's illustrative alternative form (see D-140
+    sub-decision 1 for the full reasoning).
+  - **Tests (NEW, 15):** `tests/test_ai_citations.py` — citation-schema
+    validation (minimal/frozen/`extra="forbid"`), id uniqueness within a
+    set, id stability across repeated `gather_case_evidence` calls, exact
+    resolution for every evidence type Phase 1 produces, a `citation_for`/
+    `resolve_citation` round trip, fabricated-id → `None`, wrong-case-id →
+    `None`, malformed/empty-id → `None`, cross-tenant-id → `None`, an
+    empty-evidence-set case (only the snapshot is citable, and it still
+    resolves), and a multi-evidence-type case (event + action +
+    counterparty relationship all resolve independently, no cross-matching).
+- **Decisions:** D-140 (the four bundled citation-contract sub-decisions
+  above).
+- **Invariants:** INV-61 (citation resolution determinism / purity /
+  never-silently-resolves).
+- **Deviations from `AI_BLUEPRINT.md`:** the phase-numbering correction
+  itself (this milestone *is* the correction — `AI_BLUEPRINT.md` is updated
+  alongside this entry to renumber Phase 2 onward accordingly). No other
+  deviation; `CaseSnapshot`'s new field is documented above as an omission
+  closed, not a contract redesign (nothing existing was renamed, removed, or
+  retyped).
+- **Deferred work:** everything from Phase 3 onward (retrieval, LLM case
+  explanation, faithfulness evaluation, Agent Console integration, shadow
+  ML, hardening, demo polish) — none implemented, none started. Explicitly
+  **not** implemented in this milestone: `retrieval.py`, any full-text/
+  vector search, any LLM provider/prompt/call, `CaseNarrative` or any
+  citation-bearing generated prose, any API endpoint, any UI change.
+- **Unresolved:** none resolved and none newly introduced by this work.
+- **`state_machine.py` / `guards.py`:** **both byte-unchanged vs HEAD**
+  (`git diff` empty for each).
+- **Tests at completion:** **1268** passed (was 1253 after Phase 0+1;
+  **+15**), 0 failed, 0 skipped, the same 1 pre-existing cosmetic
+  `StarletteDeprecationWarning`. `ruff check .` clean. `alembic upgrade
+  head` → `0018` (no-op — no migration); roundtrip green
+  (`tests/test_zz_migrations_roundtrip.py`, 1 passed).
+- **Verification status:** complete + verified — `uv run pytest
+  tests/test_ai_citations.py tests/test_ai_evidence.py
+  tests/test_ai_boundary.py tests/test_ai_config.py -v` (38 passed), `uv run
+  pytest -q` (full suite, 1268 passed), `uv run ruff check .` (clean,
+  repository-wide), `uv run alembic upgrade head` (succeeds, no new
+  migration), `uv run pytest tests/test_zz_migrations_roundtrip.py -q` (1
+  passed), `git diff --check` (clean — only pre-existing CRLF/LF
+  line-ending advisories, no actual conflict/whitespace error, exit 0),
+  `git diff -- src/torque/state_machine.py src/torque/models/guards.py`
+  (both empty), `git status` (the 5 docs already modified by Phase 0+1 plus
+  their Phase 2 additions, and exactly 2 new source files —
+  `src/torque/ai/citations.py`, `tests/test_ai_citations.py` — no existing
+  tracked source file modified beyond `schemas.py`/`evidence.py`, both
+  already part of the AI package).
+- **Recommended commit message:**
+  `AI Phase 2: evidence normalization + citation model — Citation DTO, resolve_citation(), CaseSnapshot becomes citable (D-140); pure/no-DB, structurally enforced, zero deterministic-core changes, no migration`
+
+---
+
 ## (historical) What came next after Module 10
 
 **Module 10 — UI/UX — COMPLETE.** Torque is now a runnable, demo-able product:

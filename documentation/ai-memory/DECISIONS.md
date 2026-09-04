@@ -2765,6 +2765,126 @@ BY D-0NN`.
 
 ---
 
+## D-139 — The AI subsystem's read-only boundary is enforced by a static import test, not a runtime guard or a Postgres role
+
+- **Milestone:** AI Phase 0 + Phase 1 — AI Architectural Foundation &
+  Read-Only Evidence Interface (`ai-layer` branch, not `main`).
+- **Decision:** the new `src/torque/ai/` package must never be able to
+  transition a case, execute an action, write a `CaseEvent`/`Action`, or
+  otherwise mutate Torque business state — a non-negotiable requirement for
+  the whole AI program, not something scoped per-phase. What is the
+  *strongest practical* enforcement mechanism available now, without adding
+  infrastructure Phase 0+1 doesn't otherwise need?
+- **Chosen:** a static test, `tests/test_ai_boundary.py`, that parses every
+  `.py` file under `src/torque/ai/` with Python's own `ast` module (no
+  execution) and fails if any of them import `torque.state_machine`,
+  `torque.coordination`, `torque.events`, `torque.agent_console`,
+  `torque.execution`, `torque.ingestion`, `torque.policy`,
+  `torque.diagnosis`, `torque.scoring`, `torque.reconciliation`,
+  `torque.promises`, or `torque.api` — every one of which either mutates
+  business state directly or wires up something that does. A second,
+  independent, deliberately crude substring sweep in the same test file
+  additionally rejects any raw `.add(` / `.delete(` / `.commit(` / SQL
+  mutation keyword appearing anywhere in the package's source, as a
+  belt-and-braces signal against a hypothetical future contributor who
+  hand-rolls SQL to route around the import check. This is a CI-enforced
+  repository fact from Phase 0 onward, not a code-review courtesy: a
+  forbidden import breaks the build before merge, on every future PR to this
+  package, for the life of the project.
+- **Alternatives:** (1) a dedicated read-only Postgres role (`SELECT`-only
+  grants) for the AI subsystem's future DB session — genuinely stronger
+  defense-in-depth, but a one-time DB-admin action outside Alembic's normal
+  migration flow, and there is no DB session to protect yet (Phase 0+1's
+  `gather_case_evidence` takes a caller-supplied `Session`; no AI-specific
+  session/connection exists until a future API layer is built). Deferred,
+  **NEEDS HUMAN DECISION**, to whichever phase first stands up that session
+  — recorded in `AI_BLUEPRINT.md` §11 / §20 (D-AI-17) so it is not
+  forgotten, not silently dropped. (2) A runtime capability/permission
+  object threaded through every AI function call — rejected as unnecessary
+  complexity: there is currently exactly one AI entry point
+  (`gather_case_evidence`), and it performs no write of any kind, so there
+  is no runtime decision left for a capability object to gate. (3) Trusting
+  code review alone — rejected outright per this program's own explicit
+  requirement that the boundary be "structurally difficult," not merely
+  documented.
+- **Consequence:** the deterministic core is provably unreachable for
+  mutation from `torque.ai` today, and any future phase that tries to add
+  such a path will fail its own test suite immediately, in the same PR,
+  before a maintainer even has to notice it in review. The read-only DB role
+  (alternative 1) remains an open, tracked, NOT-YET-DECIDED strengthening —
+  this decision does not close that question, it only defers it honestly.
+- **Status:** IN FORCE (Phase 0+1); read-only DB role remains open.
+
+---
+
+## D-140 — The citation contract: preserve Phase 1's `reference_id` scheme unchanged; make `CaseSnapshot` citable; keep `Citation` to one field; keep `resolve_citation` pure
+
+- **Milestone:** AI Phase 2 — Evidence Normalization + Citation Model
+  (`ai-layer` branch, not `main`).
+- **Decision (four bundled sub-decisions, one milestone):**
+  1. **Preserve the existing `EvidenceReference.reference_id` scheme
+     (`f"{source_type}:{source_id}"`) rather than adopting the illustrative
+     `f"{source_type}:{case_id}:{event_seq_id or action_id}"` form.** Both
+     were evaluated against the four required properties (uniqueness within
+     an evidence set, stability across repeated gathering, deterministic
+     derivation from an authoritative identifier, traceability back to the
+     source record). The Phase 1 scheme already satisfies all four: every
+     `source_id` is drawn from a genuine, already-unique authoritative
+     primary key or sequence value (`CaseEvent.event_seq_id` — a single
+     globally-ordered `BigInteger` sequence across every case, INV-20;
+     `Action.action_id` / `PromiseToPay.promise_id` /
+     `MerchantCounterparty.id` — UUID primary keys), so it is unique
+     *globally*, not merely within one case's set, which is strictly
+     stronger than the requirement. Embedding `case_id` again inside the id
+     string would be redundant (it is already a separate field on
+     `EvidenceReference`) and would only complicate parsing for zero
+     uniqueness benefit. Not replaced.
+  2. **`CaseSnapshot` gains a `reference: EvidenceReference` field
+     (`source_type="case"`), closing a Phase 1 gap.** `SourceType` already
+     reserved the `"case"` literal in Phase 1, but nothing ever constructed
+     one — the case's own current-state fields (status, root cause,
+     recovery score, ...) had no citation target. This is additive only (a
+     new required field on a DTO nothing outside `torque.ai` constructs yet;
+     no Phase-1 test broke), not a redesign of any existing field, and is
+     squarely inside Phase 2's mandate to make evidence referenceable.
+  3. **`Citation` carries exactly one field, `evidence_id: str`.** No
+     excerpt, no confidence, no claim text — a citation names *which*
+     evidence, nothing about *what claim* it supports. That belongs to
+     whatever future object actually carries generated prose (Phase 4+, not
+     built).
+  4. **`resolve_citation(evidence: CaseEvidence, evidence_id: str) ->
+     EvidenceItem | None` is pure — no `Session`, no database, no I/O.** It
+     is implemented in a new, separate module, `torque.ai.citations`, that
+     imports nothing beyond `torque.ai.schemas` (verified: the module has no
+     `sqlalchemy`/`torque.db`/`torque.models` import at all, so it is
+     *structurally* incapable of querying anything, not merely instructed
+     not to). It searches only the one `CaseEvidence` object it is handed
+     and returns `None` — never raises — for an unknown, fabricated,
+     malformed/empty, or cross-case/cross-tenant id.
+- **Alternatives considered:** a generic `EvidenceSet`/`EvidenceItem` class
+  hierarchy replacing `CaseEvidence`'s named fields — rejected per the
+  Phase 2 task's own instruction not to invent new evidence types or
+  casually redesign the Phase 1 contract; `CaseEvidence` already *is* the
+  evidence set, just not named that in code. A database-backed citation
+  table or cache — rejected outright (Phase 2 explicitly forbids new
+  persistence; citation identity is derived from already-authoritative
+  records, never stored a second time). Raising `EvidenceNotFoundError` (or
+  similar) from `resolve_citation` for a bad id, mirroring
+  `gather_case_evidence`'s own not-found handling — rejected: a future
+  faithfulness-evaluation layer needs to check *many* citations from one
+  generated narrative and treat an unresolvable one as a data point ("this
+  claim is unsupported"), not as a control-flow exception to catch per
+  claim.
+- **Consequence:** citation resolution is deterministic, cheap (an
+  in-memory linear scan over at most a few dozen items), independently
+  testable with zero database fixture cost beyond what Phase 1's
+  `gather_case_evidence` already needs, and structurally cannot become a
+  tenant-isolation bypass — it has no way to reach any case's evidence
+  other than the one object it was given. See INV-61.
+- **Status:** IN FORCE.
+
+---
+
 ## Notes not recorded as decisions
 
 - The **Git-history incident of 2026-09-02** (a bad commit briefly on `main`,

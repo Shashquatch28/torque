@@ -1687,6 +1687,112 @@ explicitly-assigned §10.8 human-resolution write path.)*
 
 ---
 
+## Module 9b — Incrementality / Causal Measurement — COMPLETE
+
+- **Commit:** *(uncommitted — maintainer commits)*. HEAD at implementation time:
+  `6c6392c` (Module 11). Recommended message below.
+- **Migrations:** **none.** The cohort inputs
+  (`Merchant_Counterparty.in_control_cohort` → the denormalised
+  `RevenueLeakCase.control_group`, kept in step by
+  `state_machine.sync_control_group`) have existed since M1; Module 9b only
+  reads them. `alembic head` stays `0018_escalation_resolution`.
+- **Objective:** the causal layer deferred by D-121 / U-10 — treatment-vs-control
+  **incremental lift**, a small-sample-honest **Wilson / Newcombe confidence
+  interval**, and the Blueprint §6 cross-merchant **SUTVA-adjusted lift** shown
+  **alongside** the headline. Additive to Module 9: descriptive metrics and
+  Module 7 attribution are byte-unchanged.
+- **Scope delivered:**
+  - **`src/torque/reporting/incrementality.py`** (NEW) — `incrementality_report(
+    session, merchant_id, *, window=None, leg=None)` and the pure helpers
+    `wilson_interval` / `newcombe_difference`. Cohort from
+    `RevenueLeakCase.control_group` (`True` control / `False` treatment / `None`
+    excluded), recovery = intent-to-treat `status ∈ {RECOVERED, CANCELLED}`
+    (D-133), window = the Module 9 `opened_at` `ReportWindow`. Tenant-scoped
+    (`TenantScope`); the one deliberately cross-merchant read
+    (`_contaminated_control_counterparties`) is bounded by
+    `counterparty_id IN (:merchant's own control counterparties)` and selects
+    only `counterparty_id`, reduced to a `set` before it leaves the function —
+    no other merchant's id / amounts / outcomes / counts reach any field.
+  - **`src/torque/reporting/schemas.py`** — 4 additive frozen models:
+    `ProportionCI` (successes / total / rate / Wilson `ci_low`/`ci_high`, all
+    `None` at `total == 0`), `LiftEstimate` (`point` / Newcombe `ci_low`/`ci_high`
+    / `method`), `SutvaAdjustment` (`contaminated_control_counterparties`,
+    `excluded_control_cases`, adjusted `control`, adjusted `lift`, `note`),
+    `IncrementalityReport` (window echo + `window_basis="opened_at"` +
+    `confidence_level` `0.95` + `z_value` + `recovery_definition` + `treatment`
+    + `control` + `lift` + `sutva`). **No existing field renamed or removed.**
+  - **`src/torque/reporting/__init__.py`** — re-exports `incrementality_report`.
+  - **`src/torque/api/reporting.py`** — one new read-only endpoint
+    `GET /reports/{merchant_id}/incrementality` (`opened_from` / `opened_to` /
+    `leg`, same conventions as `/summary`; unknown merchant → 404, bad `leg` →
+    422). The router stays GET-only.
+  - **`src/torque/ui/static/{torque.js,torque.css}`** — a compact
+    "Incrementality — estimated causal effect" card on the dashboard (fetched
+    from `/incrementality`, rendered by `incrementalityCard(inc)`): treatment
+    rate, control rate, incremental lift + 95% CI, SUTVA-adjusted lift + CI +
+    contaminated count, the honest SUTVA note and recovery definition, and an
+    explicit "descriptive = what happened / causal = estimated incremental
+    effect … not proof of causation" line. **Renderer only** — no rate, lift,
+    or interval is computed in JS (`test_module9b_ui.py` asserts it).
+  - **`src/torque/demo/seed.py`** — the deterministic seed now assigns every
+    demo counterparty a cohort via the existing `assign_cohort` (3/16 control),
+    and adds a companion merchant `acc_demo_up` treating 2 of those control
+    counterparties in-window so the demo SUTVA lift is live and non-zero
+    (D-135). `DEMO_MERCHANT_IDS`; `_wipe` loops both ids. `acc_demo`'s
+    descriptive numbers and 16-case count are byte-identical to before.
+  - **Tests (NEW, 65):** `test_module9b_wilson.py` (27 — CI math, all edges,
+    textbook value, ± lift, clamping, no NaN/inf), `test_module9b_incrementality.py`
+    (17 — lift direction, zero/all/one/tiny cohorts, unassigned excluded,
+    CANCELLED counts / PARTIALLY_RECOVERED & WRITTEN_OFF don't, window &
+    leg filters, superseded excluded, determinism),
+    `test_module9b_sutva.py` (8 — no-overlap ⇒ adjusted == headline, overlap
+    excludes the contaminated counterparty, control-elsewhere is not
+    contamination, out-of-window is not, multi-merchant, headline always
+    preserved), `test_module9b_api.py` (10 — exact response schema, empty
+    dataset, 404 / 422, window echo, tenant isolation, read-only row-count +
+    `control_group` snapshot, repeated-call identity, bounds in range),
+    `test_module9b_ui.py` (4). Plus `tests/module9b_helpers.py` (not collected).
+- **Decisions:** D-133 (ITT recovery for the causal layer; descriptive rate
+  unchanged), D-134 (Wilson per cohort + Newcombe 1998 for the difference; 95%
+  two-sided, `z = Φ⁻¹(0.975)`; `Decimal` `.sqrt()`; `null` not `NaN`), D-135
+  (demo seed cohorts + `acc_demo_up` SUTVA fixture). D-121 preserved as
+  historical.
+- **Deviations from blueprint:** none. Blueprint §6 / §9.1 specify the metric,
+  the Wilson requirement, and the SUTVA rule; D-134 fills the two gaps the
+  Blueprint leaves (confidence level, difference method) with the standard
+  choices and records them.
+- **Deferred work removed from `DEFERRED.md`:** "Module 9b — Incrementality /
+  causal measurement" (Module 9 list) and "the UI does not surface
+  incrementality" (Module 10 list).
+- **Deferred work introduced / still open:** the 🔮 learned recovery model
+  (XGBoost / SHAP / T/X-learner uplift for *individual* treatment effects —
+  Decision F / §8.4) is unchanged and explicitly out of Module 9b; per-leg
+  incrementality is available via `?leg=` but not surfaced on the dashboard
+  (merchant-wide only, per §9.1).
+- **Unresolved:** **U-10 RESOLVED** (2026-09-04) — the descriptive/causal split
+  is now built: descriptive stays Module 9, causal is `torque.reporting.
+  incrementality` + `GET /incrementality`, both read-only and tenant-scoped.
+  D-090 not touched. No new unresolved question.
+- **`state_machine.py` / `guards.py`:** **both byte-unchanged vs HEAD**
+  (`git diff HEAD --` empty for each). Module 9b adds no transition, no guard,
+  no guarded field, no write path.
+- **Tests at completion:** **1209** passed (was 1144 at `6c6392c`), 0 failed,
+  0 skipped, 1 pre-existing cosmetic `StarletteDeprecationWarning`. `+65`.
+  `ruff check .` clean. `alembic upgrade head` → `0018` (no-op); roundtrip green.
+- **Verification status:** complete + verified against a live Postgres
+  (docker-compose `db`, host 5442) and an end-to-end smoke against the Module 11
+  `docker compose --profile full` stack: seed → dashboard shell + JS card served
+  → descriptive summary unchanged (16 cases, ₹65,200, rate 0.3472) →
+  `/incrementality` returns treatment 5/13, control 1/3, lift +0.0513
+  [-0.4525, +0.4276], SUTVA 2 contaminated → adjusted lift +0.3846 → 3× repeated
+  GET mutates nothing (case/event/action/`merchant_counterparty` counts and
+  every `control_group` value identical) → `acc_demo_up`'s own report shows only
+  its 2 cases, unknown merchant → 404.
+- **Recommended commit message:**
+  `Module 9b: incrementality / causal measurement — treatment-vs-control lift, Wilson + Newcombe CI, SUTVA cross-merchant adjustment; read-only /reports/{m}/incrementality + dashboard card; no schema change`
+
+---
+
 ## (historical) What came next after Module 10
 
 **Module 10 — UI/UX — COMPLETE.** Torque is now a runnable, demo-able product:

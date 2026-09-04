@@ -47,6 +47,12 @@ from torque.scoring.score import score_case
 from torque.state_machine import sync_control_group, transition_case
 
 DEMO_MERCHANT_ID = "acc_demo"
+#: A second merchant that is actively treating two of `acc_demo`'s held-out
+#: control counterparties in the same window — so the dashboard's SUTVA-adjusted
+#: lift (Module 9b / Blueprint §6) is a live, non-zero number rather than always
+#: equal to the headline. Built and wiped alongside `acc_demo`.
+DEMO_UPSTREAM_MERCHANT_ID = "acc_demo_up"
+DEMO_MERCHANT_IDS = (DEMO_MERCHANT_ID, DEMO_UPSTREAM_MERCHANT_ID)
 #: Fixed clock so `days_since_failure` buckets — and therefore every recovery
 #: score — are identical on every seed.
 DEMO_NOW = datetime(2026, 9, 15, 12, 0, tzinfo=UTC)
@@ -79,17 +85,25 @@ class _Ctx:
 
 
 def _counterparty(ctx: _Ctx, name: str, phone: str, *, opt_in: bool = True,
-                  promise_rate: float | None = None) -> Counterparty:
+                  promise_rate: float | None = None,
+                  in_control: bool = False) -> Counterparty:
     cp = Counterparty(
         name=name, phone=phone, email=f"{phone.strip('+')}@demo.test",
         payment_failure_nudge_consent=True, whatsapp_opt_in=opt_in,
     )
     ctx.session.add(cp)
     ctx.session.flush()
-    ctx.session.add(MerchantCounterparty(
+    mc = MerchantCounterparty(
         merchant_id=DEMO_MERCHANT_ID, counterparty_id=cp.counterparty_id,
         promise_keeping_rate=promise_rate,
-    ))
+    )
+    ctx.session.add(mc)
+    ctx.session.flush()
+    # Incrementality cohort (Blueprint §6) — assigned once, via the sanctioned
+    # `assign_cohort`; `cohort_assigned_at` pinned to the fixed demo clock so the
+    # rebuild is byte-identical. `control` = held out (no outreach).
+    mc.assign_cohort(in_control)
+    mc.cohort_assigned_at = ctx.now
     ctx.session.flush()
     return cp
 
@@ -314,17 +328,19 @@ _WIPE_STMTS = (
 
 
 def _wipe(session: Session) -> None:
-    """Delete the demo merchant's data. `case_event` is protected by a Postgres
+    """Delete the demo merchants' data (`acc_demo` + the `acc_demo_up`
+    contamination fixture). `case_event` is protected by a Postgres
     `BEFORE DELETE` trigger (append-only, §2.3) — a demo *reset* explicitly
     disables it for the wipe and re-enables it in the same transaction (needs
-    table ownership; a rollback reverts both)."""
-    m = DEMO_MERCHANT_ID
+    table ownership; a rollback reverts both). Strictly scoped to the demo
+    merchant ids."""
     session.execute(
         text("ALTER TABLE case_event DISABLE TRIGGER case_event_no_mutate")
     )
     try:
-        for stmt in _WIPE_STMTS:
-            session.execute(text(stmt), {"m": m})
+        for m in DEMO_MERCHANT_IDS:
+            for stmt in _WIPE_STMTS:
+                session.execute(text(stmt), {"m": m})
     finally:
         session.execute(
             text("ALTER TABLE case_event ENABLE TRIGGER case_event_no_mutate")
@@ -416,10 +432,9 @@ def seed_demo(
              reasoning="Invoice settled", actor=Actor.SYSTEM)
     _recover(ctx, b2b_rec, "18000.00", RecoveryType.AGENT_ASSISTED)
 
-    # --- self-recovered ---
-    _self_paid_case(
-        ctx, cp=_counterparty(ctx, "Vikram Singh", "+919810010005"), amount="4500.00"
-    )
+    # --- self-recovered --- (held-out CONTROL; also treated upstream → contaminated)
+    cp_vikram = _counterparty(ctx, "Vikram Singh", "+919810010005", in_control=True)
+    _self_paid_case(ctx, cp=cp_vikram, amount="4500.00")
 
     # --- B2B partially recovered (still open) ---
     b2b_partial = _new_case(
@@ -489,10 +504,10 @@ def seed_demo(
         queue_reason="ESCALATION_CEILING", opened_ago=16.0,
     )
 
-    # --- exhausted ---
+    # --- exhausted --- (held-out CONTROL; also treated upstream → contaminated)
+    cp_nikhil = _counterparty(ctx, "Nikhil Joshi", "+919810010010", in_control=True)
     exhausted = _new_case(
-        ctx, leg=LegType.CHECKOUT_ABANDONMENT,
-        cp=_counterparty(ctx, "Nikhil Joshi", "+919810010010"),
+        ctx, leg=LegType.CHECKOUT_ABANDONMENT, cp=cp_nikhil,
         amount="1500.00", context=_co_ctx("cart_demo_03", "1500.00"),
         opened_ago_hours=120.0,
     )
@@ -521,9 +536,11 @@ def seed_demo(
         amount="15600.00", context=_pd_ctx("SOFT_DECLINE"),
         root_cause="ISSUER_SOFT_DECLINE_NSF", confidence=0.83, opened_ago=3.0,
     )
+    # held-out CONTROL, clean (no upstream treatment) → retained by SUTVA
+    cp_sara = _counterparty(ctx, "Sara Khan", "+919810010013", promise_rate=0.4,
+                            in_control=True)
     _open_case(
-        ctx, leg=LegType.SUBSCRIPTION_FAILURE,
-        cp=_counterparty(ctx, "Sara Khan", "+919810010013", promise_rate=0.4),
+        ctx, leg=LegType.SUBSCRIPTION_FAILURE, cp=cp_sara,
         amount="8200.00", context=_sub_ctx("NACH", "sub_demo_13"),
         root_cause="NSF_SOFT_DECLINE", confidence=0.8, opened_ago=90.0,
     )
@@ -535,7 +552,54 @@ def seed_demo(
         score_case(session, case, now=now)
     session.flush()
 
+    # --- Module 9b: cross-merchant SUTVA contamination fixture ---
+    _seed_upstream_contamination(session, contaminated=(cp_vikram, cp_nikhil), now=now)
+
     return _summary(session, seeded=True)
+
+
+def _seed_upstream_contamination(
+    session: Session, *, contaminated: tuple[Counterparty, ...], now: datetime
+) -> None:
+    """A second merchant (`acc_demo_up`) actively treating each counterparty in
+    `contaminated` — cohort `treatment`, a case opened in the same window. That
+    makes them Blueprint §6 contaminated control units for `acc_demo`, so the
+    dashboard's SUTVA-adjusted lift differs from the headline. Only the
+    counterparty overlap matters; these rows are otherwise minimal."""
+    up = session.get(Merchant, DEMO_UPSTREAM_MERCHANT_ID)
+    if up is None:
+        up = Merchant(
+            merchant_id=DEMO_UPSTREAM_MERCHANT_ID, business_type="B2B Marketplace",
+            tier="Metro", channels_enabled=["email"], risk_appetite_config={},
+        )
+        session.add(up)
+        session.flush()
+    scope = TenantScope(session, DEMO_UPSTREAM_MERCHANT_ID)
+    for cp in contaminated:
+        mc = MerchantCounterparty(
+            merchant_id=DEMO_UPSTREAM_MERCHANT_ID, counterparty_id=cp.counterparty_id,
+        )
+        session.add(mc)
+        session.flush()
+        mc.assign_cohort(False)  # treatment at the other merchant
+        mc.cohort_assigned_at = now
+        ev = Event(
+            merchant_id=DEMO_UPSTREAM_MERCHANT_ID, type="demo.seed",
+            idempotency_key=f"demo_up_{cp.counterparty_id.hex[:16]}",
+            raw_payload={"demo": True},
+        )
+        session.add(ev)
+        session.flush()
+        case = RevenueLeakCase(
+            leg_type=LegType.B2B_RECEIVABLE, source_event_id=ev.event_id,
+            counterparty_id=cp.counterparty_id, amount_at_risk=Decimal("5000.00"),
+            status=CaseStatus.PLAYBOOK_ACTIVE, context={},
+            opened_at=now - timedelta(hours=18),
+        )
+        scope.add(case)
+        session.flush()
+        sync_control_group(session, case)
+    session.flush()
 
 
 def _summary(session: Session, *, seeded: bool) -> dict:

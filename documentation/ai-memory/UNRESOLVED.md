@@ -276,6 +276,20 @@ if it produced a design decision, a `DECISIONS.md` entry. Do not delete it.
 
 ## U-10 — Incrementality / causal measurement scope and ownership
 
+- **RESOLVED (2026-09-04, Module 9b; D-133 / D-134 / D-135).** The causal layer
+  is built as an **additive** extension: `torque.reporting.incrementality`
+  (`incrementality_report`, `wilson_interval`, `newcombe_difference`) +
+  `GET /reports/{merchant_id}/incrementality` + a dashboard card, all read-only
+  and tenant-scoped. Cohort = `RevenueLeakCase.control_group` (unchanged, no new
+  mechanism); recovery for the causal comparison is intent-to-treat
+  (`status ∈ {RECOVERED, CANCELLED}`, D-133 — the descriptive `recovery_rate`
+  is untouched); each cohort proportion gets a **Wilson score interval** and the
+  lift a **Newcombe (1998) hybrid** interval at **95%** (D-134); the Blueprint
+  §6 **SUTVA-adjusted lift** (drop control counterparties also in treatment at
+  another merchant in the same `opened_at` window) is shown **alongside**, never
+  replacing, the headline (D-135 also adds a demo `acc_demo_up` fixture so the
+  number is live). No migration. *(Original context kept below.)*
+
 - **Question:** Blueprint §9.1 lists **incrementality lift** (treatment recovery
   rate − control recovery rate) with a **Wilson score confidence interval**, and
   a **SUTVA-adjusted lift** (excluding any control-cohort counterparty that also
@@ -373,3 +387,14 @@ same high-throughput stateless inbound role; this is a scope/implementation
 choice, not a reversal of the Temporal preference for `PlaybookRun`. See
 `DECISIONS.md` D-057. The `PlaybookRun`-execution half of the original question
 stays open above.
+
+### U-10 (incrementality scope/ownership) — RESOLVED 2026-09-04 (Module 9b)
+
+Built as an additive causal layer — `torque.reporting.incrementality` +
+`GET /reports/{merchant_id}/incrementality` + a dashboard card. Treatment-vs-
+control lift (intent-to-treat recovery, D-133), Wilson per cohort + Newcombe
+1998 for the difference at 95% (D-134), and the Blueprint §6 cross-merchant
+SUTVA-adjusted lift alongside the headline (D-135). Read-only, tenant-scoped, no
+migration — the `in_control_cohort` / `control_group` inputs already existed.
+Module 9's descriptive metrics are byte-unchanged. The 🔮 *individual* uplift
+model (XGBoost / T/X-learner) remains future work. See `DECISIONS.md` D-133–135.

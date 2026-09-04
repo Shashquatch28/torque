@@ -12,14 +12,16 @@ how it was recovered, and what happened to the rest.*
 The HTTP surface is `torque.api.reporting` (a read-only `APIRouter`, the same
 FastAPI conventions as the Module 2 webhook routes).
 
-**Descriptive, not causal.** This module reports what happened. Incrementality
-lift, Wilson confidence intervals, and SUTVA-adjusted lift (Blueprint §9.1) are
-deferred — see D-121. The `in_control_cohort` / `control_group` data they need is
-already collected and untouched.
+**Descriptive** (this module's `metrics`) reports *what happened*. **Causal**
+(`incrementality`, Module 9b) reports *what Torque's outreach is estimated to
+have caused* — treatment-vs-control lift with a Wilson/Newcombe confidence
+interval and the Blueprint §6 SUTVA cross-merchant adjustment. Both are
+read-only and tenant-scoped; the descriptive definitions are unchanged.
 """
 
 from __future__ import annotations
 
+from torque.reporting.incrementality import incrementality_report
 from torque.reporting.metrics import (
     ReportWindow,
     case_detail,
@@ -42,6 +44,7 @@ __all__ = [
     "case_detail",
     "case_event_stream",
     "human_queue_list",
+    "incrementality_report",
     "list_cases",
     "operational_exceptions",
     "recent_activity",

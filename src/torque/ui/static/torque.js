@@ -32,6 +32,10 @@ function rupees(v) {
 const rupeesExact = (v) => "₹" + Number(v || 0).toLocaleString("en-IN",
   { maximumFractionDigits: 2 });
 const pct = (v) => (Number(v || 0) * 100).toFixed(1) + "%";
+// Module 9b: null-safe percent, and a signed percent for a lift that can be < 0.
+const pctN = (v) => v == null ? "—" : (Number(v) * 100).toFixed(1) + "%";
+const pctSigned = (v) => v == null ? "—"
+  : (Number(v) >= 0 ? "+" : "") + (Number(v) * 100).toFixed(1) + "%";
 const prob = (v) => v == null ? "—" : Math.round(Number(v) * 100) + "%";
 const num = (v) => Number(v || 0).toLocaleString("en-IN");
 const titleize = (s) => String(s || "").replace(/_/g, " ").toLowerCase()
@@ -93,12 +97,13 @@ async function bootstrapMerchant() {
 // --- dashboard (§10.1 / 10.2 / 10.3 / 10.4 / 10.11) ---------------
 async function renderDashboard() {
   const m = encodeURIComponent(MERCHANT);
-  const [rep, legs, series, top, exc] = await Promise.all([
+  const [rep, legs, series, top, exc, inc] = await Promise.all([
     api(`/reports/${m}/summary`),
     api(`/reports/${m}/by-intervention?by=leg`),
     api(`/reports/${m}/over-time?bucket=day`),
     api(`/reports/${m}/top-at-risk?limit=8`),
     api(`/reports/${m}/exceptions`),
+    api(`/reports/${m}/incrementality`),
   ]);
 
   const ce = rep.cost_efficiency_ratio;
@@ -143,6 +148,8 @@ async function renderDashboard() {
     </div>
   </div>
 
+  ${incrementalityCard(inc)}
+
   <div class="panel mt">
     <div class="rowflex"><h2>Top at-risk cases</h2>
       <span class="faint">ranked by Module&nbsp;8 recovery score (backend order)</span></div>
@@ -182,6 +189,48 @@ async function renderDashboard() {
 }
 const stat = (k, v, cls = "") =>
   `<div class="stat"><div class="k">${k}</div><div class="v ${cls} mono">${v}</div></div>`;
+
+// Module 9b — the causal layer. Renders ONLY numbers from the /incrementality
+// response; it computes no rate, lift, or interval itself.
+function incrementalityCard(inc) {
+  const ci = (o) => (o.ci_low == null ? "" :
+    `<span class="ci">95% CI ${pctSigned(o.ci_low)} … ${pctSigned(o.ci_high)}</span>`);
+  const ciRate = (o) => (o.ci_low == null ? "" :
+    `<span class="ci">95% CI ${pctN(o.ci_low)} … ${pctN(o.ci_high)}</span>`);
+  const enough = inc.lift.point != null;
+  const s = inc.sutva;
+  return `
+  <div class="panel mt causal">
+    <div class="rowflex">
+      <h2>Incrementality &mdash; estimated causal effect</h2>
+      <span class="pill blue">causal estimate</span>
+    </div>
+    <p class="faint" style="margin:2px 0 12px">
+      The metrics above are <b>descriptive</b> &mdash; what happened. This is
+      <b>causal</b> &mdash; treatment vs. a held-out control, a point estimate with an
+      honest interval. Not proof of causation.</p>
+    ${enough ? `
+    <div class="causal-grid">
+      <div class="metric"><div class="k">Treatment recovery rate</div>
+        <div class="v">${pctN(inc.treatment.rate)}</div>
+        <div class="faint">${num(inc.treatment.successes)}/${num(inc.treatment.total)} cases ${ciRate(inc.treatment)}</div></div>
+      <div class="metric"><div class="k">Control recovery rate</div>
+        <div class="v">${pctN(inc.control.rate)}</div>
+        <div class="faint">${num(inc.control.successes)}/${num(inc.control.total)} held out ${ciRate(inc.control)}</div></div>
+      <div class="metric hl"><div class="k">Incremental lift</div>
+        <div class="v">${pctSigned(inc.lift.point)}</div>
+        <div class="faint">${ci(inc.lift)}</div></div>
+      <div class="metric"><div class="k">SUTVA-adjusted lift</div>
+        <div class="v">${pctSigned(s.lift.point)}</div>
+        <div class="faint">${num(s.contaminated_control_counterparties)} contaminated control
+          counterpart${s.contaminated_control_counterparties === 1 ? "y" : "ies"} removed ${ci(s.lift)}</div></div>
+    </div>
+    <p class="faint mt">${esc(s.note)}</p>
+    <p class="faint">${esc(inc.recovery_definition)}</p>
+    ` : `<div class="empty">Not enough cohort data yet &mdash; assign a control holdout
+      (${num(inc.treatment.total)} treatment, ${num(inc.control.total)} control cases in range).</div>`}
+  </div>`;
+}
 
 function barChart(series) {
   const max = Math.max(...series.map((s) => Number(s.recovered_amount)), 1);

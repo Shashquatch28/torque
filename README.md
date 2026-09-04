@@ -10,7 +10,7 @@ only, never as current spec.
 
 ## Status
 
-Modules **1–11 complete** (Module 11 uncommitted at time of writing). The
+Modules **1–11 + 9b complete** (Module 9b uncommitted at time of writing). The
 authoritative, always-current snapshot — what is built, the migration head, the
 test count, unresolved items — is
 [`documentation/ai-memory/CURRENT_STATE.md`](documentation/ai-memory/CURRENT_STATE.md).
@@ -24,8 +24,13 @@ diagnosis, the playbook catalog + version-pinned runs, the **Postgres-polling**
 execution driver (`scheduled_job` + stratified Celery-beat pollers — Temporal was
 the alternative; D-090), the compliance / cross-leg guardrail engine + human
 queue, payment reconciliation, `(probability × amount) ÷ cost` recovery scoring,
-the read-only reporting API, a static SPA dashboard + Agent Console + demo
-surface on one port, and (Module 11) a reproducible `docker-compose` runtime.
+the read-only reporting API — **descriptive** (₹ recovered, recovery rate, by
+leg/intervention/time, exceptions) **and, since Module 9b, causal**
+(treatment-vs-control incremental lift with a Wilson/Newcombe confidence
+interval and the Blueprint §6 SUTVA cross-merchant adjustment, shown alongside
+the headline, never instead of it) — a static SPA dashboard + Agent Console +
+demo surface on one port, and (Module 11) a reproducible `docker-compose`
+runtime.
 
 ## Stack
 

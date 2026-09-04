@@ -2523,6 +2523,90 @@ BY D-0NN`.
   substitute them without a live Redis.
 - **Status:** IN FORCE
 
+## D-133 — Incrementality recovery is intent-to-treat (`status ∈ {RECOVERED, CANCELLED}`), not the attributed descriptive rate
+- **Milestone:** Module 9b
+- **Decision:** Blueprint §9.1 defines incremental lift as "treatment recovery
+  rate − control recovery rate". Which "recovery"? Module 9's descriptive
+  `recovery_rate` counts a case only if `status = RECOVERED` **and** the recovery
+  is Torque-attributed (`recovery_type != SELF_RECOVERED` — D-116).
+- **Chosen:** For the **causal** layer, a case counts as recovered iff its
+  status is `RECOVERED` **or** `CANCELLED` (customer self-paid) — **intent-to-
+  treat, attribution-agnostic**. The descriptive `recovery_rate` (D-116) is
+  **unchanged**; this is a second, clearly-labelled definition used only by
+  `torque.reporting.incrementality`, surfaced in the API as `recovery_definition`
+  and in the UI beside the number.
+- **Alternatives:** reuse Module 9's attributed `is_recovered_case` verbatim
+  (rejected — a held-out control case that recovers does so by self-payment, so
+  its `recovery_type` is `SELF_RECOVERED`; an attributed definition pins the
+  control rate at ~0 and "lift" collapses into "treatment rate", which is not a
+  causal comparison and contradicts Blueprint §6's own reasoning about
+  non-trivial control recovery rates); count `PARTIALLY_RECOVERED` too (rejected
+  — not a full binary success; conservative to exclude, matching Module 9).
+- **Consequence:** `_RECOVERED_STATUSES = {RECOVERED, CANCELLED}` in
+  `incrementality.py`. `WRITTEN_OFF` / `EXHAUSTED` / `PARTIALLY_RECOVERED` / open
+  statuses are non-recoveries in both arms. Cohort membership is the per-case
+  `RevenueLeakCase.control_group` snapshot (`True` control / `False` treatment /
+  `None` excluded); no new cohort-assignment mechanism, no schema change.
+- **Status:** IN FORCE
+
+## D-134 — Wilson score interval per cohort; Newcombe (1998) hybrid for the difference; 95% two-sided
+- **Milestone:** Module 9b
+- **Decision:** Blueprint §9.1 mandates "a Wilson score confidence interval …
+  a naive normal-approximation interval can produce nonsensical bounds at
+  demo-scale sample sizes" but names no confidence level and no method for the
+  *difference* of two proportions.
+- **Chosen:**
+  - Each cohort proportion: the **Wilson score interval**, clamped to `[0, 1]`.
+  - The lift (treatment rate − control rate): **Newcombe's (1998) hybrid score
+    interval** ("method 10") — `d ∓ √((p̂₁−l₁)² + (u₂−p̂₂)²)` etc. built from the
+    two Wilson intervals — clamped to `[-1, 1]`. This is the standard
+    Wilson-based CI for a difference of independent proportions and stays in
+    range at tiny `n`.
+  - **95% two-sided**, `z = Φ⁻¹(0.975) ≈ 1.959963984540054` (`statistics.
+    NormalDist().inv_cdf(0.975)` — stdlib, no new dependency). The conservative,
+    universally-understood reporting default; a wider batch simply yields a
+    wider interval, shown honestly. `confidence_level` and `z_value` are in the
+    response.
+  - `total == 0` → `rate` / bounds are `null` (never `NaN` / `inf`); the
+    difference interval is `null` when either cohort is empty.
+  - All arithmetic in `Decimal` (`.sqrt()`), outputs quantised to 4 dp
+    (`ROUND_HALF_EVEN` — Module 9's rate quantum).
+- **Alternatives:** Wald/normal interval (rejected — the Blueprint forbids it);
+  Agresti–Caffo for the difference (defensible, but Newcombe pairs directly with
+  the mandated Wilson and is the more common companion); 90% or 99% level
+  (rejected — 95% is the expected default and the honest-width argument applies
+  at any level).
+- **Consequence:** `wilson_interval` / `newcombe_difference` in
+  `torque.reporting.incrementality`, covered by `tests/test_module9b_wilson.py`
+  (zero/all successes, one observation, tiny cohorts, equal rates, ± lift — no
+  invalid bound ever).
+- **Status:** IN FORCE
+
+## D-135 — The deterministic demo seed assigns cohorts and adds a second merchant so the SUTVA number is live
+- **Milestone:** Module 9b
+- **Decision:** The `acc_demo` seed created `Merchant_Counterparty` rows with no
+  cohort (`in_control_cohort` NULL), so the incrementality card would always be
+  empty and the SUTVA-adjusted lift would always equal the headline.
+- **Chosen:** The seed now (a) assigns every demo counterparty a cohort via the
+  **existing** `MerchantCounterparty.assign_cohort` (3 of 16 held out as control,
+  ~19% — near the Blueprint's 10–15% holdout; `cohort_assigned_at` pinned to the
+  fixed demo clock for a byte-identical rebuild), and (b) adds a small companion
+  merchant **`acc_demo_up`** that is *treating* two of those three control
+  counterparties in the same window — making them Blueprint §6 contaminated
+  control units. `DEMO_MERCHANT_IDS = ("acc_demo", "acc_demo_up")`; `_wipe` now
+  loops that tuple (still trigger-scoped and demo-only — D-125 unchanged in
+  spirit). `seed_demo` still returns `acc_demo`'s 16-case summary.
+- **Alternatives:** leave the demo cohort-less (rejected — the acceptance
+  criteria and Module 13's SUTVA beat need a live number); a new cohort-assignment
+  helper (rejected — `assign_cohort` is the sanctioned one); mutate historical
+  cohort assignments (rejected — forbidden, and unnecessary: the seed builds
+  fresh rows).
+- **Consequence:** the demo dashboard shows treatment 5/13 ≈ 38.5%, control
+  1/3 ≈ 33.3%, headline lift ≈ +5.1% (CI spans 0 — honest at this `n`), SUTVA
+  2 contaminated → adjusted control 0/1, adjusted lift ≈ +38.5%. `acc_demo`'s
+  descriptive metrics (`recovery_summary` etc.) are byte-identical to before.
+- **Status:** IN FORCE
+
 ---
 
 ## Notes not recorded as decisions

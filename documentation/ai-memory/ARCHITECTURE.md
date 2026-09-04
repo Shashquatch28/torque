@@ -27,7 +27,8 @@ Do not describe `PLANNED` / `DEFERRED` behaviour as if it exists.
 | 6 — Compliance & Cross-Leg Guardrail Engine | `GuardrailEngine.check()`, Outreach Coordinator, escalation ceiling, human queue | **`IMPLEMENTED` (Module 6 complete)** — `torque.coordination` package: the `GuardrailEngine` facade (§6.2, returns the four-way `GuardDecision` — D-097); the Outreach Coordinator (4h cross-leg quiet period, live merge in the poll batch, defer, open-conversation — Part A §5); the full WhatsApp gate (opt-in + approved UTILITY template + open-conversation suspend); §6.3 escalation-ceiling → `ESCALATED_TO_HUMAN` in the runner tick; the persistent `human_queue` table (migration 0016) + three feeders. `priority()` is the Module 8 seam (D-098). See §8F |
 | 7 — Reconciliation & Attribution | match payments → cases, `AGENT_ASSISTED` vs `SELF_RECOVERED`, write `credit_weight` | **`IMPLEMENTED` (Module 7 complete)** — `torque.reconciliation`: `reconcile_event()` matches a verified success `Event` (§7.1: direct `PaymentLink` → indirect `(merchant, cp, amount)` → merged-set re-split / `AMBIGUOUS` → `DETECTED/DIAGNOSING → CANCELLED` self-pay); closes cases (§7.2: `RECOVERED` / B2B `PARTIALLY_RECOVERED` with invoice waterfall) + `PAYMENT_RECONCILED`; `recovery_type` / `recovered_amount` via `module7_writer`. Wired into `webhooks.py` (D-104). **`state_machine.py` gained the two U-01 edges** (D-103); no migration. See §8G |
 | 8 — Recovery Scoring | `(probability × amount) ÷ cost`, cold-start lookup | **`IMPLEMENTED` (Module 8 complete)** — `torque.scoring` package: `cold_start_probability` (Decision F's exact 8-value table as a live function), `warm_start_multiplier` (§8.2 linear map, clamped 0.5×–1.3×, D-110), `compute_cost` (forward `ChannelRateCard` sum for the next playbook step, zero-cost floors — D-111), `compute_recovery_score` / `RecoveryScore` (the one formula + §8.7 explainability). Persisted on `revenue_leak_case.recovery_score` / `_breakdown` / `_updated_at` (migration **0017**, D-109). Recompute on creation / diagnosis / daily (D-112). `priority()` seam now returns it (D-113). See §8H |
-| 9 — Reporting & Measurement | ₹ recovered, recovery rate, by leg/intervention/outcome/time, exception list, case drill-down | **`IMPLEMENTED` (Module 9 complete)** — `torque.reporting` (`metrics.py` derivations + `schemas.py` pydantic contract) + read-only `torque.api.reporting` router (8 `GET` endpoints). Outcome-based (D-116: `recovered_amount` = `recovery_type != SELF_RECOVERED`; `SELF_RECOVERED` reported separately). **No migration** — pure read/derive over the domain tables (D-114). Module 7 stays authoritative for attribution. Incrementality lift / Wilson CI / SUTVA-adjusted lift **deferred** (D-121 / U-10). See §8I |
+| 9 — Reporting & Measurement | ₹ recovered, recovery rate, by leg/intervention/outcome/time, exception list, case drill-down | **`IMPLEMENTED` (Module 9 complete)** — `torque.reporting` (`metrics.py` derivations + `schemas.py` pydantic contract) + read-only `torque.api.reporting` router (`GET`-only). Outcome-based (D-116: `recovered_amount` = `recovery_type != SELF_RECOVERED`; `SELF_RECOVERED` reported separately). **No migration** — pure read/derive over the domain tables (D-114). Module 7 stays authoritative for attribution. See §8I |
+| 9b — Incrementality / Causal Measurement | treatment-vs-control lift, Wilson/Newcombe CI, SUTVA cross-merchant adjustment | **`IMPLEMENTED` (Module 9b complete)** — `torque.reporting.incrementality` + `GET /reports/{m}/incrementality` + a dashboard card. Cohort = `RevenueLeakCase.control_group` (unchanged); recovery = intent-to-treat `status ∈ {RECOVERED, CANCELLED}` (D-133 — descriptive rate untouched); Wilson per cohort + Newcombe 1998 for the difference at 95% (D-134); Blueprint §6 SUTVA-adjusted lift alongside (D-133/D-135). Read-only, tenant-scoped, **no migration** (U-10 resolved). See §8I |
 | 10 — UI/UX | merchant dashboard, agent console, demo surface | **`IMPLEMENTED` (Module 10 complete)** — a hand-written static SPA (`src/torque/ui/static/`) mounted at `/ui` by `create_app()` (one process, `uv run python -m torque` — D-122); `torque.agent_console` (human resolve/pause/unpause — INV-59, migration **0018** for `escalation_resolution` — D-123); `torque.demo` (deterministic `acc_demo` seed + one-click Decision-K scenarios — D-124/125); Module 9 reporting gains `top-at-risk` / `human-queue` / `activity` + the case-detail score breakdown. `state_machine.py` unchanged; `guards.py` gains `human_resolution_writer`. See §8J |
 | 11 — Tech Stack & Infra | reproducible local/demo runtime: db + redis + api + worker + beat | **`IMPLEMENTED` (Module 11 complete)** — one reusable `Dockerfile` (D-128); `docker-compose` now defines the whole runtime behind a `full` profile — `migrate` (one-shot `alembic upgrade head`, D-130) + `api` + `worker` + `beat`, while a bare `up` still starts only `db` + `redis` (D-129); `Settings.api_host`/`api_port` (D-131); `GET /health/ready` = Postgres `SELECT 1` + Redis `PING` (D-132); `.env.example` covers the full `Settings` + `PolicyConfig` surface, no secrets. **No migration.** Redis stays broker-only; `scheduled_job` + `execute_due_job` stay the durable execution driver (D-090 / D-127 — no Temporal). Backend language = Python, made explicit (D-126). See §8K |
 | 12 — Build Roadmap | phase plan (no calendar dates — Part D item 3) | `PLANNED` / `UNRESOLVED` |
@@ -968,13 +969,37 @@ aggregate → case → actions → `CaseEvent` stream (§9.8).
 - **Attribution (§9.3):** Module 7 is authoritative — Module 9 reads
   `recovery_type` / `recovered_amount` / `credit_weight`, never re-matches a
   payment (INV-53).
-- **Descriptive, not causal (§9.6):** incrementality lift, the Wilson score CI,
-  and SUTVA-adjusted lift (Blueprint §9.1) are **`DEFERRED`** (D-121 / U-10 —
-  "Module 9b — Incrementality"). The `in_control_cohort` / `control_group` data
-  is collected and untouched.
-- **State machine / guards / migrations:** **none.** `alembic head` stays
-  `0017_recovery_score`; `git diff HEAD --` of `state_machine.py` and
-  `guards.py` empty.
+- **Descriptive vs causal (§9.6):** `metrics.py` is descriptive ("what
+  happened"). The **causal** layer — incrementality lift, Wilson/Newcombe CI,
+  SUTVA-adjusted lift — is now **`IMPLEMENTED` (Module 9b)**: see the Module 9b
+  extension below. Module 9's descriptive definitions are byte-unchanged.
+- **State machine / guards / migrations:** **none** (Module 9 *and* 9b).
+  `git diff HEAD --` of `state_machine.py` and `guards.py` empty.
+- **Module 9b extension — `torque.reporting.incrementality` — `IMPLEMENTED`:**
+  `incrementality_report(session, merchant_id, *, window=None, leg=None)` →
+  `IncrementalityReport` (schemas: `ProportionCI`, `LiftEstimate`,
+  `SutvaAdjustment`). Cohort membership from the per-case
+  `RevenueLeakCase.control_group` snapshot (`True` control / `False` treatment /
+  `None` excluded — no new cohort mechanism, `sync_control_group` unchanged);
+  recovery = **intent-to-treat** `status ∈ {RECOVERED, CANCELLED}` (D-133,
+  distinct from and not affecting Module 9's attributed `recovery_rate`);
+  window = the Module 9 `opened_at` `ReportWindow`. Each cohort proportion gets
+  a **Wilson score interval**; the lift a **Newcombe (1998) hybrid score
+  interval**; 95% two-sided, `z = Φ⁻¹(0.975)`, exact `Decimal` `.sqrt()`,
+  `null` (never `NaN`) at `total == 0` (D-134). **SUTVA (§6):**
+  `_contaminated_control_counterparties` is the one deliberately cross-merchant
+  read — `RevenueLeakCase.counterparty_id` for the caller's own control
+  counterparties that also have a `control_group = False` case at a *different*
+  merchant in the window; it selects only `counterparty_id` and returns a
+  `set`, so no other merchant's id / amounts / outcomes / counts leave it. The
+  adjusted control cohort drops those counterparties; treatment is untouched;
+  the headline lift is always kept alongside. Endpoint
+  `GET /reports/{m}/incrementality` (`opened_from`/`opened_to`/`leg`, GET-only,
+  `TenantScope`d, 404/422 like the rest of the router — INV-58 extended). The
+  dashboard renders a compact "estimated causal effect" card from the response
+  and computes no statistic itself. Demo: `seed.py` now assigns cohorts
+  (`assign_cohort`, 3/16 control) and adds an `acc_demo_up` merchant treating 2
+  of them so the SUTVA number is live (D-135).
 - **Module 10 extension:** the router also serves `GET /reports/{m}/top-at-risk`
   (`top_at_risk_cases` — open cases `ORDER BY recovery_score DESC NULLS LAST`),
   `/human-queue` (`human_queue_list` — `human_queue` rows joined to the case,

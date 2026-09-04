@@ -775,6 +775,17 @@ violation**.
   (read-only, `TenantScope`d, `recovery_score` / `recovery_score_breakdown` read
   verbatim from Module 8). The reporting router stays GET-only.
   `tests/test_module10_tenant_isolation.py`.
+- **Module 9b extension:** `torque.reporting.incrementality` +
+  `GET /reports/{m}/incrementality` follow the same rules — read-only (a
+  row-count + `control_group`-snapshot test proves repeated calls write
+  nothing), `TenantScope`d for the caller's own cohort. The **one** cross-merchant
+  read (`_contaminated_control_counterparties`, Blueprint §6 SUTVA) is bounded
+  both ways: `WHERE counterparty_id IN (:the caller's own control counterparties)`
+  so it can only return ids the caller already holds, and it selects only
+  `counterparty_id` (reduced to a `set` before returning) — no other merchant's
+  id, case ids, amounts, statuses, outcomes, or counts are read or exposed. The
+  cohort inputs (`in_control_cohort` / `control_group`) are never written.
+  `tests/test_module9b_api.py`, `tests/test_module9b_sutva.py`.
 
 ## INV-59 — Agent Console human overrides use only legal edges, tenant-scoped, guarded (Module 10)
 - **Domain:** `torque.agent_console.resolve` / `torque.api.agent_console`.

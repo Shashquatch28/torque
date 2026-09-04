@@ -334,14 +334,20 @@ router; **no migration** — D-114). Now **DONE**:
   same FastAPI conventions as Module 2.
 
 Still deferred within Module 9's area:
-- 🔧 **Module 9b — Incrementality / causal measurement** — treatment-vs-control
-  **lift**, the **Wilson score confidence interval**, and the **cross-merchant
-  SUTVA-adjusted lift** footnote (Blueprint §9.1). Explicitly out of scope for
-  the descriptive Module 9 run (D-121 / U-10). The `in_control_cohort` /
-  `control_group` data is already collected and untouched — no schema change
-  needed, only a new consumer.
+- ✅ **DONE in Module 9b:** incrementality / causal measurement — treatment-vs-
+  control **lift**, the **Wilson score CI** per cohort + **Newcombe (1998)**
+  interval for the difference (D-134), and the Blueprint §6 **cross-merchant
+  SUTVA-adjusted lift** shown alongside (D-133 / D-135).
+  `torque.reporting.incrementality` + `GET /reports/{m}/incrementality` + a
+  dashboard card; read-only, tenant-scoped, **no migration** (the
+  `in_control_cohort` / `control_group` inputs already existed). See
+  `MILESTONES.md` "Module 9b". **U-10 resolved.**
 - 🔧 **`Action.cost` population** by Module 5 — until then `total_action_cost` /
   `cost_efficiency_ratio` are ~0 (a data gap, not a Module 9 gap).
+- 🔮 **Learned / individual uplift** — XGBoost + SHAP + T/X-learner meta-learners
+  for *per-case* incremental effect (Decision F / §8.4, needs 500+ resolved
+  cases). Module 9b delivers the *average* treatment effect only; the schema is
+  already feature-store-ready.
 - 🔧 Pure **timing defers** (quiet hours, UPI peak) write no `Action` row, so
   they are not countable from `Action` — only `OUTREACH_COORDINATOR_DEFERRED` is
   (D-118).
@@ -382,7 +388,9 @@ Still deferred within Module 10's area:
   wiring assertions.
 - 🔧 Real **live push** (WebSocket / SSE) — polling suffices for the demo
   (D-124); the backend has no push channel.
-- 🔧 The UI does **not** surface incrementality (Module 9b — D-121 / U-10).
+- ✅ **DONE in Module 9b:** the dashboard now surfaces incrementality — a
+  compact causal card (treatment/control rate, lift + Wilson CI, SUTVA-adjusted
+  lift), rendered from `/reports/{m}/incrementality`, computing nothing in JS.
 - 🔧 `escalation_resolution` is a Module-10 vocabulary (`RECOVERED_BY_HUMAN` /
   `PARTIALLY_RECOVERED_BY_HUMAN` / `WRITTEN_OFF`) — the blueprint names the field
   but not its values (U-11).

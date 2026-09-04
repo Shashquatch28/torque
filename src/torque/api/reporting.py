@@ -10,6 +10,8 @@ Endpoints (the six the future UI needs, §9.10):
 
 * `GET /reports/{merchant_id}/summary`         — merchant- or batch-level totals
 * `GET /reports/{merchant_id}/report`          — the §9.4 batch bundle
+* `GET /reports/{merchant_id}/incrementality`  — the §6 causal layer (Module 9b):
+  treatment-vs-control lift + Wilson/Newcombe CI + SUTVA-adjusted lift
 * `GET /reports/{merchant_id}/by-intervention` — by leg (default) or action type
 * `GET /reports/{merchant_id}/over-time`       — recovery time series
 * `GET /reports/{merchant_id}/exceptions`      — operational / exception report
@@ -35,6 +37,7 @@ from torque.api.deps import get_db
 from torque.enums import CaseStatus, LegType
 from torque.models import Merchant
 from torque.reporting import metrics
+from torque.reporting.incrementality import incrementality_report
 from torque.reporting.metrics import ReportWindow
 from torque.reporting.schemas import (
     ActivityFeed,
@@ -42,6 +45,7 @@ from torque.reporting.schemas import (
     CaseEventEntry,
     CaseList,
     HumanQueueList,
+    IncrementalityReport,
     InterventionBreakdown,
     LegBreakdown,
     OperationalReport,
@@ -107,6 +111,25 @@ def get_report(
 ) -> RecoveryReport:
     _require_merchant(session, merchant_id)
     return metrics.recovery_report(
+        session, merchant_id, window=_window(opened_from, opened_to), leg=_leg(leg)
+    )
+
+
+@router.get("/incrementality", response_model=IncrementalityReport)
+def get_incrementality(
+    merchant_id: str,
+    opened_from: datetime | None = None,
+    opened_to: datetime | None = None,
+    leg: str | None = None,
+    session: Session = Depends(get_db),
+) -> IncrementalityReport:
+    """Blueprint §6 / §9.1 — the CAUSAL layer (Module 9b). Treatment-vs-control
+    recovery-rate lift over the `opened_at` window, a Wilson/Newcombe confidence
+    interval, and the SUTVA cross-merchant contamination-adjusted lift alongside.
+    Read-only, tenant-scoped; the SUTVA step reads only counterparty overlap
+    across merchants (see `torque.reporting.incrementality`)."""
+    _require_merchant(session, merchant_id)
+    return incrementality_report(
         session, merchant_id, window=_window(opened_from, opened_to), leg=_leg(leg)
     )
 

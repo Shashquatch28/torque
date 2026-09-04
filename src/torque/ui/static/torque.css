@@ -184,3 +184,12 @@ select, input[type=text], input[type=number] {
 .empty { color: var(--ink-faint); padding: 30px 0; text-align: center; }
 .foot { padding: 16px 26px; border-top: 1px solid var(--line); color: var(--ink-faint); font-size: 11px; text-align: center; }
 .back { color: var(--ink-dim); font-size: 12px; }
+
+/* Module 9b — incrementality (causal) card */
+.panel.causal { border-left: 2px solid var(--blue); }
+.causal-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+@media (max-width: 900px) { .causal-grid { grid-template-columns: repeat(2, 1fr); } }
+.causal-grid .metric .k { color: var(--ink-faint); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+.causal-grid .metric .v { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; margin: 2px 0; }
+.causal-grid .metric.hl .v { color: var(--blue); }
+.causal-grid .metric .ci { display: block; font-size: 11px; color: var(--ink-faint); font-variant-numeric: tabular-nums; }

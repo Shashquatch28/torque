@@ -319,3 +319,69 @@ class RecoveryReport(_Model):
     by_leg: list[LegBreakdown]
     by_recovery_type: list[OutcomeBreakdown]
     operational: OperationalReport
+
+
+# --- Module 9b: incrementality / causal measurement (§6 / §9.1) --------
+
+
+class ProportionCI(_Model):
+    """One cohort's recovery proportion with its Wilson score interval.
+    `total == 0` ⇒ `rate` / `ci_low` / `ci_high` are `None` (undefined — never
+    NaN or an out-of-range bound)."""
+
+    successes: int
+    total: int
+    rate: Decimal | None       # successes / total (∈ [0, 1])
+    ci_low: Decimal | None     # Wilson score lower bound (∈ [0, 1])
+    ci_high: Decimal | None    # Wilson score upper bound (∈ [0, 1])
+
+
+class LiftEstimate(_Model):
+    """treatment recovery rate − control recovery rate, with a small-sample CI
+    for the difference of two independent proportions (Newcombe 1998 hybrid
+    score interval built from the two Wilson intervals). `point` / bounds are
+    `None` when either cohort is empty."""
+
+    point: Decimal | None      # ∈ [-1, 1]
+    ci_low: Decimal | None     # ∈ [-1, 1]
+    ci_high: Decimal | None    # ∈ [-1, 1]
+    method: str = "newcombe_wilson_hybrid_score"
+
+
+class SutvaAdjustment(_Model):
+    """Blueprint §6 cross-merchant contamination sensitivity. The control cohort
+    with every counterparty that is ALSO in a treatment cohort at another
+    merchant in the same window removed; the treatment cohort is unchanged.
+    Presented ALONGSIDE the headline lift, never instead of it."""
+
+    contaminated_control_counterparties: int
+    excluded_control_cases: int
+    control: ProportionCI      # control cohort after removing contaminated counterparties
+    lift: LiftEstimate         # treatment (unchanged) vs the adjusted control
+    note: str
+
+
+class IncrementalityReport(_Model):
+    """Module 9b (Blueprint §6 / §9.1) — the CAUSAL layer: the estimated
+    incremental effect of Torque's outreach, distinct from the DESCRIPTIVE
+    recovery report. A point estimate with an honest interval — not a proof of
+    causality. Recovery here is intent-to-treat (`status ∈ {RECOVERED,
+    CANCELLED}`), deliberately broader than the dashboard's attributed
+    `recovery_rate` so the held-out control has a baseline (see
+    `recovery_definition`; D-133)."""
+
+    merchant_id: str
+    opened_from: datetime | None = None
+    opened_to: datetime | None = None
+    leg_type: str | None = None
+    #: The window column — the Module 9 convention, stated so the UI can label it.
+    window_basis: str = "opened_at"
+    confidence_level: Decimal          # 0.95 (two-sided)
+    z_value: Decimal                   # Φ⁻¹(0.975)
+    recovery_definition: str
+
+    treatment: ProportionCI
+    control: ProportionCI
+    lift: LiftEstimate
+
+    sutva: SutvaAdjustment

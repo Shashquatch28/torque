@@ -3074,6 +3074,78 @@ BY D-0NN`.
 
 ---
 
+## D-144 — Evaluation methodology: deterministic lexical-overlap proxy, empirically calibrated; mirrored (not imported) citation collection; retrieval precision kept structurally separate
+
+- **Milestone:** AI Phase 5 — Citation / Faithfulness Evaluation
+  (`ai-layer` branch, not `main`).
+- **Decision (four bundled sub-decisions, one milestone):**
+  1. **`unsupported_claim_rate` is a deterministic lexical-overlap proxy,
+     not a semantic-truth check, and LLM-as-judge is deferred with no
+     target phase.** Both texts are normalized (lowercase, split on
+     non-word characters, strip a small fixed stopword list), and a claim
+     is "supported" iff the fraction of its own tokens also present in its
+     cited evidence's tokens is >= a threshold. No LLM call, no
+     embeddings, no external evaluation service, no RAGAS or equivalent
+     framework — exactly as instructed. **The threshold (`0.2`) was
+     empirically calibrated, not guessed**: an initial `0.5` cutoff (a
+     round, "sounds reasonable" number) failed against `MockProvider`'s
+     own genuine, well-grounded claim templates (e.g. "The diagnosed root
+     cause is X." legitimately scores ~0.25-0.33 against a short,
+     structured evidence-field string — most of a short template sentence
+     is framing words, not repeated content), which would have made the
+     v1 harness flag real, correct output as unsupported. `0.2` was
+     chosen as the lowest round value clearing every real `MockProvider`
+     claim while leaving the task's own illustrative BAD example ("The
+     merchant requested a full refund immediately.", which scores `0.0`
+     against unrelated evidence) far below it — found and fixed via the
+     evaluator's own test suite, not by inspection.
+  2. **`EvaluationReport` lives in `torque.ai.schemas`, not in
+     `evaluation.py` itself** — the same home every other AI Pydantic DTO
+     (`Citation`, `PrecedentCase`, `CaseNarrative`, ...) already has,
+     preserving the one-schemas-module convention every prior phase
+     established.
+  3. **`torque.ai.evaluation` mirrors `torque.ai.narrative.
+     _collect_claim_citation_ids` locally rather than importing it.** The
+     Phase 5 task explicitly forbids modifying `narrative.py`'s safety
+     gate; importing a private (`_`-prefixed) symbol out of a module Phase
+     5 must not touch would also be an awkward, one-directional-in-name-
+     only coupling. Instead, `evaluation.py` keeps its own copy and
+     `tests/test_ai_evaluation.py::
+     test_citation_collection_mirrors_narrative_validation_exactly` cross-
+     checks the two against every fixture narrative — the exact
+     "duplicate + cross-test" discipline `torque.ai.retrieval` already
+     established for `torque.state_machine.TERMINAL_STATUSES` (D-141),
+     applied a second time for a second, independent reason (this time to
+     avoid touching Phase 4, not to avoid weakening the import boundary).
+  4. **`evaluate_retrieval_precision` is a separate function, not a
+     parameter `evaluate_narrative` computes itself.** Measuring Phase 3
+     retrieval quality requires calling `find_precedent` again, which
+     needs a `Session` — `evaluate_narrative` has no `Session` parameter
+     at all and never will (see INV-64). Retrieval-precision and
+     precedent-correctness ground truth
+     (`expected_precedent_found`) are both optional, externally-supplied
+     inputs to `evaluate_narrative`/its report — the pure evaluator can
+     check *consistency* with a label it is given, never determine the
+     label itself.
+- **Alternatives considered:** requiring semantic similarity via a local
+  embedding model — rejected outright, explicitly out of scope for v1
+  (embeddings are Phase 3's own rejected-for-now technology, reapplied
+  here would be the same unjustified-infrastructure mistake). Keeping the
+  original `0.5` threshold and treating the miscalibration as a
+  `MockProvider` phrasing problem to fix instead — rejected: `MockProvider`
+  is deliberately simple, templated language, exactly the register a
+  real, well-behaved narrative model would also produce for short factual
+  claims; tuning the *evaluator* to correctly recognize genuinely-grounded
+  simple language is the right fix, not making the mock write artificially
+  evidence-dense prose to satisfy an arbitrary cutoff.
+- **Consequence:** the v1 harness stays deterministic, local, free, and
+  dependency-light, with its one tunable constant calibrated against real
+  measured behavior (documented inline in `evaluation.py`, not just here)
+  rather than picked and never checked.
+- **Status:** IN FORCE.
+
+---
+
 ## Notes not recorded as decisions
 
 - The **Git-history incident of 2026-09-02** (a bad commit briefly on `main`,

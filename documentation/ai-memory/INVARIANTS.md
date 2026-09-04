@@ -1004,6 +1004,45 @@ violation**.
 
 ---
 
+## INV-64 — Narrative evaluation reflects only the evidence actually supplied to generation, never a fresh database query (AI Phase 5)
+
+- **Domain:** `src/torque/ai/evaluation.py` (branch `ai-layer`, not yet on
+  `main`).
+- **Invariant:**
+  1. **`evaluate_narrative` has no `Session` parameter and cannot acquire
+     one.** It operates exclusively on the `CaseNarrative` +
+     `CaseEvidence` + `list[PrecedentCase]` objects the caller passes in —
+     the exact ones supplied to the generation call being evaluated. It
+     never re-queries the database to ask whether a citation resolves
+     "now"; a citation is judged resolvable only against the frozen
+     evidence snapshot handed to it. This is what prevents evaluation
+     leakage: the evidence context cannot silently drift between
+     generation and evaluation.
+  2. **`evaluate_retrieval_precision` is the sole, deliberate exception,
+     and it is structurally separate.** Measuring Phase 3 retrieval
+     quality genuinely requires calling `find_precedent` again (there is
+     no other way to ask what retrieval would return), so this one
+     function takes a `Session` — but `evaluate_narrative` never calls it
+     and never needs to; a caller who wants only narrative-quality metrics
+     never touches a database at all.
+  3. **Evaluation performs no mutation.** No `session.add`/`.delete`/
+     `.commit` anywhere in `torque.ai.evaluation`; `evaluate_retrieval_precision`
+     only ever calls the same read-only `find_precedent` Phase 3 already
+     ships. Neither function mutates any of its input objects (every AI
+     schema is frozen — Pydantic itself rejects an in-place edit).
+  4. **Determinism.** Same `(narrative, evidence, precedents)` in ->
+     byte-identical `EvaluationReport` out, every time — no randomness, no
+     wall-clock dependency, no LLM call anywhere in the evaluation path
+     itself.
+- **Enforcement:** `TEST` (`tests/test_ai_boundary.py`'s import-graph check,
+  covering `evaluation.py` exactly as it covers every other module) +
+  `TEST` (`tests/test_ai_evaluation.py::test_evaluate_narrative_is_deterministic`
+  + the full evaluation-set threshold test, which would itself become
+  flaky/non-reproducible if evaluation secretly depended on live state).
+- **Tests:** `tests/test_ai_evaluation.py`, `tests/test_ai_boundary.py`.
+
+---
+
 ## Invariants that are PLANNED (not yet enforced anywhere)
 
 - Pre-debit ≥24h gap actually blocking a retry: **IMPLEMENTED in Module 5**

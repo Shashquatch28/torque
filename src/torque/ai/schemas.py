@@ -391,6 +391,61 @@ class CaseNarrative(BaseModel):
     prompt_version: str
 
 
+# --- Phase 5: evaluation contract -------------------------------------------
+
+
+class EvaluationReport(BaseModel):
+    """Phase 5 — the deterministic result of `torque.ai.evaluation.
+    evaluate_narrative` for one generated `CaseNarrative`.
+
+    Every rate here is computed purely from the `CaseNarrative` plus the
+    EXACT `CaseEvidence` / `list[PrecedentCase]` that were actually supplied
+    to the generation call that produced it — never a fresh database query
+    (the Phase 5 task's "Absolute Data-Source Rule": evaluation must reflect
+    what the model actually saw, not what the database happens to contain
+    afterward).
+
+    `no_precedent_correct` and `retrieval_precision_at_k` are `None` unless
+    the caller supplies external ground truth
+    (`evaluate_narrative(..., expected_precedent_found=...)`, or a
+    separately-computed `torque.ai.evaluation.evaluate_retrieval_precision`
+    result) — the evaluator cannot determine either from the narrative
+    alone, only whether the narrative is internally consistent with a label
+    it is given. `None` means "not evaluated," never a fabricated pass.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    #: resolvable citation ids / total citation ids used anywhere in the
+    #: narrative (claim-bearing fields + the flat `citations` list +
+    #: precedent `evidence_id`s). Target: 1.0.
+    citation_existence_rate: float
+    #: claim-bearing fields carrying >=1 citation / total claim-bearing
+    #: fields (`current_state`, `root_cause_explanation`, each `timeline`/
+    #: `actions_taken`/`guardrail_explanation` entry — never `summary` or
+    #: `uncertainty`, which carry no citation_ids field to measure).
+    #: Target (per the original blueprint): >= 0.90.
+    citation_coverage: float
+    #: unsupported claims / evaluated claim-bearing fields, by the v1
+    #: deterministic lexical-overlap proxy (see `torque.ai.evaluation`'s
+    #: module docstring for the exact, documented, non-semantic rule). An
+    #: uncited claim is always counted unsupported, never silently passed.
+    unsupported_claim_rate: float
+    no_precedent_correct: bool | None
+    retrieval_precision_at_k: float | None
+
+    total_claims: int
+    cited_claims: int
+    total_citations: int
+    resolvable_citations: int
+    #: The exact citation ids (if any) that failed to resolve — the
+    #: concrete evidence behind a `citation_existence_rate < 1.0`, so a
+    #: failure is diagnosable, not just numerically flagged.
+    unresolved_citation_ids: list[str]
+    unsupported_claim_count: int
+    evaluated_precedent_cases: int
+
+
 __all__ = [
     "ActionEvidence",
     "CaseEvidence",
@@ -398,6 +453,7 @@ __all__ = [
     "CaseSnapshot",
     "Citation",
     "CounterpartyRelationshipEvidence",
+    "EvaluationReport",
     "EvidenceItem",
     "EvidenceReference",
     "NarrativeClaim",

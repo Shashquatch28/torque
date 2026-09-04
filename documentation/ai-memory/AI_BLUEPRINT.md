@@ -57,7 +57,7 @@ Phase 1 — AI read model / evidence interface          COMPLETE
 Phase 2 — Evidence normalization + citation model      COMPLETE
 Phase 3 — Retrieval / precedent engine                  COMPLETE
 Phase 4 — LLM case explanation                           COMPLETE
-Phase 5 — Faithfulness / evaluation                        NOT STARTED
+Phase 5 — Faithfulness / evaluation                        COMPLETE
 Phase 6 — Agent Console integration                         NOT STARTED
 Phase 7 — Shadow ML                                          NOT STARTED
 Phase 8 — Hardening                                           NOT STARTED
@@ -67,28 +67,32 @@ Phase 9 — Demo polish                                          NOT STARTED
 **What exists in the repository right now, concretely:** the `src/torque/ai/`
 package — `__init__.py`, `exceptions.py`, `config.py`, `schemas.py`,
 `evidence.py` (Phase 0+1), `citations.py` (Phase 2), `retrieval.py`
-(Phase 3), `prompts.py`, `narrative.py`, and `providers/{__init__,base,
-mock_provider}.py` (Phase 4) — plus its test suite (`tests/test_ai_boundary.py`,
-`tests/test_ai_config.py`, `tests/test_ai_evidence.py`,
-`tests/test_ai_citations.py`, `tests/test_ai_retrieval.py`,
-`tests/test_ai_providers.py`, `tests/test_ai_narrative.py`). The package's
-public capabilities are: `torque.ai.evidence.gather_case_evidence` (a
-read-only function projecting one case's authoritative Torque state into
-typed, redacted, citation-referenced DTOs); `torque.ai.citations.
-resolve_citation` / `all_evidence_items` / `citation_for` (a pure,
-no-database citation-resolution primitive); `torque.ai.retrieval.
-find_precedent` (a deterministic, Postgres-FTS-assisted search for
-comparable, resolved, same-merchant historical cases); and
-`torque.ai.narrative.explain_case` (the first real AI-generation
-capability — a citation-grounded `CaseNarrative` synthesized from evidence
-+ precedent by an injected `LLMProvider`, `MockProvider` being the only
-concrete provider that exists). There is no embedding, no vector search, no
-real (network-backed) LLM provider, no API endpoint, no frontend change, no
-faithfulness-evaluation harness, and no shadow ML model. See the Phase 4
-completion report for the exact, unimplemented list.
+(Phase 3), `prompts.py`, `narrative.py`, `providers/{__init__,base,
+mock_provider}.py` (Phase 4), and `evaluation.py` (Phase 5) — plus its test
+suite (`tests/test_ai_boundary.py`, `tests/test_ai_config.py`,
+`tests/test_ai_evidence.py`, `tests/test_ai_citations.py`,
+`tests/test_ai_retrieval.py`, `tests/test_ai_providers.py`,
+`tests/test_ai_narrative.py`, `tests/test_ai_evaluation.py`,
+`tests/ai_eval_cases.py`). The package's public capabilities are:
+`torque.ai.evidence.gather_case_evidence` (a read-only function projecting
+one case's authoritative Torque state into typed, redacted,
+citation-referenced DTOs); `torque.ai.citations.resolve_citation` /
+`all_evidence_items` / `citation_for` (a pure, no-database
+citation-resolution primitive); `torque.ai.retrieval.find_precedent` (a
+deterministic, Postgres-FTS-assisted search for comparable, resolved,
+same-merchant historical cases); `torque.ai.narrative.explain_case` (a
+citation-grounded `CaseNarrative` synthesized from evidence + precedent by
+an injected `LLMProvider`, `MockProvider` being the only concrete provider
+that exists); and `torque.ai.evaluation.evaluate_narrative` /
+`evaluate_retrieval_precision` (deterministic, pure metric functions that
+turn Phase 4's pass/fail citation gate into measured statistics —
+`EvaluationReport`). There is no embedding, no vector search, no real
+(network-backed) LLM provider, no API endpoint, no frontend change, no
+LLM-as-judge, and no shadow ML model. See the Phase 5 completion report for
+the exact, unimplemented list.
 
-No phase beyond 0-4 is marked complete merely because its architecture is
-documented below — everything from Phase 5 onward in this file is a plan,
+No phase beyond 0-5 is marked complete merely because its architecture is
+documented below — everything from Phase 6 onward in this file is a plan,
 not a report of what exists.
 
 ---
@@ -206,12 +210,13 @@ Enforced, not merely stated:
                             v
                      torque.ai  (this package)
       +----------------------------------------------------+
-      |  IMPLEMENTED (Phase 0-4):                            |
+      |  IMPLEMENTED (Phase 0-5):                            |
       |    exceptions.py  config.py  schemas.py  evidence.py  |
       |    citations.py  retrieval.py  prompts.py               |
       |    providers/{base,mock_provider}.py  narrative.py       |
-      |  NOT YET BUILT (Phase 5+):                            |
-      |    evaluation.py  shadow/  providers/ (a real provider) |
+      |    evaluation.py                                           |
+      |  NOT YET BUILT (Phase 6+):                            |
+      |    shadow/  providers/ (a real provider)                |
       +----------------------------------------------------+
                             |
                             | structured, citation-grounded CaseNarrative
@@ -243,7 +248,7 @@ src/torque/ai/
 ├── prompts.py                  IMPLEMENTED (Phase 4) — build_narrative_prompt(), PROMPT_VERSION
 ├── providers/                    IMPLEMENTED (Phase 4) — LLMProvider (ABC), MockProvider (only concrete impl)
 ├── narrative.py                    IMPLEMENTED (Phase 4) — explain_case()
-├── evaluation.py                     NOT BUILT (Phase 5)
+├── evaluation.py                     IMPLEMENTED (Phase 5) — evaluate_narrative(), evaluate_retrieval_precision()
 └── shadow/                             NOT BUILT (Phase 7)
 ```
 
@@ -357,9 +362,9 @@ I/O of any kind. It searches only the one `CaseEvidence` object it is
 handed — an id from a different case's (or a different tenant's) evidence
 set never resolves, because no other evidence set is ever consulted. Never
 raises for an unknown, fabricated, malformed, or empty id — `None` is the
-only failure signal, so a future faithfulness-evaluation layer (Phase 5) can
-treat it as "unsupported claim" data rather than a control-flow exception.
-See INV-61.
+only failure signal, which is exactly what the Phase 5 faithfulness-
+evaluation layer (`torque.ai.evaluation`) treats as "unsupported claim" data
+rather than a control-flow exception. See INV-61 and §9a.
 
 ## 8. Retrieval Architecture — **Implemented, Phase 3**
 
@@ -588,6 +593,99 @@ minimal, existing-convention-based degradation behavior the Phase 4 task
 asked for — Phase 8 owns the full failure-mode hardening harness (timeouts,
 retries, concurrency, etc.), not built here.
 
+## 9a. Faithfulness / Evaluation Architecture — **Implemented, Phase 5**
+
+```
+CaseEvidence + list[PrecedentCase] + CaseNarrative   (the exact objects
+        |                                              one generation call
+        |                                              actually used —
+        v                                              never re-queried)
+torque.ai.evaluation.evaluate_narrative()
+        |
+        v
+EvaluationReport   (5 deterministic metrics, 12 fields, schemas.py)
+```
+
+`evaluate_narrative(narrative, evidence, precedents, *,
+expected_precedent_found=None, retrieval_precision_at_k=None) ->
+EvaluationReport` (`torque.ai.evaluation`) is pure — **no `Session`
+parameter, cannot acquire one, cannot re-query the database.** This is the
+Absolute Data-Source Rule: evaluation reflects only the exact evidence and
+precedent objects a specific generation call was actually given, never a
+fresh read of current state, which prevents "evaluation leakage" (a
+citation judged resolvable against data that has since changed, or that was
+never actually shown to the model). See INV-64.
+
+**`evaluate_retrieval_precision(session, merchant_id, case,
+relevant_case_ids, *, top_k=DEFAULT_TOP_K) -> float` is the sole, deliberate
+exception** — it takes a `Session` because measuring Phase 3 retrieval
+quality genuinely requires calling `find_precedent` again; there is no
+other way to ask what retrieval would currently return. It is kept
+structurally separate so a caller who wants only narrative-faithfulness
+metrics never touches a database at all.
+
+### Five metrics, all deterministic
+
+1. **Citation existence rate** — fraction of every citation id referenced
+   anywhere in the narrative (claim-bearing fields + `precedent.cases[*].
+   evidence_id`) that resolves against the supplied evidence/precedent set,
+   via Phase 2's real `resolve_citation` or an exact precedent
+   `evidence_id` match.
+2. **Citation coverage** — fraction of claim-bearing fields that carry at
+   least one citation id at all, independent of whether it resolves.
+3. **Unsupported-claim rate** — a deterministic lexical-overlap proxy:
+   normalize + tokenize + strip stopwords, then take the overlap ratio
+   between a claim's tokens and its cited evidence's tokens; a claim counts
+   as unsupported if every one of its citations falls below
+   `_OVERLAP_THRESHOLD`. **Explicitly not semantic entailment or an
+   LLM-as-judge** — the task prohibited both (§15/§16); this is a v1
+   proxy, documented as such in-module and in D-144, with LLM-as-judge
+   deferred and no target phase assigned.
+4. **No-precedent correctness** — `narrative.precedent.found` compared
+   against an independently hand-labeled `expected_precedent_found`; `None`
+   when a case makes no claim about precedent correctness.
+5. **Retrieval precision@K** — the one DB-touching metric
+   (`evaluate_retrieval_precision`), comparing `find_precedent`'s current
+   top-K output against an independently hand-labeled `relevant_case_ids`
+   set.
+
+### Calibration: `_OVERLAP_THRESHOLD = 0.2`
+
+The task's own illustrative threshold (0.5) was tried first and failed:
+`MockProvider`'s genuinely-correct, evidence-grounded claims are short
+template sentences whose real content is a small fraction of their tokens
+(most tokens are framing words), so they scored only 0.25-0.33 overlap
+against their own citations — below 0.5, which would have misclassified
+correct claims as unsupported. Recalibrated to `0.2` and verified: every
+real `MockProvider` claim still classifies as supported (0.25-0.33 ≥ 0.2),
+while the task's own illustrative BAD example ("The merchant requested a
+full refund immediately," cited against unrelated evidence) still scores
+0.0, far below threshold either way. A real empirical finding, not an
+arbitrary choice — see D-144.
+
+### Evaluation fixtures
+
+`tests/ai_eval_cases.py::build_eval_cases()` builds 6 real, DB-backed,
+hand-labeled scenarios (`valid_with_real_precedent`,
+`unique_root_cause_no_precedent`, `empty_corpus_no_precedent`,
+`multiple_relevant_precedents`, `adversarial_evidence_text`,
+`missing_diagnosis_evidence_gap`) using the real Phase 1-4 pipeline
+end-to-end (`gather_case_evidence`, `find_precedent`, `explain_case` +
+`MockProvider`) — never a synthetic relevance oracle derived from the
+algorithm under test. Deliberately-corrupted variants (missing/fabricated/
+duplicate citation, an unsupported claim, a wrong `precedent.found`) are
+simple `CaseNarrative.model_copy(update=...)` manipulations living directly
+in `tests/test_ai_evaluation.py`, next to the assertions that use them.
+
+### What this phase does not touch
+
+`narrative.py::_validate_citations` — the hard, generation-time citation
+gate — is untouched (confirmed byte-unchanged); evaluation is a downstream,
+read-only measurement layer over what that gate already enforced, not a
+replacement or a loosening of it. No `EvaluationReport` is ever persisted;
+`evaluate_narrative`/`evaluate_retrieval_precision` are called only from
+tests, with no API endpoint or UI surface (Phase 6+).
+
 ## 10. Planned Shadow ML Architecture — **NOT BUILT** (Phase 7)
 
 **RECOMMENDED**, not yet implemented, and explicitly gated behind Phases 5-6
@@ -605,13 +703,13 @@ schema so the UI cannot render a number without the caveat attached.
 
 ## 11. Security Model
 
-Implemented (Phase 0-4):
+Implemented (Phase 0-5):
 
 - **Static import-boundary test**, `tests/test_ai_boundary.py` — see §3
   item 2. This is the load-bearing enforcement mechanism; everything else in
   this section is defense-in-depth around it. Covers the entire `torque.ai`
   package — `citations.py`, `retrieval.py`, `prompts.py`, `narrative.py`,
-  and `providers/` all included, no per-module allowlists.
+  `evaluation.py`, and `providers/` all included, no per-module allowlists.
 - **Substring write-call sweep** — `tests/test_ai_boundary.py::
   test_ai_package_writes_nothing_at_the_source_level` — an independent,
   deliberately crude second signal (no `.add(`, `.delete(`, `.commit(`, or
@@ -740,7 +838,7 @@ Implemented and tested (Phase 1-4):
 | 2 | Evidence normalization + citation model (`Citation`, `resolve_citation`, stable evidence ids) | **COMPLETE** |
 | 3 | Retrieval / precedent engine (Postgres FTS as a secondary signal over an exact metadata filter) | **COMPLETE** |
 | 4 | LLM case explanation (provider-agnostic, evidence-grounded, citation-bearing) | **COMPLETE** |
-| 5 | Faithfulness / evaluation harness (validates generated citations via Phase 2's `resolve_citation`) | NOT STARTED |
+| 5 | Faithfulness / evaluation harness (validates generated citations via Phase 2's `resolve_citation`) | **COMPLETE** |
 | 6 | Agent Console integration (new read-only API route + UI panel) | NOT STARTED |
 | 7 | Shadow ML model (observational only) | NOT STARTED |
 | 8 | Hardening (adversarial + failure-mode testing) | NOT STARTED |
@@ -757,11 +855,12 @@ Phase 2 (evidence normalization + citation model)
    |
 Phase 3 (retrieval / precedent)
    |
-Phase 4 (LLM case explanation) <---+   <- YOU ARE HERE (complete)
+Phase 4 (LLM case explanation) <---+   (complete)
    |                                |
 Phase 5 (faithfulness evaluation)   |    (consumes Phase 2's resolve_citation
    |                                |     directly — this is why citations had
-Phase 6 (Agent Console integration) |     to exist before generation, not after)
+   |  <- YOU ARE HERE (complete)    |     to exist before generation, not after)
+Phase 6 (Agent Console integration) |
    |                                |
 Phase 7 (shadow ML) -- depends only on Phase 1, mergeable in parallel with 3-6
    |
@@ -774,8 +873,8 @@ Final AI Integration Gate (main-branch merge eligibility)
 
 ## 16. Testing / Evaluation Strategy
 
-Implemented for Phase 0-4 (123 AI-specific tests, all passing — see the
-Phase 4 completion report for exact file/test names): architecture/boundary
+Implemented for Phase 0-5 (110 AI-specific tests, all passing — see the
+Phase 5 completion report for exact file/test names): architecture/boundary
 tests (static import-graph check + write-call substring sweep across the
 whole package), evidence-shape tests (snapshot correctness, timeline
 ordering, citation-reference resolvability), tenant-isolation tests,
@@ -798,16 +897,26 @@ provider call, an end-to-end prompt-injection test (fixed system message +
 JSON-escaped evidence survival), a write-nothing check
 (`db.new`/`.dirty`/`.deleted` empty), and one full pipeline test against the
 real seeded `acc_demo` dataset exercising every Phase 1-4 component
-together. Full existing regression suite (1230 pre-existing tests) re-run
-and green alongside every new AI test added since.
+together. **(Phase 5, `tests/test_ai_evaluation.py`, 22 tests):** citation
+existence rate, citation coverage, the unsupported-claim lexical-overlap
+proxy (including the task's own GOOD/BAD discrimination example),
+no-precedent correctness, retrieval precision@K, detection of every
+deliberately-corrupted narrative variant (missing/fabricated/duplicate
+citation, an unsupported claim, a wrong `precedent.found`), determinism
+(same input -> byte-identical `EvaluationReport`), a cross-check that
+`evaluation.py`'s mirrored citation-collection logic matches `narrative.py`'s
+real one, a full integration test against the real seeded evaluation set,
+and an aggregate-threshold test over the 6-case set. Full existing
+regression suite (1230 pre-existing tests) re-run and green alongside every
+new AI test added since — 1343 total as of Phase 5.
 
-Not yet built: citation-precision/coverage *metrics* (Phase 4 enforces
-citation correctness as a pass/fail gate; Phase 5 turns it into a measured,
-reported statistic), faithfulness/groundedness *scoring*, retrieval-
-relevance evaluation of generated narrative specifically, adversarial
-testing against a *real* language model (only the deterministic
-`MockProvider` path has been adversarially tested — see §12's stated
-scope), shadow-ML leakage/calibration tests — all Phase 5+.
+Not yet built: LLM-as-judge or semantic-entailment scoring (deliberately
+deferred, no target phase — see D-144), any evaluation framework dependency
+(RAGAS or similar, explicitly out of scope per the Phase 5 task), an API
+endpoint or UI surface for evaluation results, adversarial testing against a
+*real* language model (only the deterministic `MockProvider` path has been
+adversarially tested — see §12's stated scope), shadow-ML leakage/
+calibration tests — all Phase 6+.
 
 ## 17. Git / Branch Strategy
 
@@ -823,7 +932,7 @@ landed directly on `ai-layer`, per explicit instruction for this milestone.
 **RECOMMENDED** (not yet exercised): one phase per feature branch off
 `ai-layer` (`ai-layer/phase-N-<slug>`), each independently reviewable,
 merged into `ai-layer` in dependency order — an option for the maintainer to
-adopt for future phases; Phase 0-4 were each built directly on `ai-layer`
+adopt for future phases; Phase 0-5 were each built directly on `ai-layer`
 instead, per explicit instruction each time.
 
 ## 18. Main-Branch Integration Gate
@@ -834,7 +943,7 @@ performed). Before `ai-layer` is eligible to merge into `main`:
 - [ ] Full existing regression suite green, unmodified.
 - [ ] `uv run ruff check .` clean repository-wide.
 - [ ] `alembic upgrade head` succeeds; zero new migrations introduced by the
-      AI program (true through Phase 4: no migration exists under this work).
+      AI program (true through Phase 5: no migration exists under this work).
 - [ ] Every AI-specific test file green.
 - [ ] `tests/test_ai_boundary.py` green — the forbidden-import and
       forbidden-write-call checks both pass.
@@ -848,15 +957,16 @@ performed). Before `ai-layer` is eligible to merge into `main`:
 - [ ] `documentation/ai-memory/{ARCHITECTURE,DECISIONS,MILESTONES,DEFERRED,
       INVARIANTS}.md` updated to reflect the new module(s), in this
       project's own established style (this document + the accompanying
-      decision/invariant/milestone entries are the Phase 0-4 instance of
+      decision/invariant/milestone entries are the Phase 0-5 instance of
       that requirement).
 
 ## 19. Demo Architecture
 
-Not yet applicable — no user-visible AI capability exists (Phase 0-4 is
+Not yet applicable — no user-visible AI capability exists (Phase 0-5 is
 entirely backend; `explain_case` produces a real, citation-grounded
-`CaseNarrative` and has been proven end-to-end against the seeded
-`acc_demo` dataset, but it has no caller outside its own test suite — no
+`CaseNarrative`, `evaluate_narrative` produces a real, measured
+`EvaluationReport`, and both have been proven end-to-end against the seeded
+`acc_demo` dataset, but neither has a caller outside its own test suite — no
 API endpoint, no UI). See the prior research phase's full demo narrative
 for the target end-to-end story once Phase 6 lands; not reproduced here
 since it describes a UI flow that does not exist yet.
@@ -876,6 +986,7 @@ since it describes a UI flow that does not exist yet.
 | D-AI-17 (part 3) | Whether to narrow `test_ai_boundary.py`'s `torque.state_machine` block to a name-level allowlist for `TERMINAL_STATUSES`/`is_terminal` instead of duplicating them | **NEEDS HUMAN DECISION** | Not taken — duplication + cross-test used instead (D-141) |
 | D-142 | Provider architecture: `LLMProvider`+`MockProvider` only, real provider deferred, async boundary needs no new test dependency | **LOCKED** (implemented; see `DECISIONS.md`) | Implemented |
 | D-143 | Narrative safety architecture: orchestrator-authored identity fields, exact-match citation gate, `NarrativeClaim` naming (not `TimelineEntry`) | **LOCKED** (implemented; see `DECISIONS.md`) | Implemented |
+| D-144 | Evaluation architecture: lexical-overlap unsupported-claim proxy empirically calibrated to `0.2`; LLM-as-judge deferred, no target phase; `EvaluationReport` placed in `schemas.py`; citation collection mirrored not imported from `narrative.py`; `evaluate_retrieval_precision` kept structurally separate from the pure `evaluate_narrative` | **LOCKED** (implemented; see `DECISIONS.md`) | Implemented |
 | D-AI-03 | Real LLM provider: Anthropic primary + local/mock fallback | **NEEDS HUMAN DECISION** (API budget/key) | Not built — deferred past Phase 4, no target phase fixed |
 | D-AI-09 | Persistence vs. stateless generation: regenerate narratives on request, no caching table | **LOCKED** (implemented — `explain_case` persists nothing; see INV-63) | Implemented |
 | D-AI-11 | Shadow-model inclusion: build, strictly observational | **RECOMMENDED** | Not built — Phase 7 |
@@ -884,7 +995,7 @@ since it describes a UI flow that does not exist yet.
 
 ## 21. Risk Register
 
-| Risk | Status at Phase 0-4 |
+| Risk | Status at Phase 0-5 |
 |---|---|
 | AI write-path creep | Mitigated by the static, CI-enforced import-boundary test — present and green, covers every module including `narrative.py` and `providers/` |
 | PII leakage into AI evidence | Mitigated by an explicit allowlist + passing content-substring tests; `Counterparty` is never queried; `torque.ai.prompts` serializes only the same already-redacted DTOs, never a superset |
@@ -896,7 +1007,9 @@ since it describes a UI flow that does not exist yet.
 | A provider hallucinating/misreporting its own identity, the case it's explaining, or the prompt version used | Mitigated (Phase 4) — `explain_case` never trusts these fields from the provider; always orchestrator-stamped after validation; proven with a provider configured to lie (`wrong_case_id=True`) |
 | A malformed/failing/adversarial provider response corrupting the caller or leaking internals | Mitigated — every failure mode converges on one exception type (`NarrativeGenerationError`), the raw provider exception is chained for local debugging only, never in the top-level message; the deterministic evidence path is entirely unaffected by a generation failure |
 | Prompt injection against the deterministic mock path | Mitigated and tested end-to-end (fixed system message, JSON-escaped evidence, `rindex`-robust envelope parsing surviving a delimiter-embedding attempt) — **explicitly NOT validated against a real language model**, since none is integrated; real-provider adversarial testing remains an optional future lane (§12) |
-| Hallucination / unsupported-claim *rate*, shadow-model overclaiming, real-provider outage/latency | Not yet applicable/measured — no real provider exists to hallucinate against, no shadow model exists; Phase 4's citation gate structurally prevents an unresolved claim from reaching a caller, but does not (and cannot) measure how *often* a real model would attempt one — that measurement is Phase 5's job |
+| Hallucination / unsupported-claim *rate* against the deterministic `MockProvider` path | Measured (Phase 5) — `unsupported_claim_rate = 0.000` across the 6-case evaluation set, via the deterministic lexical-overlap proxy (`_OVERLAP_THRESHOLD = 0.2`, empirically calibrated — see D-144). **Explicitly not semantic entailment** — a real model's actual hallucination rate remains unmeasured until a real provider exists (Phase 6+ decision, D-AI-03) |
+| The lexical-overlap proxy misclassifying a genuinely-unsupported claim as supported, or vice versa, due to surface-level token overlap rather than true entailment | A real, tracked risk (not eliminated) — mitigated only insofar as the calibration was verified against both the real `MockProvider` output and the task's own illustrative BAD example; LLM-as-judge is the documented, deliberately-deferred mitigation with no target phase (D-144) |
+| Shadow-model overclaiming, real-provider outage/latency | Not yet applicable — no real provider exists, no shadow model exists |
 
 ## 22. Explicit Non-Goals
 
@@ -912,17 +1025,20 @@ performs the merge.
 
 ## 23. Future Path Toward the 500+ Resolved-Case Learned Model
 
-Updated from the prior research phase: **TODAY** is Phase 0-4 as
+Updated from the prior research phase: **TODAY** is Phase 0-5 as
 implemented — a read-only evidence foundation, a resolvable citation
-primitive, a deterministic same-merchant precedent search, and a real,
+primitive, a deterministic same-merchant precedent search, a real,
 citation-grounded, provider-agnostic LLM narrative-generation capability
-(`MockProvider`-backed, no real language model integrated). Nothing is
-predictive yet, and nothing generated is exposed to a human anywhere —
-`explain_case` has no caller outside its own test suite. **Phase 5-9**
-(this document's roadmap) is what remains for a hackathon demo — a
-faithfulness/evaluation harness turning Phase 4's pass/fail citation gate
-into measured statistics, Agent Console integration (an actual "Explain
-this case" button), and an honestly-caveated shadow model. **FUTURE
+(`MockProvider`-backed, no real language model integrated), and a
+deterministic faithfulness-evaluation layer turning that generation
+capability's pass/fail citation gate into measured statistics
+(`EvaluationReport`). Nothing is predictive yet, and nothing generated or
+evaluated is exposed to a human anywhere — neither `explain_case` nor
+`evaluate_narrative` has a caller outside its own test suite. **Phase 6-9**
+(this document's roadmap) is what remains for a hackathon demo — Agent
+Console integration (an actual "Explain this case" button, plausibly
+surfacing evaluation metrics alongside the narrative), an honestly-caveated
+shadow model, adversarial hardening, and demo polish. **FUTURE
 PRODUCTION** requires real channel adapters shipping, real merchant traffic
 accumulating real outcomes, a real LLM provider decision (deferred, D-142),
 and crossing the blueprint's own 500-resolved-case threshold (Blueprint

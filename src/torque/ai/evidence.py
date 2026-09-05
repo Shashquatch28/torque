@@ -259,16 +259,21 @@ def gather_case_evidence(
 ) -> CaseEvidence:
     """The Phase-1 evidence interface.
 
-    Raises `EvidenceNotFoundError` for an unknown case OR a case belonging to
-    a different merchant — the two are never distinguished (never a
+    Raises `EvidenceNotFoundError` for an unknown case, a case belonging to
+    a different merchant, OR a malformed `case_id` (Phase 8 hardening —
+    all three are treated identically: never distinguished, never a
     cross-tenant leak, the same posture `torque.agent_console.resolve` /
-    `CaseNotFoundError` uses, §1.5).
+    `CaseNotFoundError` uses, §1.5). A malformed `case_id` never escapes as
+    a raw `uuid.UUID(...)` `ValueError`.
 
     Read-only: no write, flush-of-a-pending-change, or commit occurs in this
     function or anything it calls.
     """
     scope = TenantScope(session, merchant_id)
-    case_uuid = case_id if isinstance(case_id, uuid.UUID) else uuid.UUID(str(case_id))
+    try:
+        case_uuid = case_id if isinstance(case_id, uuid.UUID) else uuid.UUID(str(case_id))
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise EvidenceNotFoundError(f"malformed case id {case_id!r}") from exc
     case = scope.get(RevenueLeakCase, case_uuid)
     if case is None:
         raise EvidenceNotFoundError(

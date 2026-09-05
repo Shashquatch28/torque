@@ -2936,6 +2936,185 @@ explicitly-assigned §10.8 human-resolution write path.)*
 
 ---
 
+## AI Phase 8 — AI Layer Hardening — COMPLETE
+
+- **Branch:** `ai-layer`. **Not on `main`.**
+- **Verified before starting:** `git status`/`git branch --show-current`
+  confirmed `ai-layer`, clean tree on top of the maintainer's Phase 7
+  commit (`aaf13d3`, "Phase 7 (shadow ML)"). Read the complete
+  `src/torque/ai/` package end to end (every file not already read in a
+  prior phase's own session — `evidence.py`, `citations.py`, `prompts.py`,
+  `narrative.py`, `providers/{base,mock_provider}.py`, `evaluation.py` —
+  read in full for this phase), the Phase 6 API (`src/torque/api/ai.py`)
+  and its Agent Console frontend surface (the AI-specific functions in
+  `src/torque/ui/static/torque.js`), and every existing `tests/test_ai_*.py`
+  / `tests/test_ai_shadow_*.py` / `tests/test_module10_ui.py` test name (to
+  find genuine gaps, not duplicate ~200 already-passing tests).
+- **Objective:** hard­en, not extend — audit Phases 1-7 for security,
+  tenant isolation, prompt/citation integrity, API/frontend failure
+  handling, and resource limits; fix genuine findings; add regression
+  tests that protect those guarantees; touch nothing in the deterministic
+  core.
+- **Architecture audit (produced before any code change, per the task's own
+  instruction) — every entry/exit point traced:**
+  - Data entering `torque.ai`: `merchant_id`/`case_id` (API path params and
+    direct Python callers) + authoritative rows via `TenantScope`/
+    `session.scalars`, plus untrusted `CaseEvent.reasoning`/`.payload` text
+    (always treated as prompt data, never instructions).
+  - Data leaving: `CaseEvidence`, `CaseNarrative`, `EvaluationReport`,
+    `ShadowPrediction`/`ShadowTrainingReport` — frozen, `extra="forbid"`
+    DTOs only, never an ORM row.
+  - Every DB access: `TenantScope` everywhere except `CaseEvent` (ownership
+    verified transitively via an already-tenant-checked `case.case_id`,
+    the same INV-58 posture every module already documents) — confirmed
+    unchanged across evidence/citations(pure)/retrieval/narrative/
+    evaluation/shadow.
+  - Exactly one model/provider boundary (`LLMProvider.structured_generate`,
+    `MockProvider` the only implementation), one API route (`GET
+    /ai/{merchant_id}/cases/{case_id}/explain`), one frontend entry point
+    (`explainCase`, fetched on demand only).
+  - **Five concrete findings** (all fixed, all documented — see D-151):
+    a claim-bearing citation could resolve against the precedent set
+    (and vice versa) — "citation masquerading"; `gather_case_evidence` /
+    `explain_case` / `torque.ai.shadow.scoring.score_case` let a malformed
+    `case_id` escape as a raw `ValueError` instead of
+    `EvidenceNotFoundError`; `explain_case` never enforced `timeout_s`
+    itself (only passed it to the provider); `torque.api.ai.explain` had
+    no explicit catch-all for an unforeseen exception (FastAPI/Starlette's
+    own default was already safe, but implicit); `renderPrecedent`'s
+    `titleize(pc.root_cause_code)` was the one AI-rendered frontend field
+    not wrapped in `esc()`.
+- **Files created:**
+  - `tests/test_ai_hardening.py` — 20 tests (see below).
+- **Files modified:**
+  - `src/torque/ai/narrative.py` — `_validate_citations` rewritten to
+    check each citation's context against only its own id-space
+    (D-151.1); malformed-`case_id` guard (D-151.2); `asyncio.wait_for`
+    around the provider call (D-151.3); `_collect_claim_citation_ids`
+    retained (still cross-tested by `tests/test_ai_evaluation.py`) with an
+    added docstring note explaining why it's no longer called internally.
+  - `src/torque/ai/evidence.py` — malformed-`case_id` guard (D-151.2).
+  - `src/torque/ai/shadow/scoring.py` — malformed-`case_id` guard
+    (D-151.2).
+  - `src/torque/ai/config.py` — `Field(gt=0)` on `max_tokens`/`timeout_s`
+    (D-151.3).
+  - `src/torque/ai/providers/mock_provider.py` — new `delay_seconds`
+    constructor flag (simulates a slow/hanging provider — needed to test
+    D-151.3 without a real network-backed provider; same convention as
+    every other failure-mode flag already there).
+  - `src/torque/api/ai.py` — explicit `except Exception` catch-all mapping
+    to a fixed `500` (D-151.4).
+  - `src/torque/ui/static/torque.js` — `esc(titleize(pc.root_cause_code))`
+    (D-151.5).
+  - `tests/test_module10_ui.py` — +3 tests (the D-151.5 escaping
+    regression, a repeated-click-safety check, and a
+    stale-narrative-on-case-switch check — see below).
+  - `documentation/ai-memory/{AI_BLUEPRINT.md, DECISIONS.md, MILESTONES.md,
+    INVARIANTS.md}` — this entry, D-151, and an in-place amendment to
+    INV-63 item 1 (tightened, not superseded — the underlying guarantee
+    "every citation resolves" is unchanged; *which* id-space each field
+    resolves against is now precise).
+- **Not modified, confirmed unchanged:** `src/torque/state_machine.py`,
+  `src/torque/models/guards.py` (both `git diff HEAD --` empty),
+  `tests/test_ai_boundary.py` (zero edits — the boundary test needed none;
+  every fix stayed inside the existing forbidden-import/write-substring
+  contract), `torque.ai.evaluation` (Phase 5's own citation-collection
+  mirror is untouched — its metric remains a documented lexical proxy, not
+  a security gate, so the masquerade distinction does not apply to it; see
+  D-151's rationale), `torque.ai.shadow.{labels,schemas,features,model,
+  evaluation,training}` (only `scoring.py` needed the malformed-id fix).
+- **New tests, by finding (`tests/test_ai_hardening.py`, 20):**
+  1. Citation masquerading (5): a precedent id cannot satisfy a
+     claim-bearing citation; a current-case id cannot masquerade as a
+     fabricated precedent's `evidence_id`; a genuine precedent still
+     validates correctly end to end (the fix is not overly strict);
+     duplicate flat-citation entries are handled deterministically; an
+     extra/a missing flat-list citation each still fails safely.
+  2. Malformed case ids (3): `gather_case_evidence`, `explain_case`,
+     `torque.ai.shadow.scoring.score_case` each raise
+     `EvidenceNotFoundError`, never a raw `ValueError`.
+  3. Provider timeout (3): a slow provider exceeding `timeout_s` is
+     treated as a generation failure (not a hang); a provider finishing
+     within the timeout still succeeds; `AISettings` rejects a
+     non-positive `timeout_s`/`max_tokens` (both `0` and negative, for
+     both fields) while accepting the smallest still-legal positive
+     values.
+  4. Prompt-boundary adversarial sweep (1): a single test combining a
+     200,000-character string, Unicode edge cases (RTL override, U+200B
+     zero-width space, an emoji), and citation-looking text embedded in
+     `CaseEvent.reasoning` — the system message stays byte-identical, the
+     `<evidence>` envelope stays valid JSON, the adversarial text survives
+     byte-for-byte as data, and the resulting narrative's citations all
+     still resolve against real evidence only.
+  5. API robustness (3): a malformed `case_id` in the URL path returns
+     `422` (FastAPI's own path-parameter validation, confirmed rather than
+     assumed) with no traceback; a malformed provider response maps to a
+     safe `5xx` with no `pydantic`/`ValidationError` text leaked; an
+     unforeseen exception (monkeypatched to bypass both expected
+     `torque.ai` exception types) maps to the new fixed `500` with no
+     exception type name, message content, or traceback in the response.
+  6. Structural PII guards (3, "test this structurally, not only via
+     redaction" per the task's own instruction): every file under
+     `src/torque/ai/` is `ast`-parsed and asserted to never import
+     `Counterparty` by name (present AND future files, automatically);
+     `ActionEvidence`'s Pydantic field set structurally excludes
+     `content_sent`; `CounterpartyRelationshipEvidence`'s field set
+     structurally excludes `name`/`phone`/`email`.
+  7. Retrieval hardening (1): a `root_cause_label` containing SQL- and
+     HTML-special characters (`'; DROP TABLE case_event; --`, `<script>`)
+     is handled safely by `find_precedent` — proven end to end (results
+     still a plain list, the `case_event` table still fully intact and
+     queryable afterward), not merely argued from "SQLAlchemy Core
+     parameterizes function arguments."
+- **New tests, frontend (`tests/test_module10_ui.py`, +3):** the D-151.5
+  escaping regression (`esc(titleize(pc.root_cause_code))` present,
+  the old unescaped form absent); the "Explain this case" button is
+  disabled before the request starts and unconditionally re-enabled after
+  the try/catch block ends (on both the success and error paths — repeated
+  clicks cannot fire overlapping requests, and a failed request never
+  permanently disables the button); the case pane's `#aiPanel` starts
+  empty on every render (`renderConsolePane` fully replaces `pane.innerHTML`
+  per case selection), so no previously-rendered narrative can survive a
+  case switch.
+- **Tests at completion:** `tests/test_ai_hardening.py` — **20** passed
+  (new). `tests/test_module10_ui.py` — **13** passed (10 pre-existing + 3
+  new). `tests/test_ai_*.py` (this glob already includes
+  `tests/test_ai_shadow_*.py` and the new `tests/test_ai_hardening.py`) +
+  `tests/test_module10_ui.py` combined — **210** passed (was 187
+  immediately before this phase — Phase 7's own 177 AI tests + Phase 6's
+  10 UI tests; **+23**). Full regression suite — **1436** passed (was 1413
+  after Phase 7, **+23**), 0 failed, 0 skipped, the same 1 pre-existing
+  cosmetic `StarletteDeprecationWarning`. `ruff check .` clean,
+  repository-wide. `alembic upgrade head`/`heads` -> `0018` (no-op — no
+  migration); roundtrip green (`tests/test_zz_migrations_roundtrip.py`, 1
+  passed). `tests/test_ai_boundary.py` — 4 passed, unmodified.
+- **Verification status:** complete + verified — `uv run pytest
+  tests/test_ai_hardening.py -q` (20 passed), `uv run pytest
+  tests/test_ai_*.py tests/test_module10_ui.py -q` (210 passed), `uv run
+  pytest -q` (full suite, 1436 passed), `uv run ruff check .` (clean,
+  repository-wide), `uv run alembic upgrade head` (succeeds, no new
+  migration; head `0018_escalation_resolution`), `uv run alembic heads`
+  (`0018_escalation_resolution`), `uv run pytest
+  tests/test_zz_migrations_roundtrip.py -q` (1 passed), `git diff HEAD --
+  src/torque/state_machine.py src/torque/models/guards.py` (both empty),
+  `uv run pytest tests/test_ai_boundary.py -q` (4 passed, unmodified),
+  `git log main -1` (unchanged, confirming `main` untouched).
+- **Deviations from the literal task wording:** none — every fix stayed
+  within "harden existing behavior," no new AI capability, no model
+  change, no deterministic-core touch, no new migration, no new API
+  surface, no new UI feature. The one interpretive call was scope: D-151's
+  five findings were judged the genuine, concrete gaps worth fixing;
+  several task bullets (e.g. "maximum prompt/evidence size" for an
+  unbounded `CaseEvent` timeline) were investigated and **deliberately
+  left unfixed, and reported as a known limitation** rather than force a
+  change to already-tested Phase 1 evidence-completeness semantics without
+  a clear, low-risk fix — see `AI_BLUEPRINT.md`'s Phase 8 section for the
+  full reasoning.
+- **Recommended commit message:**
+  `AI Phase 8: AI layer hardening — citation-masquerading fix + malformed-case-id guards + provider-timeout enforcement + API catch-all + frontend escaping fix (D-151), INV-63 tightened; 23 new regression tests, zero deterministic-core changes, no migration`
+
+---
+
 ## (historical) What came next after Module 10
 
 **Module 10 — UI/UX — COMPLETE.** Torque is now a runnable, demo-able product:

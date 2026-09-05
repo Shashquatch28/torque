@@ -53,15 +53,19 @@ def score_case(
 ) -> ShadowPrediction:
     """Score one case with `model` (already fitted — see the module
     docstring). Raises `EvidenceNotFoundError` for an unknown or
-    cross-tenant case, and `torque.ai.exceptions.FeatureExtractionError`
-    (propagated unchanged from `extract_features`) for a case that has not
-    been diagnosed yet. `n_training_cases` is the caller's responsibility to
-    supply accurately (e.g. from the `ShadowTrainingReport` that produced
-    `model`) — this function has no way to independently verify it without
-    re-running training, which it deliberately never does on a hot scoring
-    path.
+    cross-tenant case, OR a malformed `case_id` (Phase 8 hardening — never
+    a raw `uuid.UUID(...)` `ValueError`), and
+    `torque.ai.exceptions.FeatureExtractionError` (propagated unchanged
+    from `extract_features`) for a case that has not been diagnosed yet.
+    `n_training_cases` is the caller's responsibility to supply accurately
+    (e.g. from the `ShadowTrainingReport` that produced `model`) — this
+    function has no way to independently verify it without re-running
+    training, which it deliberately never does on a hot scoring path.
     """
-    case_uuid = case_id if isinstance(case_id, uuid.UUID) else uuid.UUID(str(case_id))
+    try:
+        case_uuid = case_id if isinstance(case_id, uuid.UUID) else uuid.UUID(str(case_id))
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise EvidenceNotFoundError(f"malformed case id {case_id!r}") from exc
     scope = TenantScope(session, merchant_id)
     case = scope.get(RevenueLeakCase, case_uuid)
     if case is None:

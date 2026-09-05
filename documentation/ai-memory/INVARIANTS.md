@@ -985,15 +985,24 @@ violation**.
   {CaseNarrative, NarrativeClaim, PrecedentSection}` (branch `ai-layer`, not
   yet on `main`).
 - **Invariant:**
-  1. **Every citation resolves, or the narrative does not leave
-     `explain_case` at all.** Every id in every claim-bearing field
-     (`current_state`, `root_cause_explanation`, `timeline`,
-     `actions_taken`, `guardrail_explanation`) and every precedent case's
-     `evidence_id` must resolve — via Phase 2's real `resolve_citation`
-     against the current case's evidence, or by exact match against an
-     already-Phase-3-verified precedent `evidence_id`. One unresolved id
-     anywhere raises `NarrativeGenerationError`; nothing is silently
-     dropped, repaired, or replaced with a synthesized substitute.
+  1. **Every citation resolves against the ONE id-space its own field is
+     allowed to cite — never either/or (Phase 8 hardening, D-151 item 1).**
+     Every id in every claim-bearing field (`current_state`,
+     `root_cause_explanation`, `timeline`, `actions_taken`,
+     `guardrail_explanation`) must resolve via Phase 2's real
+     `resolve_citation` against the CURRENT case's own evidence — a
+     precedent's `evidence_id` can never satisfy a claim-bearing field,
+     even though it is "resolvable" in a looser sense (against a
+     different case's evidence set). Every precedent case's `evidence_id`
+     (`precedent.cases[*].evidence_id`) must exactly match one of the
+     `precedents` actually supplied to this generation call — resolving
+     against the current case's own evidence can never substitute for
+     that either. One unresolved id anywhere (in either direction) raises
+     `NarrativeGenerationError`; nothing is silently dropped, repaired, or
+     replaced with a synthesized substitute. See
+     `tests/test_ai_hardening.py::
+     test_precedent_evidence_id_cannot_satisfy_a_claim_bearing_citation` /
+     `::test_current_case_evidence_id_cannot_masquerade_as_a_precedent_citation`.
   2. **The flat `citations` list exactly equals the set of ids actually
      used**, no more and no less — enforced, not merely requested of the
      model.
@@ -1020,11 +1029,12 @@ violation**.
   correction for all four identity fields, a prompt-injection test proving
   the system message never changes and evidence text survives only as data,
   and a `db.new`/`db.dirty`/`db.deleted` empty-check proving zero writes
-  occurred) + `TEST` (`tests/test_ai_boundary.py`'s import-graph check,
-  which covers `narrative.py`, `prompts.py`, and `providers/` exactly as it
-  covers every other module in the package).
+  occurred; `tests/test_ai_hardening.py` — the Phase 8 no-masquerading
+  proof for item 1, both directions) + `TEST` (`tests/test_ai_boundary.py`'s
+  import-graph check, which covers `narrative.py`, `prompts.py`, and
+  `providers/` exactly as it covers every other module in the package).
 - **Tests:** `tests/test_ai_narrative.py`, `tests/test_ai_providers.py`,
-  `tests/test_ai_boundary.py`.
+  `tests/test_ai_hardening.py`, `tests/test_ai_boundary.py`.
 
 ---
 

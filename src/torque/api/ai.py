@@ -82,6 +82,16 @@ async def explain(
     evidence and precedent through the same tenant-scoped, read-only paths
     Phases 1 and 3 already ship, and this handler adds no write, no case
     transition, no `Action`, and no `CaseEvent` of its own.
+
+    **Phase 8 hardening.** The two expected `torque.ai` failure modes map to
+    fixed, hand-written detail strings (unchanged from Phase 6). A final,
+    explicit catch-all maps anything else — a database error, an unforeseen
+    bug, anything not already one of the two named exception types — to a
+    fixed `500` with a generic message, never `str(exc)`. This is an
+    explicit belt-and-suspenders on top of FastAPI/Starlette's own default
+    (`debug=False`, which already never leaks a traceback) — it makes this
+    route's own error contract self-documenting and independently correct
+    rather than relying on that global default holding forever.
     """
     if not settings.enabled:
         raise HTTPException(
@@ -101,6 +111,13 @@ async def explain(
         raise HTTPException(
             status_code=502,
             detail="the AI explanation could not be generated for this case",
+        ) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="an unexpected error occurred while generating this explanation",
         ) from exc
 
 

@@ -60,7 +60,7 @@ Phase 4 — LLM case explanation                           COMPLETE
 Phase 5 — Faithfulness / evaluation                        COMPLETE
 Phase 6 — Agent Console integration                         COMPLETE
 Phase 7 — Shadow ML                                          COMPLETE
-Phase 8 — Hardening                                           NOT STARTED
+Phase 8 — Hardening                                          COMPLETE
 Phase 9 — Demo polish                                          NOT STARTED
 ```
 
@@ -117,9 +117,16 @@ non-optional `disclaimer` + `n_training_cases`). There is still no
 embedding, no vector search, no real (network-backed) LLM provider, and no
 LLM-as-judge. Phase 7 is backend/evaluation-only, per its own governing
 task -- no new API route, no UI surface, no persistence, no migration.
+**Since Phase 8:** every Phase 1-7 module was audited for security, tenant
+isolation, prompt/citation integrity, and failure handling; five genuine
+findings were fixed (citation masquerading, malformed-case-id handling in
+three functions, provider-timeout enforcement, an API exception catch-all,
+and a frontend escaping gap) with 23 new regression tests -- see §10b for
+the full account. No new AI capability, model, provider, or migration was
+added by this phase; it is hardening only.
 
-No phase beyond 0-7 is marked complete merely because its architecture is
-documented below -- everything from Phase 8 onward in this file is a plan,
+No phase beyond 0-8 is marked complete merely because its architecture is
+documented below -- everything from Phase 9 onward in this file is a plan,
 not a report of what exists.
 
 ---
@@ -1080,6 +1087,90 @@ automatically (the file discovery is a recursive `rglob("*.py")`, no test
 change was needed), and every training/scoring test asserts
 `db.new`/`.dirty`/`.deleted` are empty after the call.
 
+## 10b. Hardening Report -- **IMPLEMENTED** (Phase 8)
+
+Phase 8 audited every Phase 1-7 module for security, tenant isolation,
+prompt/citation integrity, API/frontend failure handling, and resource
+limits, per its own governing task. It added no new AI capability, model,
+provider, API route, UI feature, or migration -- see D-151 for the full
+account of the five findings it fixed, and the "AI Phase 8" section of
+`documentation/ai-memory/MILESTONES.md` for the exact file/test breakdown.
+
+**The five findings, in one line each** (all fixed; none exploitable
+through any path that exists in this repository today -- each is a
+pre-emptive integrity/robustness hardening, not a fix for an observed
+incident):
+
+1. **Citation masquerading** -- a claim-bearing field's citation could
+   resolve against the precedent set (and vice versa), because both were
+   checked with a single "resolves against either" predicate. Fixed:
+   each citation is now checked against only the one id-space its field
+   is allowed to cite. INV-63 item 1 tightened in place to reflect this.
+2. **Malformed `case_id`** -- `gather_case_evidence`, `explain_case`, and
+   `torque.ai.shadow.scoring.score_case` let a malformed id string escape
+   as a raw `uuid.UUID(...)` `ValueError` instead of the package's own
+   `EvidenceNotFoundError`. Fixed in all three (not reachable through the
+   one existing API route, whose `case_id: uuid.UUID` path-parameter type
+   FastAPI itself validates before the handler runs -- but reachable by
+   any other direct Python caller, and now behaves identically to "case
+   not found").
+3. **Provider timeout not self-enforced** -- `explain_case` passed
+   `timeout_s` to the provider but never enforced it independently. Fixed
+   with `asyncio.wait_for`; `AISettings.max_tokens`/`.timeout_s` gained a
+   `gt=0` lower bound so a misconfigured zero/negative value fails clearly
+   at settings-construction time.
+4. **No explicit API catch-all** -- `torque.api.ai.explain` mapped the two
+   expected `torque.ai` exceptions but had no final `except Exception`;
+   FastAPI/Starlette's own default (`debug=False`) was already safe, but
+   implicit. Fixed with an explicit, fixed-message `500` catch-all.
+5. **One unescaped frontend field** -- `renderPrecedent`'s `titleize(pc.
+   root_cause_code)` was the one AI-rendered field in `torque.js` not
+   wrapped in `esc()`. `root_cause_code` is a free `String(64)` column
+   with no enum/CHECK (D-014). Fixed.
+
+**A known limitation, investigated and deliberately left unfixed.**
+`torque.ai.evidence._timeline` reads every `CaseEvent` for a case with no
+row-count limit -- for a case with an unusually large history, the
+resulting `<evidence>` prompt payload could grow without bound. This was
+investigated (§8 "Resource controls" of the Phase 8 task) and deliberately
+**not** truncated: doing so would change Phase 1's already-tested
+evidence-completeness semantics (a citation naming an evicted event would
+become unresolvable, silently degrading narrative correctness) and the
+correct design -- which events to keep, and how to keep citation
+resolution consistent regardless -- is a genuine architectural decision,
+not a one-line clamp. The current seeded demo dataset never approaches a
+size where this matters (single-digit-to-low-double-digit events per
+case); this is recorded here as an honest, open limitation rather than
+silently patched or silently ignored. A future phase that needs to address
+it should treat it as its own decision, not a follow-on to this one.
+
+**What Phase 8 confirmed already correct, without needing a fix** (the
+majority of the audit): tenant isolation at every layer (evidence,
+citations, retrieval, narrative, shadow ML, and the one API route) --
+already proven by ~180 pre-existing tests, none weakened or duplicated
+here; PII exclusion (extended with three new *structural*, not merely
+content-based, tests -- see below); retrieval's `top_k` bound (already a
+hard `MAX_TOP_K=10` ceiling, already tested at the boundary); the shadow-ML
+training loop's own bound (`LogisticRegression(max_iter=1000)`, already
+in place since Phase 7); the frontend's repeated-click safety (the
+"Explain this case" button was already disabled for the duration of an
+in-flight request and unconditionally re-enabled after, on both success
+and failure paths) and its stale-state safety (`renderConsolePane` already
+fully replaces the case pane's `innerHTML`, including a fresh empty
+`#aiPanel`, on every case selection) -- both now covered by a regression
+test, since they were previously true only by inspection, not by an
+enforced test.
+
+**Structural PII guards (new).** Beyond the existing content-based
+redaction tests, Phase 8 added source-level (`ast`-based) proof that no
+file under `src/torque/ai/` -- present or future -- ever imports
+`Counterparty` by name, plus schema-field-set proofs that
+`ActionEvidence` cannot carry `content_sent` and
+`CounterpartyRelationshipEvidence` cannot carry `name`/`phone`/`email`.
+These are stronger guarantees than "this test's data didn't leak PII" --
+if the symbol/field cannot exist, no future change to that module's logic
+can accidentally reach it either.
+
 ## 11. Security Model
 
 Implemented (Phase 0-6):
@@ -1249,7 +1340,7 @@ Implemented and tested (Phase 1-4, extended Phase 6):
 | 5 | Faithfulness / evaluation harness (validates generated citations via Phase 2's `resolve_citation`) | **COMPLETE** |
 | 6 | Agent Console integration (new read-only API route + UI panel) | **COMPLETE** |
 | 7 | Shadow ML model (observational only) | **COMPLETE** |
-| 8 | Hardening (adversarial + failure-mode testing) | NOT STARTED |
+| 8 | Hardening (adversarial + failure-mode testing) | **COMPLETE** |
 | 9 | Demo polish + documentation | NOT STARTED |
 
 ## 15. Phase Dependencies
@@ -1273,9 +1364,9 @@ Phase 6 (Agent Console integration) |    (complete — explain_case's first
    |
 Phase 7 (shadow ML) -- depended only on Phase 1, built after Phase 6
    |                    per the sequencing note above (complete)
-   |  <- YOU ARE HERE (complete)
-Phase 8 (hardening) -- depends on everything above
    |
+Phase 8 (hardening) -- depended on everything above (complete)
+   |  <- YOU ARE HERE (complete)
 Phase 9 (demo polish)
    |
 Final AI Integration Gate (main-branch merge eligibility)
@@ -1391,9 +1482,42 @@ since Postgres resolves `now()` to the surrounding transaction's start
 time, making it impossible to construct "before cutoff / after cutoff"
 fixtures inside one test transaction otherwise).
 
+**(Phase 8, `tests/test_ai_hardening.py`, 20 tests; `tests/
+test_module10_ui.py`, +3 tests):** citation masquerading closed in both
+directions (a precedent id rejected as a claim-bearing citation; a
+fabricated current-case-id-as-precedent rejected), plus a confirmation
+that a genuine precedent still validates correctly end to end; duplicate/
+extra/missing flat-citation-list handling; malformed-`case_id` rejection
+at all three call sites that parse one (`gather_case_evidence`,
+`explain_case`, `torque.ai.shadow.scoring.score_case`); provider-timeout
+enforcement (a deliberately slow `MockProvider` exceeding `timeout_s` is
+treated as a generation failure, not a hang; one finishing in time still
+succeeds) and `AISettings` rejecting a non-positive `timeout_s`/
+`max_tokens`; a single adversarial-evidence sweep combining a
+200,000-character string, Unicode edge cases (RTL override, zero-width
+space, an emoji), and citation-looking text embedded in `CaseEvent.
+reasoning` — the system message stays byte-identical, the envelope stays
+valid JSON, and every resulting citation still resolves against real
+evidence only; three new API-robustness tests (malformed `case_id` -> the
+real FastAPI `422`, not `500`; a malformed provider response -> a safe
+`5xx` with no `pydantic`/`ValidationError` text; an unforeseen,
+monkeypatched exception -> the new fixed `500` catch-all, with no
+exception type, message, or traceback leaked); three *structural*
+(`ast`-based / Pydantic-field-set-based, not merely content-based) PII
+guards — no file under `src/torque/ai/` may import `Counterparty` by name,
+`ActionEvidence` cannot carry `content_sent`, `CounterpartyRelationship
+Evidence` cannot carry `name`/`phone`/`email`; one retrieval-hardening
+test proving a `root_cause_label` containing SQL-/HTML-special characters
+is handled safely end to end; and, in the frontend suite, the escaping-gap
+regression (`esc(titleize(pc.root_cause_code))`), a repeated-click-safety
+proof (the "Explain this case" button is disabled for the duration of an
+in-flight request and unconditionally re-enabled after), and a
+stale-narrative-on-case-switch proof (the case pane's `#aiPanel` always
+starts empty on a fresh render).
+
 Full existing regression suite re-run and green alongside every new AI test
-added since — **1413** total as of Phase 7 (was 1359 after Phase 6, **+54**,
-all in the Phase 7 test files above).
+added since — **1436** total as of Phase 8 (was 1413 after Phase 7,
+**+23**: 20 in `test_ai_hardening.py`, 3 in `test_module10_ui.py`).
 
 Not yet built: LLM-as-judge or semantic-entailment scoring (deliberately
 deferred, no target phase — see D-144), any evaluation framework dependency
@@ -1403,14 +1527,18 @@ endpoint or UI surface for `EvaluationReport` or `ShadowTrainingReport`/
 `evaluate_narrative` — see §9a/§9b; Phase 7 stays backend/evaluation-only
 per its own task — see §10a), adversarial testing against a *real*
 language model (only the deterministic `MockProvider` path has been
-adversarially tested — see §12's stated scope), a real (network-backed)
-XGBoost/SHAP shadow model or any model-persistence mechanism (both
-explicitly deferred past the 500-resolved-case gate — see §10a/§23), a
-browser/e2e test harness (none exists in this repository; the Phase 6 task
-explicitly said not to introduce one — UI correctness is proven by
-static-source assertions against `torque.js` plus live manual
-verification, the same posture this whole file's "no browser harness" note
-at the top of `test_module10_ui.py` already documents) — all Phase 8+.
+adversarially tested, now including the Phase 8 sweep above — see §12's
+stated scope), a real (network-backed) XGBoost/SHAP shadow model or any
+model-persistence mechanism (both explicitly deferred past the
+500-resolved-case gate — see §10a/§23), a browser/e2e test harness (none
+exists in this repository; the Phase 6 task explicitly said not to
+introduce one — UI correctness is proven by static-source assertions
+against `torque.js` plus live manual verification, the same posture this
+whole file's "no browser harness" note at the top of `test_module10_ui.py`
+already documents), and a bounded maximum on `torque.ai.evidence`'s
+per-case `CaseEvent` timeline size (investigated in Phase 8, deliberately
+left unbounded — see §10b's "known limitation" note) — all Phase 9+ or
+explicitly deferred pending a future decision.
 
 ## 17. Git / Branch Strategy
 
@@ -1432,32 +1560,54 @@ instead, per explicit instruction each time.
 ## 18. Main-Branch Integration Gate
 
 **RECOMMENDED**, unexercised (no merge into `main` has been proposed or
-performed). Before `ai-layer` is eligible to merge into `main`:
+performed — merging remains a maintainer-only action per §17). Every
+technical item below was re-verified at the end of Phase 8, against the
+real `main...ai-layer` diff, not merely this session's own working tree:
 
-- [ ] Full existing regression suite green, unmodified.
-- [ ] `uv run ruff check .` clean repository-wide.
-- [ ] `alembic upgrade head` succeeds; zero new migrations introduced by the
-      AI program (true through Phase 6: no migration exists under this work).
-- [ ] Every AI-specific test file green.
-- [ ] `tests/test_ai_boundary.py` green — the forbidden-import and
-      forbidden-write-call checks both pass.
-- [ ] `git diff main...ai-layer` touches none of: `state_machine.py`,
+- [x] Full existing regression suite green, unmodified — `uv run pytest -q`,
+      **1436 passed**, 0 failed, 0 skipped.
+- [x] `uv run ruff check .` clean repository-wide.
+- [x] `alembic upgrade head` succeeds; zero new migrations introduced by the
+      AI program across all of Phase 0-8 — `git diff main...ai-layer --stat
+      -- migrations/` is empty; head is `0018_escalation_resolution` on
+      both branches.
+- [x] Every AI-specific test file green — `uv run pytest tests/test_ai_*.py
+      tests/test_module10_ui.py -q` (this glob already includes
+      `tests/test_ai_shadow_*.py` and `tests/test_ai_hardening.py`, both
+      of which start with `test_ai_`), **210 passed**. Exact per-phase
+      breakdowns are in `MILESTONES.md`'s per-phase sections.
+- [x] `tests/test_ai_boundary.py` green — the forbidden-import and
+      forbidden-write-call checks both pass, **unmodified across every
+      phase including Phase 7's new `shadow/` subpackage and Phase 8's
+      hardening fixes** (its file discovery is a recursive `rglob`, so it
+      needed zero edits to keep covering new files).
+- [x] `git diff main...ai-layer` touches none of: `state_machine.py`,
       `models/guards.py`, `coordination/guardrail_engine.py`,
       `events/case_event_writer.py`, `agent_console/resolve.py`, any
-      `execution/*.py`, `scoring/score.py`'s write functions, or any
-      existing migration file.
+      `execution/*.py`, `scoring/score.py`, or any existing migration file
+      — re-verified directly at the end of Phase 8 (`git diff
+      main...ai-layer --stat --` over exactly that file list returns
+      nothing).
 - [x] Demo usability: a human can use whatever AI-facing feature exists,
-      unaided — **now applicable and satisfied as of Phase 6**: Agent
-      Console -> select case -> "Explain this case" -> narrative -> click a
-      citation -> the existing audit trail scrolls to and highlights the
-      cited event, verified live against the real seeded `acc_demo` dataset
-      (see the Phase 6 completion report). Still unmerged; this checkbox
-      records readiness, not that the gate as a whole has been exercised.
-- [ ] `documentation/ai-memory/{ARCHITECTURE,DECISIONS,MILESTONES,DEFERRED,
-      INVARIANTS}.md` updated to reflect the new module(s), in this
-      project's own established style (this document + the accompanying
-      decision/invariant/milestone entries are the Phase 0-6 instance of
-      that requirement).
+      unaided — satisfied as of Phase 6: Agent Console -> select case ->
+      "Explain this case" -> narrative -> click a citation -> the existing
+      audit trail scrolls to and highlights the cited event, verified live
+      against the real seeded `acc_demo` dataset (see the Phase 6
+      completion report). Unaffected by Phase 7 (no UI) or Phase 8 (one
+      escaping fix + two new safety proofs, no behavior change to the
+      happy path).
+- [x] `documentation/ai-memory/{AI_BLUEPRINT,DECISIONS,MILESTONES,
+      INVARIANTS}.md` updated to reflect every module through Phase 8, in
+      this project's own established style.
+
+**Everything on this list is now checked — the branch is technically
+ready for a maintainer's own review and merge decision.** This checkbox
+list is a *technical* readiness gate, not a substitute for the
+maintainer's own review of the five Phase 8 hardening fixes (D-151), the
+Phase 7 model-choice deviation (D-146), or any other judgment call this
+program made without a human in the loop at each step — see each phase's
+own "Deviations from the blueprint" note for the complete list of what a
+reviewer should specifically look at.
 
 ## 19. Demo Architecture
 
@@ -1516,6 +1666,7 @@ count/fields directly after the manual click-through).
 | D-148 | B2B `amount_at_risk` leakage fix: `Σ B2BInvoice.original_amount`, never the live, Module-7-decremented `RevenueLeakCase.amount_at_risk` | **LOCKED** (implemented; see `DECISIONS.md`) | Implemented |
 | D-149 | No persistence, no API route, no UI surface for Phase 7 — backend/evaluation-only, per the Phase 7 task's own instruction | **LOCKED** (implemented; see `DECISIONS.md`) | Implemented |
 | D-150 | Training/evaluation population is single-merchant (tenant-scoped), matching every other `torque.ai` capability; cross-merchant training is out of scope, not silently assumed | **LOCKED** (implemented; see `DECISIONS.md`) | Implemented |
+| D-151 | Phase 8 hardening (five bundled sub-decisions): citation-masquerading fix, malformed-`case_id` guards in three functions, `asyncio.wait_for`-enforced provider timeout + `AISettings` `gt=0` bounds, an explicit API exception catch-all, and a frontend `esc()` escaping fix | **LOCKED** (implemented; see `DECISIONS.md`) | Implemented |
 
 ## 21. Risk Register
 
@@ -1525,7 +1676,7 @@ count/fields directly after the manual click-through).
 | PII leakage into AI evidence | Mitigated by an explicit allowlist + passing content-substring tests; `Counterparty` is never queried; `torque.ai.prompts` serializes only the same already-redacted DTOs, never a superset |
 | Cross-tenant retrieval / citation resolution | Mitigated by exclusive `TenantScope` use in evidence-gathering, retrieval, and narrative generation + passing cross-tenant tests at every layer, `resolve_citation`'s complete inability to reach any evidence set other than the one it is given (no DB access at all), and a fail-fast `ValueError` on a `case`/`merchant_id` mismatch |
 | Fabricated/placeholder "evidence" standing in for missing data | Mitigated — `evidence_gaps` is explicit, `None` stays `None`, `find_precedent` returns `[]`, `explain_case` reports gaps rather than inventing a diagnosis — all tested |
-| A citation silently resolving to the wrong record, or a generated narrative citing something unresolvable | Mitigated — exact-match-only resolution at every layer (INV-61/62/63); `_validate_citations` rejects the whole narrative on any unresolved or mismatched citation, never repairs or discards silently |
+| A citation silently resolving to the wrong record, or a generated narrative citing something unresolvable | Mitigated — exact-match-only resolution at every layer (INV-61/62/63); `_validate_citations` rejects the whole narrative on any unresolved or mismatched citation, never repairs or discards silently. **Tightened in Phase 8** — a precedent's `evidence_id` could previously "resolve" (in a loose either/or sense) for a claim-bearing field, and vice versa; each citation's context now determines the one id-space it must resolve against (D-151.1, INV-63 item 1) |
 | An in-flight case surfacing as false precedent, or a case appearing as its own precedent | Mitigated (Phase 3) — terminal-only filter (cross-tested against the real `is_terminal`) + explicit self-exclusion, both tested directly |
 | The duplicated terminal-status mirror drifting from `torque.state_machine` over time | A real, tracked risk (not eliminated) — mitigated by an exhaustive cross-check test that fails the build the moment the two diverge; see D-141 |
 | A provider hallucinating/misreporting its own identity, the case it's explaining, or the prompt version used | Mitigated (Phase 4) — `explain_case` never trusts these fields from the provider; always orchestrator-stamped after validation; proven with a provider configured to lie (`wrong_case_id=True`) |
@@ -1542,6 +1693,10 @@ count/fields directly after the manual click-through).
 | **(Phase 6, new surface)** A citation id becoming an injected/arbitrary DOM selector | Mitigated — `focusCitation()` validates against a strict `^case_event:(\d+)$` pattern *before* any selector is built; a non-matching id never reaches `querySelector` at all, it falls back to a toast. Tested at the source level (`test_ui_citation_click_navigates_to_the_existing_event_timeline`); every real citation id Phase 2 ever produces is one of exactly five fixed `source_type` prefixes, none of which can contain selector metacharacters by construction |
 | **(Phase 6, new surface)** The AI API's own error responses leaking a raw provider exception, a Python module path, or a stack trace to an unauthenticated-by-this-layer caller | Mitigated — every `HTTPException.detail` in `torque.api.ai` is a fixed, hand-written string; the frontend independently never interpolates `e.message` in the AI panel either (belt-and-suspenders — a backend wording change alone cannot leak new detail through the UI). Tested both ways: `test_explain_provider_failure_maps_to_5xx_without_leaking_internals` / `test_explain_fabricated_citation_maps_to_5xx` at the API layer, `test_ui_ai_error_states_never_leak_raw_exception_text` at the UI layer |
 | **(Phase 6, new surface)** The AI endpoint becoming a de facto write path via a future careless change (e.g. someone adding a "save this narrative" button later) | Mitigated today by construction (one `GET` route, `explain_case` itself writes nothing) and proven (`test_explain_performs_no_write`) — **not** mitigated by any NEW structural gate beyond what Phases 0/4 already built; a future write feature would need its own explicit read/write boundary decision, not an assumption that this endpoint's current read-only-ness is permanent by default |
+| **(Phase 8)** A provider that ignores its own `timeout_s` hanging a request indefinitely | Mitigated — `explain_case` now enforces `timeout_s` itself via `asyncio.wait_for`, independent of provider cooperation; a misconfigured non-positive `timeout_s`/`max_tokens` is rejected at `AISettings` construction time (`Field(gt=0)`) rather than surfacing as a confusing runtime failure (D-151.3) |
+| **(Phase 8)** An unforeseen exception in the AI API route leaking internal detail | Mitigated — an explicit `except Exception` catch-all now maps anything not already one of the two named `torque.ai` exception types to a fixed `500` message; FastAPI/Starlette's own default (`debug=False`) was already safe, but this makes the route's own contract explicit and independently correct rather than relying on that global default (D-151.4) |
+| **(Phase 8)** A malformed `case_id` escaping as a raw, unclassified `ValueError` from any of the three functions that parse one | Mitigated — `gather_case_evidence`, `explain_case`, and `torque.ai.shadow.scoring.score_case` all now raise `EvidenceNotFoundError` for a malformed id, identical to "not found" (D-151.2). Not reachable through the one existing API route today (FastAPI validates the `uuid.UUID` path parameter before the handler runs) — this closes the gap for any other direct caller |
+| **(Phase 8)** An unbounded per-case `CaseEvent` timeline making the generated prompt arbitrarily large | **Explicitly not mitigated — a known, open limitation, investigated and left as-is on purpose.** Truncating `torque.ai.evidence._timeline` would change already-tested Phase 1 evidence-completeness semantics and risk making a cited event unresolvable; the current seeded demo dataset never approaches a size where this matters. See §10b's "known limitation" note |
 
 ## 22. Explicit Non-Goals
 
@@ -1577,6 +1732,19 @@ every training/scoring call; no demo-seed data was added, redesigned, or
 rebalanced to manufacture a larger training population — the 7-case
 scarcity is reported as a limitation, not worked around; no vector
 database, no embeddings, no real (network-backed) model API, no GPU.
+
+**Reaffirmed after Phase 8 specifically:** no LLM provider was added; no
+change to the shadow-ML model choice (still `LogisticRegression`, not
+upgraded merely to chase a better metric on 6 seeded cases — the task's
+own explicit instruction); no embeddings, vector search, or new AI product
+feature; no modification to `src/torque/state_machine.py` or
+`src/torque/models/guards.py` (`git diff HEAD --` empty for both,
+re-verified at the end of this phase); no `Action` created, no
+communication sent, no `PromiseToPay` behavior altered, no autonomous
+agent behavior introduced; no new migration (`alembic heads` unchanged at
+`0018_escalation_resolution`); every fix in D-151 is strictly narrowing/
+defensive — none weakens `tests/test_ai_boundary.py`, none broadens what
+`torque.ai` is allowed to read or write.
 
 ## 23. Future Path Toward the 500+ Resolved-Case Learned Model
 

@@ -140,6 +140,42 @@ def test_ui_ai_error_states_never_leak_raw_exception_text():
     )[0]
 
 
+def test_ui_precedent_table_escapes_root_cause_code():
+    """Phase 8 hardening: `root_cause_code` is a free `String(64)` column
+    with no enum/CHECK (D-014) — every other AI-rendered field already goes
+    through `esc()` before `innerHTML`; `renderPrecedent`'s
+    `titleize(pc.root_cause_code)` did not, and was fixed to
+    `esc(titleize(pc.root_cause_code))`. Guards against this regressing."""
+    js = (STATIC_DIR / "torque.js").read_text(encoding="utf-8")
+    assert "esc(titleize(pc.root_cause_code))" in js
+    assert "${titleize(pc.root_cause_code)}" not in js
+
+
+def test_ui_explain_button_disabled_during_request_and_reenabled_after():
+    """Phase 8 hardening: repeated clicks on "Explain this case" must not
+    fire overlapping requests while one is already in flight, and must not
+    permanently disable the button after a failed request either."""
+    js = (STATIC_DIR / "torque.js").read_text(encoding="utf-8")
+    body = js.split("async function explainCase")[1].split("\nasync function")[0]
+    disable_idx = body.index("btn.disabled = true;")
+    try_idx = body.index("try {")
+    reenable_idx = body.rindex("btn.disabled = false;")
+    catch_idx = body.index("} catch")
+    # disabled BEFORE the request starts, re-enabled AFTER the try/catch
+    # block ends (unconditionally -- on both the success and error paths)
+    assert disable_idx < try_idx < reenable_idx
+    assert catch_idx < reenable_idx
+
+
+def test_ui_ai_panel_starts_empty_so_no_stale_narrative_survives_a_case_switch():
+    """Phase 8 hardening: `renderConsolePane` fully replaces the case pane's
+    `innerHTML` (including a fresh, empty `#aiPanel`) every time a case is
+    selected -- a previously-rendered narrative can never bleed into a
+    newly-selected case's pane."""
+    js = (STATIC_DIR / "torque.js").read_text(encoding="utf-8")
+    assert '<div id="aiPanel"></div>' in js
+
+
 def test_ui_over_time_graph_renders_only_real_backend_values():
     js = (STATIC_DIR / "torque.js").read_text(encoding="utf-8")
     # the zero-padding fix reads only the real `recovered_amount` the

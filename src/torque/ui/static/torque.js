@@ -435,7 +435,7 @@ function renderPrecedent(p) {
     <th>Evidence</th></tr></thead><tbody>
     ${p.cases.map((pc) => `<tr>
       <td class="faint mono">${esc(pc.case_id).slice(0, 8)}</td>
-      <td>${titleize(pc.root_cause_code)}</td>
+      <td>${esc(titleize(pc.root_cause_code))}</td>
       <td>${pc.recovered ? '<span class="pill green">Recovered</span>' : '<span class="pill">Not recovered</span>'}
         <span class="faint">${esc(pc.outcome_summary)}</span></td>
       <td>${citeGroup([pc.evidence_id])}</td>

@@ -16,10 +16,17 @@ an outright exception, schema-invalid output, a non-`BaseModel` return
 value, a fabricated citation, and a wrong self-reported `case_id` (to prove
 `torque.ai.narrative.explain_case` never trusts it). None of these flags
 are used by the "happy path" tests, and none require network access either.
+
+**Phase 8 addition: `delay_seconds`.** Simulates a slow/hanging provider —
+needed to test `torque.ai.narrative.explain_case`'s Phase 8 hardening
+(`asyncio.wait_for`-enforced `timeout_s`) without a real network-backed
+provider. Same convention as every other flag here: off by default, opted
+into only by the specific test that needs it.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 from pydantic import BaseModel
@@ -82,6 +89,7 @@ class MockProvider(LLMProvider):
         return_wrong_type: bool = False,
         fabricate_citation: bool = False,
         wrong_case_id: bool = False,
+        delay_seconds: float = 0.0,
     ) -> None:
         self._provider_id = provider_id
         self._raise_exception = raise_exception
@@ -89,6 +97,7 @@ class MockProvider(LLMProvider):
         self._return_wrong_type = return_wrong_type
         self._fabricate_citation = fabricate_citation
         self._wrong_case_id = wrong_case_id
+        self._delay_seconds = delay_seconds
 
     def provider_id(self) -> str:
         return self._provider_id
@@ -103,6 +112,9 @@ class MockProvider(LLMProvider):
         timeout_s: float,
     ) -> BaseModel:
         del system, max_tokens, timeout_s  # unused by this deterministic mock
+
+        if self._delay_seconds:
+            await asyncio.sleep(self._delay_seconds)
 
         if self._raise_exception is not None:
             raise self._raise_exception

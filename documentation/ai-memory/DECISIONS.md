@@ -3426,6 +3426,98 @@ BY D-0NN`.
 
 ---
 
+## D-151 — Phase 8 hardening: five bundled sub-decisions, one milestone
+
+- **Milestone:** AI Phase 8 — AI Layer Hardening (`ai-layer` branch, not
+  `main`).
+- **Decision (five bundled sub-decisions, same pattern as D-145):**
+  1. **Citation masquerading closed — each citation is checked against
+     only the one id-space its field is allowed to cite.**
+     `torque.ai.narrative._validate_citations` previously accepted a
+     claim-bearing field's citation (`current_state`,
+     `root_cause_explanation`, `timeline`, `actions_taken`,
+     `guardrail_explanation`) if it resolved against *either* the current
+     case's evidence *or* the precedent set (`cid in precedent_ids or
+     resolve_citation(evidence, cid) is not None`) — meaning a precedent's
+     `evidence_id` could "masquerade" as a current-case citation, and
+     (symmetrically) a fabricated `precedent.cases[*].evidence_id` could
+     be satisfied merely by resolving against the current case's own
+     evidence. Fixed: claim-bearing citations now resolve only via
+     `resolve_citation(evidence, ...)`; `precedent.cases[*].evidence_id`
+     values are checked only for exact membership in the real
+     `precedents` supplied to that call. Not exploitable through the only
+     provider that exists today (`MockProvider` never conflates the two),
+     and not exploitable through the frontend (`focusCitation` only
+     searches the current case's own rendered DOM) — this is a genuine,
+     pre-emptive integrity hardening ahead of a real LLM provider (D-AI-03),
+     not a fix for an observed incident.
+  2. **Malformed `case_id` never escapes as a raw `ValueError`.**
+     `torque.ai.evidence.gather_case_evidence`,
+     `torque.ai.narrative.explain_case`, and
+     `torque.ai.shadow.scoring.score_case` all parsed a caller-supplied
+     `case_id: uuid.UUID | str` via a bare `uuid.UUID(str(case_id))`. A
+     malformed string (not FastAPI-reachable today, since the one route
+     types its path parameter `uuid.UUID` and FastAPI validates it before
+     the handler runs — but reachable by any other direct Python caller,
+     including tests) let a raw `uuid.UUID` `ValueError` escape instead of
+     the package's own `EvidenceNotFoundError`. Fixed in all three: a
+     malformed id is now treated identically to "not found" — the same
+     never-distinguished posture §1.5/INV-60 already establish for
+     unknown-vs-cross-tenant.
+  3. **`explain_case` now enforces `timeout_s` itself, via
+     `asyncio.wait_for`.** Previously `timeout_s` was passed to the
+     provider (which is *expected* to respect it, per `LLMProvider`'s own
+     docstring) but never enforced independently — a provider that
+     ignored its own timeout parameter (a bug, or a future real
+     network-backed provider under unusual load) could hang the call
+     indefinitely. `asyncio.wait_for` is a backstop on top of, not a
+     replacement for, the provider's own responsibility. Alongside this,
+     `AISettings.max_tokens`/`.timeout_s` gained a `gt=0` `Field` bound —
+     without this, `TORQUE_AI_TIMEOUT_S=0` (or negative) from the
+     environment would make the new `wait_for` wrapper fail every
+     generation call instantly with a confusing error, rather than being
+     rejected clearly at settings-construction time.
+  4. **`torque.api.ai.explain` gained an explicit catch-all.** The two
+     expected `torque.ai` exceptions still map to their existing fixed
+     detail strings (D-145, unchanged). A final `except Exception` now
+     maps anything else to a fixed `500` ("an unexpected error occurred
+     while generating this explanation"), never `str(exc)`. FastAPI/
+     Starlette's own default (`debug=False` — the only mode `create_app()`
+     ever uses) already never leaks a traceback to the caller; this
+     catch-all is explicit belt-and-suspenders so this route's error
+     contract is self-documenting and does not silently depend on that
+     global default holding forever.
+  5. **`renderPrecedent`'s `titleize(pc.root_cause_code)` is now
+     `esc()`-wrapped.** `root_cause_code` is a free `String(64)` column
+     with no enum/CHECK (D-014) — every other AI-rendered field in
+     `torque.js` already went through `esc()` before `innerHTML`; this one
+     did not. Not exploitable by any code path that exists today (only
+     Module 3's deterministic diagnosis engine ever writes
+     `root_cause_code`, and it writes only known diagnosis-code strings),
+     but a real, live, unescaped-HTML rendering gap regardless of current
+     exploitability — the AI panel is the one place in the whole Agent
+     Console where this field reaches `innerHTML` unescaped.
+- **Alternatives considered:** leaving item 1 as "acceptable since
+  `MockProvider` never does it" — rejected, Phase 8's whole purpose is
+  making the architecture safe for a future real provider, not merely
+  safe for the one deterministic mock that exists today. A dedicated
+  `TORQUE_AI_PROVIDER_TIMEOUT_HARD_CAP` setting distinct from
+  `AISettings.timeout_s` for item 3 — rejected as a second, redundant
+  configuration knob; the existing `timeout_s` already means "the budget
+  for one `structured_generate` call," which is exactly what `wait_for`
+  now enforces. A middleware-level request timeout for item 4 — rejected
+  as broader than needed (Phase 8 is scoped to the AI layer, not a
+  repository-wide middleware change) and less precise than a route-local
+  catch-all with a fixed, AI-specific message.
+- **Consequence:** 23 new regression tests (`tests/test_ai_hardening.py`,
+  20; `tests/test_module10_ui.py`, +3) — see
+  `documentation/ai-memory/MILESTONES.md`'s "AI Phase 8" section for the
+  exact breakdown. No behavior change to any passing happy-path test; all
+  five fixes are strictly narrowing/defensive.
+- **Status:** IN FORCE.
+
+---
+
 ## Notes not recorded as decisions
 
 - The **Git-history incident of 2026-09-02** (a bad commit briefly on `main`,

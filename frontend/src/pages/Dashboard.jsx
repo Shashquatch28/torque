@@ -6,6 +6,7 @@ import { useExplainedCases } from "../lib/useExplainedCases.js";
 import { api } from "../lib/api.js";
 import { num, pct, pctN, pctSigned, prob, rupees, titleize, friendlyError, STATUS_EDGE } from "../lib/format.js";
 import { DashboardSkeleton } from "../components/Skeletons.jsx";
+import { HeroCounter } from "../components/HeroCounter.jsx";
 import { LoopPipeline } from "../components/LoopPipeline.jsx";
 import { LegBars } from "../components/LegBars.jsx";
 import { RecoveryOverTimeChart } from "../components/AreaChart.jsx";
@@ -108,7 +109,9 @@ export function Dashboard() {
     <>
       <div className="panel hero">
         <div className="label">Revenue recovered by Torque</div>
-        <div className="big mono">{rupees(summary.recovered_amount)}</div>
+        <div className="big mono">
+          <HeroCounter value={summary.recovered_amount} format={rupees} duration={1200} />
+        </div>
         <div className="sub">
           {num(summary.recovered_case_count)} recovered cases &middot; {pct(summary.amount_recovery_rate)} of at-risk revenue
           &middot; self-recovered (not counted): {rupees(summary.self_recovered_amount)}

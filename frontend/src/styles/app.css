@@ -377,8 +377,20 @@ select, input[type=text], input[type=number] {
 .loop-stage.recovered .v { color: var(--green); font-size: 27px; }
 .loop-arrow {
   flex: none; display: flex; align-items: center; justify-content: center; width: 34px;
-  color: var(--ink-faint); font-size: 15px;
 }
+.loop-flow { width: 34px; height: 16px; overflow: visible; }
+.loop-flow-line { stroke: var(--ink-faint); stroke-width: 2; fill: none; }
+.loop-flow-head { fill: var(--ink-faint); }
+.loop-arrow.active .loop-flow-line { stroke-dasharray: 5 4; animation: loopflow 1s linear infinite; }
+@keyframes loopflow { to { stroke-dashoffset: -18; } }
+@media (prefers-reduced-motion: reduce) { .loop-arrow.active .loop-flow-line { animation: none; } }
+
+/* count-up (HeroCounter): the pulse is color-agnostic on purpose — it runs
+   inside stage tiles of different accent colors and the dashboard hero, and
+   gold stays reserved for AI-sourced content only (never a KPI re-trigger). */
+.counter-pulse { display: inline-block; animation: counterpulse .5s ease-out; }
+@keyframes counterpulse { 0% { opacity: .5; transform: scale(1.06); } 100% { opacity: 1; transform: scale(1); } }
+@media (prefers-reduced-motion: reduce) { .counter-pulse { animation: none; } }
 .loop-note {
   margin-top: 10px; font-size: 12px; color: var(--ink-dim); display: flex; align-items: center; gap: 6px;
 }

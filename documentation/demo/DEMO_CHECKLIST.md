@@ -5,9 +5,14 @@ or a real click — verify, don't assume.
 
 ## Environment
 
-- [ ] `docker ps` shows `db` (and `redis`, if the AI/execution demo needs it)
-      as `healthy`.
+- [ ] `docker ps` shows `db` **and** `redis` as `healthy` — 4 of the 7 Live
+      Demo scenarios need Redis (they dispatch a real Celery task); only the
+      3 restraint scenarios work with `db` alone.
 - [ ] `uv run alembic current` reports `0018_escalation_resolution` (head).
+- [ ] `src/torque/ui/static/assets/` contains a built JS + CSS file (if you
+      edited `frontend/src/`, re-run `cd frontend && npm run build` — the
+      dev server has no `--reload`, and neither does a stale frontend build
+      pick itself up automatically).
 - [ ] `uv run python -m torque` is running; `http://127.0.0.1:8000` loads
       the shell (nav bar, flow ribbon) within a couple of seconds.
 - [ ] If you want the AI Assessment to work: the process was started with

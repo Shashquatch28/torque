@@ -1,5 +1,17 @@
 # Torque UI/UX Blueprint
 
+> **Historical-architecture note:** this blueprint was written against the
+> hand-written vanilla JS/CSS SPA (`src/torque/ui/static/{index.html,
+> torque.css,torque.js}`) that implemented it at the time. The frontend has
+> since migrated to React + Vite (source in `frontend/`, built into that same
+> `src/torque/ui/static/` directory) — see
+> [`documentation/demo/ARCHITECTURE.md`](demo/ARCHITECTURE.md) for that
+> decision record. Every design decision below (color semantics, spacing/
+> radius scale, component boundaries, the AI-gold accent rule, the
+> responsive tiers) is still the current, accurate design system — it was
+> ported into the React components largely verbatim — only the literal file
+> names in this document's own text are no longer current.
+
 **Scope of this document:** presentation-layer redesign only. Torque's domain/state-machine logic, guardrails, tenant isolation, and the AI layer (Phases 0–8, `ai-layer` branch) are stable and are treated as fixed contracts. This blueprint is grounded directly in the current repository — `src/torque/ui/static/{index.html,torque.css,torque.js}`, `src/torque/api/{ai,agent_console,reporting}.py`, and `src/torque/ai/schemas.py` — not in assumptions about what a "typical" product like this looks like. Every screen, field, and endpoint named below is verified against that code; where a recommendation would require a backend change, it is called out explicitly in §26 and nowhere else.
 
 ---

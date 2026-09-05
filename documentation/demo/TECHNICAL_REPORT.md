@@ -128,12 +128,25 @@ point estimate with an honest interval, not proof of causation.
 
 ## 7. Frontend
 
-Hand-written HTML/CSS/vanilla JS, no build step, no framework — see
-[`ARCHITECTURE.md`](ARCHITECTURE.md) for the full reasoning and the specific
-UI/UX decisions. A standing test (`tests/test_module10_ui.py`) scans the
-shipped JS source and fails the build if it ever computes a metric/score/rate
-itself (e.g. a literal `probability *` or `* amount_at_risk` substring) —
-architecturally enforcing "render backend data, never recompute it."
+**React 18 + Vite**, source in `frontend/`, built into
+`src/torque/ui/static/` and served by the same FastAPI process on the same
+port — no Node at runtime, no backend change required to serve it. This is a
+migration from an earlier hand-written vanilla JS/CSS SPA, made as a
+deliberate, evidence-based decision once the UI's actual component-reuse and
+state-management needs (five screens sharing a priority-feed row, a gauge,
+an interactive chart, and a citation-anchored AI panel) outgrew what
+render-functions-and-`innerHTML` could comfortably sustain; see
+[`ARCHITECTURE.md`](ARCHITECTURE.md) for the full decision record, including
+the one real regression (a case-switch state bug) the migration surfaced and
+fixed. `react-router-dom`'s `HashRouter` preserves the project's original
+`#/dashboard`, `#/cases/:id` URL scheme exactly.
+
+A standing test (`tests/test_module10_ui.py`) scans the `frontend/src/`
+source tree and fails the build if it ever computes a metric/score/rate
+itself (e.g. a literal `probability *` or `* amount_at_risk` substring), or
+if any file uses `dangerouslySetInnerHTML` — architecturally enforcing
+"render backend data, never recompute it, never bypass the framework's
+default escaping."
 
 ## 8. Testing
 

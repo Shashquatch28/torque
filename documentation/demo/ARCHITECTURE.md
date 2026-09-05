@@ -85,65 +85,122 @@ callable interface the execution layer calls before every action. Every
 is the data source for the dashboard's "Where Torque deliberately held back"
 panel; nothing is computed retroactively.
 
-## Frontend: why vanilla JS, and what that costs
+## Frontend: the React migration — decision record
 
-The frontend is a hand-written SPA — `index.html` + `torque.css` +
-`torque.js`, hash-routed, no build step, served by the same FastAPI process
-on the same port as the API (`torque.api.ui`). This was evaluated twice
-during the project (once for the initial UI/UX overhaul, once explicitly
-re-asked whether a framework migration was warranted) and kept both times.
-The reasoning:
+The frontend went through three phases: (1) a hand-written vanilla SPA
+(`torque.js`/`torque.css`/`index.html`) for most of the project, (2) a
+deliberate re-evaluation of that choice against a fifteen-point criteria
+list (visual quality, component reuse, maintainability, state management,
+routing, interactive visualization, responsive behavior, accessibility,
+testability, development velocity, demo reliability, ability to present a
+convincing AI product, migration risk, remaining time, and the actual repo
+state), and (3) a full migration to **React 18 + Vite**
+(`frontend/`) once that evaluation genuinely favored it — not by default,
+and not merely because "vanilla was already there."
 
-**What a framework would have bought:** component-file organization,
-built-in reactivity, a component ecosystem for charts/animation.
+**Why vanilla held up for as long as it did.** Every interaction the product
+needed — a hover-driven area chart, an interactive semicircular gauge,
+citation-anchored scroll-and-flash, a live-polling activity feed, table→card
+responsive transforms — is achievable in plain JS and inline SVG, and was
+implemented and verified working that way across several UI/UX passes. The
+actual quality problems found in those passes (generic visual hierarchy, a
+missing money-flow narrative, weak component consistency) were *layout and
+composition* problems, not technology problems, and were fixed without a
+framework.
 
-**What it would have cost:** a build step (npm/bundler) in a project whose
-explicit constraint is "one command, offline, free-tier, no Node" (see the
-root README's stack line); a rewrite of every existing render function under
-time pressure, with real risk of a partially-migrated, partially-working
-app; and — critically — none of the actual reported problems (generic
-visual hierarchy, weak product storytelling, a missing money-flow narrative)
-were caused by the technology. They were caused by *layout and composition*
-decisions, which are exactly as fixable in vanilla JS/inline SVG as in JSX.
+**Why the calculus changed.** As the UI grew — five screens now genuinely
+sharing components (the priority-feed row used on both the dashboard and the
+Agent Console queue; the gauge; the area chart; the AI assessment card; the
+evidence/timeline/precedent trio) — the vanilla approach's costs stopped
+being hypothetical:
 
-**What vanilla JS cannot do that a framework would help with**, honestly:
-fine-grained reactive state diffing (this app instead does targeted DOM
-patches — e.g. the dashboard's chart-bucket switch replaces one `<div>`, not
-the whole page), and a component-file structure for very large component
-trees (this app instead uses one file with named render functions per
-component — `loopPipeline()`, `feedRow()`, `evidencePanel()`, `confidenceRing()`,
-etc. — which stays legible at this app's actual size, five screens).
+- **Component reuse** was already emulated with named render functions
+  (`feedRow()`, `confidenceRing()`, …) returning HTML strings — functionally
+  a component model, but without prop typing, without a co-located
+  stylesheet-per-component convention, and with manual DOM re-querying after
+  every `innerHTML` replace to re-attach event listeners.
+- **State management** (which case is selected, is the AI narrative loading,
+  which chart bucket is active) lived in a mix of module-level `let`
+  variables and DOM `dataset` attributes — workable at five screens, a real
+  liability if the product grows.
+- **Testability** of the old approach was static-source-string-scanning
+  (`tests/test_module10_ui.py` asserted literal substrings like
+  `'id="doExplain"'` existed in the shipped file) — it could prove a string
+  was present, never that a state transition actually happened correctly
+  (see the case-switch bug below, which static scanning would never have
+  caught).
 
-**The concrete guardrail against regressing on this decision silently:**
-`tests/test_module10_ui.py` and `tests/test_module9b_ui.py` assert, by
-scanning the shipped source, that specific API paths, specific DOM
-structures, and specific escaping/error-handling patterns exist — a future
-change (framework migration or otherwise) that breaks these contracts fails
-the build, not just a visual review.
+**What the migration actually changed.** `frontend/src/` now has real
+component boundaries (`components/`, `pages/`, `context/`, `lib/`), React
+state (`useState`/`useEffect`) instead of module-level mutable variables,
+and `react-router-dom`'s `HashRouter` preserving the exact same
+`#/dashboard`, `#/cases/:id`, `#/console/:id`, `#/demo` URL scheme so nothing
+about the backend's contract with the frontend changed. `npm run build`
+writes straight into `src/torque/ui/static/`, so `torque.api.ui` and
+`torque.api.app` required **zero** changes — the backend still just serves
+whatever is on disk in that directory.
+
+**Migration risk, and what it actually surfaced.** The single highest-risk
+step was porting the AI Assessment card, since it owns request state
+(idle/loading/narrative/error) and citation-anchoring across a DOM subtree.
+Porting it surfaced one genuine regression before it ever shipped: without
+an explicit `key={caseId}` on the `AiAssessment` component, React does not
+remount it on a same-route case switch (`/cases/:caseId` → a different
+`:caseId` is the same route match), so its internal request state would
+persist across cases — a previously-explained case's narrative could
+theoretically bleed into a newly-selected case's panel for a moment. Fixed
+by keying the component on `caseId`; verified live (explain case A, navigate
+to case B, confirm the AI panel is idle) before being considered done. This
+is exactly the kind of state-transition bug a component-scoped framework
+makes both more possible to introduce *and* far easier to fix correctly (one
+prop) than the vanilla equivalent (manually tracking "does this DOM
+subtree's data attribute match the currently-selected case" by hand).
+
+**What was deliberately not introduced:** a charting library (the area
+chart and gauge remain hand-rolled inline SVG — no new visualization
+dependency was justified by their complexity), Redux/Zustand or any global
+state library (five screens, no shared mutable state complex enough to
+justify one), TypeScript (a real, acknowledged tradeoff — see
+[`../../learning_log.md`](../../learning_log.md) for the reasoning), and
+CSS-in-JS or Tailwind (the existing design-token stylesheet was already
+sound and was ported near-verbatim, preserving every visual decision from
+the prior UI/UX passes rather than re-deriving them).
+
+**The concrete guardrail against regressing on this architecture silently:**
+`tests/test_module10_ui.py` and `tests/test_module9b_ui.py` now scan the
+`frontend/src/` source tree (not a built/minified bundle, whose local
+variable names a bundler is free to rename) for the same API-path,
+no-client-side-computation, and citation-handling invariants the vanilla-era
+tests enforced, plus a new assertion that no source file uses
+`dangerouslySetInnerHTML` — a stronger, structurally-enforced version of the
+old "remember to call `esc()`" convention, since React auto-escapes every
+JSX text expression by default.
 
 ## Frontend component inventory
 
-| Function (in `torque.js`) | Renders |
+| File (in `frontend/src/`) | Renders |
 |---|---|
-| `renderDashboard` | Hero, money-flow pipeline, leg bars, interactive chart, incrementality card, priority feed, exceptions table |
-| `renderCaseView` | The canonical case screen — header, gauge, next-step banner, reasoning signals, AI Assessment, action rail, timeline, evidence, precedent |
-| `renderCases` | Filterable/paginated case list |
-| `renderConsole` | Human-queue priority feed |
-| `renderDemo` | Scenario buttons + live activity feed |
-| `loopPipeline`, `legBars`, `areaChartSvg`, `confidenceRing`, `feedRow`, `evidencePanel`, `renderNarrative`, `renderPrecedent` | Shared presentational components used across the screens above |
-| `explainCase`, `focusCitation`, `citeGroup` | The AI-assessment fetch/render/anchor pipeline |
+| `pages/Dashboard.jsx` | Hero, money-flow pipeline, leg bars, interactive chart, incrementality card, priority feed, exceptions table |
+| `pages/CaseView.jsx` | The canonical case screen — header, gauge, next-step banner, reasoning signals, AI Assessment, action rail, timeline, evidence, precedent |
+| `pages/Cases.jsx` | Filterable/paginated case list |
+| `pages/Console.jsx` | Human-queue priority feed |
+| `pages/Demo.jsx` | Scenario buttons + live activity feed |
+| `components/LoopPipeline.jsx`, `LegBars.jsx`, `AreaChart.jsx`, `Gauge.jsx`, `FeedRow.jsx`, `Evidence.jsx`, `Timeline.jsx` | Shared presentational components used across the screens above |
+| `components/AiAssessment.jsx`, `Precedent.jsx`, `lib/citations.js` | The AI-assessment fetch/render/anchor pipeline |
+| `context/MerchantContext.jsx`, `ToastContext.jsx` | The two pieces of cross-screen state: the active merchant id, and the toast queue |
+| `lib/api.js`, `format.js`, `useAsync.js` | The API client, formatting helpers, and the data-fetching hook every page uses |
 
 ## Data flow: dashboard load
 
 ```mermaid
 sequenceDiagram
-    participant JS as torque.js
+    participant React as Dashboard.jsx
     participant API as /reports/{m}/*
     participant DB as Postgres
 
-    JS->>API: summary, by-intervention, over-time, top-at-risk, exceptions, incrementality (parallel)
+    React->>API: summary, by-intervention, over-time, top-at-risk, exceptions, incrementality (parallel)
     API->>DB: six independent read queries, TenantScope-scoped
     DB-->>API: rows
-    API-->>JS: six typed JSON responses
-    JS->>JS: render — zero client-side aggregation of any of these values
+    API-->>React: six typed JSON responses
+    React->>React: render — zero client-side aggregation of any of these values
 ```

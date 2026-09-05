@@ -20,10 +20,13 @@ reliable for anything past that point — read the amendment first.
 > Verified facts as of this amendment: **test suite 1436 passed** (`uv run
 > pytest`), Alembic head still `0018_escalation_resolution` (no AI-phase
 > migration — the AI layer added no schema), `state_machine.py` and
-> `guards.py` still byte-unchanged since Module 1. The frontend
-> (`src/torque/ui/static/`) has also since been substantially reworked twice
-> beyond what this file describes — see `documentation/UIX_BLUEPRINT.md` and
-> `documentation/demo/ARCHITECTURE.md` for that history; the root
+> `guards.py` still byte-unchanged since Module 1. The frontend has also
+> since been substantially reworked beyond what this file describes,
+> including a full migration off hand-written vanilla JS onto **React 18 +
+> Vite** (source now in `frontend/`, built into the same
+> `src/torque/ui/static/` this file still refers to as static HTML/JS) — see
+> `documentation/UIX_BLUEPRINT.md` and `documentation/demo/ARCHITECTURE.md`
+> for that history; the root
 > [`README.md`](../../README.md) is the current, accurate entry point for
 > system architecture. **Do not use this file's "Where we are" / "Verified
 > facts" / "Next milestone" sections below as current status — they predate

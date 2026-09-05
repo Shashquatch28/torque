@@ -232,23 +232,49 @@ have a UI surface today, and none are invented for demo polish — see
 
 ## Frontend architecture
 
-**Hand-written HTML/CSS/vanilla JavaScript, no framework, no build step** —
-`src/torque/ui/static/{index.html,torque.css,torque.js}`, served as static
-files by the same FastAPI process on the same port as the API. This was a
-deliberate choice, reassessed twice during this project (see
-[`documentation/UIX_BLUEPRINT.md`](documentation/UIX_BLUEPRINT.md) and
-[`documentation/demo/ARCHITECTURE.md`](documentation/demo/ARCHITECTURE.md)):
-every interaction the UI needs — hover-driven charts, progressive disclosure,
-citation anchoring, a real-time demo feed — is achievable in vanilla
-JS/inline-SVG, so a framework migration would have spent effort on tooling
-instead of the product itself, and would add a build step to what is
-otherwise a one-command, offline-runnable demo.
+**React 18 + Vite**, source in [`frontend/`](frontend/), built into
+`src/torque/ui/static/` (a hashed `assets/` bundle + `index.html`) and served
+as static files by the same FastAPI process on the same port as the API —
+`docker compose --profile full up` and the host dev loop both still ship one
+process, one port, no Node at runtime. `HashRouter` keeps the exact
+`#/dashboard`, `#/cases/:id`, `#/console/:id`, `#/demo` URL scheme the
+project has always used, so the backend's zero-knowledge-of-frontend-routes
+contract is unchanged.
+
+This project was hand-written vanilla JS through several iterations; it was
+migrated to React as a deliberate, evidence-based decision late in the
+project, not a default. The decision record — what vanilla did well, what it
+was starting to cost in component reuse and state management as the UI grew
+(the money-flow pipeline, the interactive chart, the citation-anchored AI
+panel, five screens sharing components like the priority-feed row and the
+gauge), and why React's payoff finally outweighed the migration risk — is in
+[`documentation/demo/ARCHITECTURE.md`](documentation/demo/ARCHITECTURE.md).
+Component boundaries: `frontend/src/components/` (shared primitives — status
+pills, the gauge, the area chart, the priority feed row, the AI assessment
+card, evidence/timeline/precedent), `frontend/src/pages/` (one file per
+screen), `frontend/src/context/` (merchant id, toasts), `frontend/src/lib/`
+(the API client, formatting, citation-anchoring logic — all backend-agnostic,
+no framework dependency).
 
 The frontend renders **backend data only** — it computes no metric, score, or
-ranking of its own (a standing test, `tests/test_module10_ui.py`, asserts this
-by scanning the shipped JS for exactly that). Five screens: Dashboard, Cases,
-canonical Case View (`#/cases/:id`, aliased at `#/console/:id`), Agent
-Console, Live Demo.
+ranking of its own (a standing test, `tests/test_module10_ui.py`, asserts
+this by scanning the frontend source for exactly that). Five screens:
+Dashboard, Cases, canonical Case View (`#/cases/:id`, aliased at
+`#/console/:id`), Agent Console, Live Demo.
+
+**Building the frontend:**
+
+```bash
+cd frontend
+npm install
+npm run build       # writes straight into ../src/torque/ui/static/ —
+                     # torque.api.ui is untouched, no backend change required
+```
+
+`npm run dev` (Vite dev server, port 5173, proxies API calls to `:8000`) is
+available for frontend iteration but is not part of the demo path — the demo
+always runs the built output through the FastAPI process, exactly as a judge
+would see it.
 
 ## Backend architecture
 
@@ -302,6 +328,10 @@ cp .env.example .env                 # fill secrets only if you need the webhook
 # 3. schema
 uv run alembic upgrade head          # -> 0018_escalation_resolution
 
+# 3b. frontend (only needed once, or after editing frontend/src/) —
+#     builds straight into src/torque/ui/static/, no backend change needed
+cd frontend && npm install && npm run build && cd ..
+
 # 4. run the app (API + UI on http://127.0.0.1:8000)
 uv run python -m torque
 #    (Celery, if needed:  uv run celery -A torque.ingestion.celery_app:celery_app worker
@@ -328,6 +358,13 @@ Brings up `db + redis + migrate + api + worker + beat`. `migrate` runs
 `alembic upgrade head` once; `api` waits for it, then serves
 `http://127.0.0.1:8000` (`/` → `/ui/`, `/health`, `/health/ready`). A bare
 `docker compose up` (no `--profile full`) still starts only `db` + `redis`.
+
+The Docker image needs no Node at all — `Dockerfile` only `COPY`s `src/`,
+which already contains the *built* frontend (`src/torque/ui/static/`, a
+tracked, committed directory). Run `npm run build` (above) before building
+the image whenever `frontend/src/` has changed; the container serves
+whatever is already on disk in `static/`, exactly like every other backend
+source file.
 
 ## Testing
 

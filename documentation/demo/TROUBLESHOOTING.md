@@ -86,6 +86,24 @@ correctly). If you see this in a **real** browser window (not an automation
 tool), that would be a genuine bug — check `document.querySelectorAll('#view').length`
 is `1` and `document.body.scrollWidth === document.body.clientWidth` first.
 
+## A frontend code change doesn't show up in the browser
+
+`frontend/src/` is source; the app serves the **built** output in
+`src/torque/ui/static/`. Editing a `.jsx` file changes nothing until you
+re-run `cd frontend && npm run build` (no watch mode is wired into the
+demo path — `npm run dev` exists for iteration but proxies to the backend
+on a different port, `:5173`, and is not what a judge sees). A hard browser
+refresh after rebuilding is enough — FastAPI's `StaticFiles` reads straight
+off disk, so (unlike the backend's own `--reload`-less Python process) no
+server restart is needed once the new build has landed.
+
+## `npm install` (in `frontend/`) hangs or fails
+
+Needs network access to `registry.npmjs.org`. In a sandboxed environment
+without it, the frontend cannot be rebuilt from source — but the already-
+built output committed at `src/torque/ui/static/` still serves and runs
+normally; this only blocks *changing* the frontend, not running the demo.
+
 ## A backend code change doesn't seem to take effect
 
 `uv run python -m torque` runs uvicorn **without** `--reload` (see

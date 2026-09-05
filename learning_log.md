@@ -1625,3 +1625,123 @@ action, does not score anything that feeds the human queue or the
 Outreach Coordinator, and does not report a confidence number the backend
 doesn't actually compute. It explains decisions Torque already made
 through the deterministic pipeline described in sections 1–17 above.
+
+---
+
+## 19. The Frontend Architecture Decision — From Vanilla JS to React
+
+*(New product/engineering knowledge from the final demo-readiness pass. Not
+a diary entry — a record of a real decision, what it cost, and what it
+found, kept because the reasoning is reusable knowledge, not because the
+decision itself is interesting.)*
+
+### The question, asked directly
+
+Late in the project, with the AI layer and the UI/UX design system both
+already built and working, the question was put plainly: should the
+frontend move off hand-written vanilla JS onto a real framework? Not "is
+vanilla JS fine" — the actual question a serious technical reviewer asks is
+"was this decision made with evidence, or is it just what was already
+there?" That distinction matters more than which answer you land on.
+
+### Why vanilla JS was the right call for most of the project
+
+Every one of the UI/UX passes before this one — the design-system rework,
+the money-flow pipeline, the interactive chart, the citation-anchored AI
+panel — shipped in vanilla JS/CSS/inline-SVG, with no framework, no build
+step, no Node dependency, and it worked. The actual defects those passes
+found and fixed (weak visual hierarchy, a missing product narrative, dashboard
+soup) were never caused by the technology. A framework would not have made
+those design decisions correctly on its own, and migrating *before* the
+design was right would have meant re-doing the migration once it was.
+
+### What finally tipped the calculus
+
+By the time this pass started, the frontend had five screens genuinely
+sharing components — not hypothetically, but in the actual shipped code: a
+priority-feed row used identically on the dashboard and the Agent Console
+queue, a gauge used in the case header, an interactive chart, and an AI
+assessment card with real request-state (idle/loading/narrative/error) and
+DOM-scoped citation anchoring. At that size, the vanilla approach's real
+costs stopped being theoretical:
+
+- State lived in module-level `let` variables and DOM `dataset` attributes.
+  Workable, but it does not scale past "one engineer holding the whole file
+  in their head."
+- "Components" were named functions returning HTML strings, re-attaching
+  their own event listeners after every `innerHTML` replace — a manual
+  reimplementation of what a component framework gives you for free.
+- The test suite's only way to verify frontend correctness was scanning the
+  shipped source for literal substrings (`'id="doExplain"' in js`). That
+  can prove a string exists. It cannot prove a state transition happened
+  correctly — and one hadn't (see below).
+
+### The decision
+
+React 18 + Vite, chosen over Angular/Vue for the smallest reasonable
+learning surface plus the largest ecosystem for anything encountered later.
+`HashRouter` was used specifically so the existing `#/dashboard`,
+`#/cases/:id` URL scheme didn't have to change — zero backend change was
+required, because the Vite build's output directory *is*
+`src/torque/ui/static/`, the exact path `torque.api.ui` already served.
+That one build-config decision (`build.outDir` pointed at the existing
+static directory, not a new `dist/`) is what kept this a pure frontend
+change instead of a backend change too.
+
+### What was deliberately not adopted, and why that's not a shortcut
+
+No TypeScript. This is a real, acknowledged tradeoff, not an oversight —
+typing every API response shape (a dozen-plus reporting/AI schemas) would
+have been genuine, valuable work, but it competes directly for the same
+time budget as actually finishing the migration correctly and verifying it
+live. Plain JS with JSDoc-free, directly-named props was the call that let
+the whole migration land in one pass instead of a partial one. No charting
+library (the hand-rolled SVG chart and gauge were already correct and small
+enough that a library would have been net-negative complexity). No global
+state library (nothing in this app's actual state needs one).
+
+### The bug the migration found — and why it's evidence the decision was right, not wrong
+
+Porting the AI Assessment card surfaced a real defect before it ever
+shipped: `AiAssessment` wasn't keyed by `caseId`, so React (correctly, by
+its own rules) didn't remount it on a same-route case switch
+(`/cases/:id` → a different `:id` is still the same route match) — meaning
+its internal request state, and therefore a previously-generated narrative,
+could persist into a newly-selected case's panel. This is precisely the
+class of bug the old static-source-scanning tests were structurally
+incapable of catching (they can assert a DOM node exists; they cannot
+assert a case-switch resets it). The fix was one prop: `key={caseId}`.
+Found, fixed, and verified live (explain case A, navigate to case B, confirm
+the panel is idle) inside the same pass that introduced it — a good
+demonstration of why "the framework catches more of this class of bug" is a
+real argument, not a marketing line, and also why "verify live, don't trust
+the migration by construction" still mattered even with a framework doing
+more of the work.
+
+### What migrating did NOT fix (be precise)
+
+The framework didn't improve visual design — the entire CSS design system
+(tokens, spacing scale, component classes) was ported near-verbatim from
+the vanilla-era stylesheet, because that design was already correct from
+the earlier UI/UX passes. Re-deriving it in React would have been pure
+risk with no product benefit. The lesson generalizes: a framework migration
+is a *maintainability and correctness* investment, not a *visual quality*
+investment — conflating the two is how a team ends up migrating frameworks
+instead of fixing the actual design problem in front of them.
+
+### Likely technical-reviewer questions — and concise answers
+
+- **"Why not do this from the start?"** Because the actual problems being
+  solved in each earlier pass were design problems, and doing a framework
+  migration before the design was settled would have meant migrating twice.
+- **"Why no TypeScript?"** A real, stated tradeoff for migration completion
+  speed within the available time — not a permanent architectural position.
+- **"Did the migration touch the backend?"** No — `build.outDir` targets
+  the existing static directory; `torque.api.ui`/`app.py` are byte-identical
+  before and after.
+- **"How do you know it actually works, not just that it builds?"** Every
+  screen and interaction was re-verified live in a real browser against the
+  real backend after the migration — routing, the AI narrative + citation
+  anchoring, Agent Console resolve/pause, all 7 Live Demo scenarios,
+  responsive behavior at five viewport widths — not inferred from a
+  successful `npm run build`.

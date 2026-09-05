@@ -12,3 +12,10 @@ venv/
 .coverage
 htmlcov/
 *.log
+
+# frontend (React + Vite) — build output lands in src/torque/ui/static/,
+# which IS tracked (it's what the app serves); node_modules and Vite's own
+# cache never should be.
+frontend/node_modules/
+frontend/.vite/
+npm-debug.log*

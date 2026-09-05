@@ -375,8 +375,9 @@ that makes it defensible.
   customer relationship.
 - **Differentiator:** resource-aware prioritisation — a ₹50,000 subscription
   failure outranks a ₹500 invoice by economics, not by a fixed leg ordering.
-- **Status:** implemented. The `probability` term currently uses a placeholder
-  (amount at risk); the full Module 8 score plugs into the same seam.
+- **Status:** implemented, now on the full Module 8 score (probability ×
+  amount at risk ÷ expected next-step cost) — the seam this section originally
+  flagged as a placeholder is live as of Module 8.
 
 ### 5.9 Escalation ceiling & the human queue
 
@@ -760,14 +761,16 @@ levers, not measured results):
   split, ambiguous handling, self-paid cancellation, B2B partial payments, and
   correct case closure with a full audit entry.
 - Append-only audit ledger; strict tenant isolation; DPDP-aligned PII handling.
+- **Recovery scoring** (Module 8): `(probability × amount at risk) ÷ expected
+  next-step cost`, cold-start benchmark + bounded warm-start promise-keeping
+  adjustment, live on both the Outreach Coordinator and the human queue — the
+  placeholder this section once flagged is fully retired.
 
 **Implemented but dependent on a future step:**
 
 - The **direct payment-link attribution path** is fully built; it becomes
   end-to-end once the link-creation *action* is switched from stub to live
   delivery.
-- The **Outreach Coordinator / human-queue priority** uses a placeholder
-  (amount at risk) until the Module 8 score plugs into the same seam.
 
 **Explicitly deferred (designed, out of demo scope):**
 
@@ -1443,3 +1446,182 @@ product never opens empty — all served by the same process on one port.
   module);
 - production infrastructure (Module 11);
 - a scripted judged-demo narrative (Module 13).
+
+---
+
+## 17. Modules 9b, 11 & 12/12a — Causal Measurement, Infra, and the Autonomous Loop
+
+*(New product knowledge from these modules. Pitch language, not
+implementation.)*
+
+### The causal story: proving lift, not just totals (Module 9b)
+
+Module 9's recovered-revenue number is honest but **descriptive** — it says
+what happened. Module 9b adds the **causal** claim a sophisticated investor
+or judge will actually ask for: *"how much of that would have come back
+anyway?"*
+
+Every merchant-customer relationship is assigned, from day one, to a
+treatment cohort or a held-out control cohort. Module 9b computes each
+cohort's recovery rate, the **incremental lift** between them (treatment
+minus control), and a **95% confidence interval** on that lift using a
+Wilson/Newcombe method appropriate for small samples — never a bare point
+estimate presented as certain. It also computes a **SUTVA-adjusted**
+version of the lift: because Torque operates across merchants, a "control"
+customer at one merchant can still be a "treatment" customer at another and
+self-recover from that unrelated outreach's spillover, quietly inflating
+the apparent control rate. Module 9b detects and removes those contaminated
+control counterparties and reports the adjusted lift **alongside**, never
+instead of, the headline number.
+
+**The pitch line:** *"We don't just tell you what we recovered — we tell you
+what we caused, with a confidence interval, and we've already accounted for
+the one methodological trap (cross-merchant spillover) that would make the
+number look better than it is."*
+
+### A reproducible runtime, not a laptop demo (Module 11)
+
+Module 11 packages the entire system — Postgres, Redis, the API, the Celery
+worker, the Celery beat scheduler — as one `docker-compose` stack, one
+`Dockerfile` reused across all three application processes, built entirely
+on free/self-hostable infrastructure. `docker compose --profile full up
+--build` is the whole "run Torque" instruction for anyone, on any machine,
+with no cloud account and no paid service.
+
+**The pitch line:** *"This isn't a demo that only works on my laptop — it's
+a reproducible runtime anyone can stand up in one command."*
+
+### The loop closes itself (Module 12 / 12a)
+
+Through Module 11, every stage of the pipeline worked, but something still
+had to call the next stage — diagnosis, playbook activation, and execution
+scheduling were each reachable, not each other's natural consequence.
+Module 12a removes that seam: **a case created by any of the four ingestion
+legs now flows autonomously** from detection through diagnosis, playbook
+activation, and its first scheduled execution step, with no manual trigger
+anywhere in between. A real webhook creating a case today is, within a
+couple of seconds, diagnosed and (if confident) already working — the same
+autonomy the Live Demo's scenario buttons now exercise directly.
+
+**The pitch line:** *"Torque doesn't need an operator to keep clicking
+'next' — a real failure signal runs the entire pipeline by itself, end to
+end, the moment it arrives."*
+
+---
+
+## 18. The AI Layer — Explainable, Evidence-Grounded Decision Support
+
+*(New product knowledge from Phases 0–8. Pitch language, not implementation.
+This is the newest and most hackathon-relevant capability — read this
+section closely before an AI/ML-focused judge conversation.)*
+
+### What problem the AI layer solves
+
+Everything through Module 12a is Torque *deciding and acting* — correctly,
+but opaquely to anyone who isn't reading the audit trail line by line. A
+judge, a new operator, or a merchant's ops lead doesn't want to read forty
+`CaseEvent` rows to understand one case. The AI layer's job is narrow and
+specific: **read the same evidence a human could read, and explain it in
+plain language, with every claim traceable back to a real record.**
+
+### The one rule that makes this safe: AI cannot decide anything
+
+This is the single most important design fact about the AI layer, and it is
+enforced in code, not just in a design doc: the AI package
+(`torque.ai`) has a **structurally forbidden import boundary** — it
+physically cannot import the state machine, the execution engine, or
+anything capable of writing case state. A dedicated test fails the build if
+that boundary is ever crossed. Every AI-facing route is read-only. The AI
+layer can describe a decision Torque already made; it cannot make one.
+
+**The pitch line:** *"Our AI can't act, even if it wanted to — the boundary
+is enforced by the build, not by a policy someone could forget."*
+
+### From raw history to a trustworthy narrative — five phases
+
+1. **Evidence gathering** — the same case snapshot, timeline, actions,
+   promises, and (aggregate, PII-free) customer-relationship signal a human
+   reviewer would see, gathered read-only.
+2. **Citation model** — every one of those evidence items gets a stable,
+   referenceable id.
+3. **Precedent retrieval** — has a comparable case, for this same merchant,
+   happened before, and how did it resolve? Answered with real full-text
+   search over the merchant's own resolved cases — never a fabricated
+   "similar case," and an honest "none yet" when nothing comparable exists.
+4. **Narrative generation** — an on-demand (never automatic, never polled)
+   citation-grounded explanation: a summary, a claim about the current
+   state, a claim about the root cause, a claim per timeline entry, each
+   claim carrying the citation ids that support it.
+5. **Citation validation** — after generation, every citation the model used
+   is checked against the evidence it was actually given. **If even one
+   citation doesn't resolve, the entire narrative is thrown away** — never
+   partially trusted, never silently repaired.
+
+### Why the provider is a deterministic mock, and why that's a deliberate choice
+
+The AI layer's only concrete provider today is a fully deterministic,
+offline, zero-API-key mock — not because a real LLM couldn't be wired in,
+but because doing so is a paid-API-budget decision explicitly deferred, and
+because a deterministic provider makes the citation-validation guarantee
+*provable in a test*, not just an expectation of a live model's behavior.
+The swap point is exactly one function; nothing else in the system knows or
+cares which provider answered.
+
+**The pitch line:** *"The architecture is provider-agnostic today by
+design — the demo runs on a free, deterministic engine so every test is
+reproducible; production would point the same one function at a real
+model."*
+
+### Honesty as a design constraint, not an afterthought
+
+Three things are deliberately **not** shown anywhere in the product, on
+purpose:
+
+- **A fabricated confidence score.** The system does not claim "94%
+  confident" about anything the underlying models don't actually produce.
+- **The evaluation harness's own metrics.** A deterministic faithfulness/
+  citation-coverage evaluator exists (Phase 5) — but it's a test/offline
+  tool that watches the AI layer, not a number the AI layer gets to show
+  off about itself in the product.
+- **The shadow ML model's predictions.** An observational classifier (Phase
+  7) was built to explore whether a learned model *could* add signal — but
+  it has no API route, no UI, and no effect on any real decision. It
+  exists to be measured against reality later, not to be shown today.
+
+**The pitch line:** *"We built the measurement tools before we built
+anything worth measuring optimistically — and we're showing you the
+decisioning, not the lab experiments."*
+
+### How a reviewer actually experiences this
+
+Open any case, click "Explain this case," read the narrative, click any
+citation chip — the exact evidence it points to (a timeline event, or the
+case's own header) highlights on screen. That loop — claim, click,
+verify — **is** the AI layer's whole value proposition, demonstrated in
+under ten seconds, not asserted in a slide.
+
+### Likely judge questions — and concise answers
+
+- **"Is this just a chatbot bolted onto a dashboard?"** No — there is no
+  conversational input anywhere. One button, one case, one grounded
+  explanation. The interaction model is "ask this specific case a specific
+  question," never a freeform chat.
+- **"What happens if the model hallucinates a citation?"** The narrative is
+  rejected outright, server-side, before it's ever returned to the browser
+  — not repaired, not partially shown.
+- **"Does the AI ever change what Torque does?"** No — architecturally
+  impossible, not merely disallowed by convention.
+- **"Why not a real LLM?"** A budget/API-key decision, explicitly deferred,
+  with the exact one-function seam already built for it.
+- **"What's actually novel here versus a RAG demo?"** The evidence, the
+  precedent retrieval, and the citation model are all built on Torque's own
+  case data — there is no separate knowledge base; the "documents" being
+  retrieved are the merchant's own resolved cases.
+
+### What the AI layer did NOT do (be precise in a pitch)
+
+It does not diagnose a case, does not select a playbook, does not decide an
+action, does not score anything that feeds the human queue or the
+Outreach Coordinator, and does not report a confidence number the backend
+doesn't actually compute. It explains decisions Torque already made
+through the deterministic pipeline described in sections 1–17 above.

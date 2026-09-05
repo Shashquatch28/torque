@@ -79,7 +79,7 @@ _RECOVERY_DEFINITION = (
 )
 
 _SUTVA_NOTE = (
-    "Sensitivity view (Blueprint §6). A control counterparty that Torque is also "
+    "Sensitivity view. A control counterparty that Torque is also "
     "treating for another merchant in this window can self-recover from that "
     "outreach's spillover, inflating the control rate and understating true lift. "
     "The adjusted figures drop every such control counterparty. Only the "

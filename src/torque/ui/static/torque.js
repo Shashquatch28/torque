@@ -1,4 +1,4 @@
-/* Torque — Module 10 UI. Vanilla JS, no build. Renders backend data only:
+/* Torque UI. Vanilla JS, no build. Renders backend data only:
    it never computes a metric, a score, or a ranking — those come from the API. */
 "use strict";
 
@@ -32,7 +32,7 @@ function rupees(v) {
 const rupeesExact = (v) => "₹" + Number(v || 0).toLocaleString("en-IN",
   { maximumFractionDigits: 2 });
 const pct = (v) => (Number(v || 0) * 100).toFixed(1) + "%";
-// Module 9b: null-safe percent, and a signed percent for a lift that can be < 0.
+// null-safe percent, and a signed percent for a lift that can be < 0.
 const pctN = (v) => v == null ? "—" : (Number(v) * 100).toFixed(1) + "%";
 const pctSigned = (v) => v == null ? "—"
   : (Number(v) >= 0 ? "+" : "") + (Number(v) * 100).toFixed(1) + "%";
@@ -43,10 +43,21 @@ const titleize = (s) => String(s || "").replace(/_/g, " ").toLowerCase()
 const when = (s) => s ? new Date(s).toLocaleString("en-IN",
   { hour12: false, dateStyle: "medium", timeStyle: "short" }) : "—";
 
+// Human-readable errors everywhere — never a raw Error.message/stack. Kept
+// close to the mapping explainCase already used for the AI route.
+function friendlyError(e) {
+  if (e && e.status === 404) return "This could not be found.";
+  if (e && e.status === 503) return "This feature is not enabled for this deployment.";
+  if (e && e.status >= 500) return "Something went wrong loading this. Please try again.";
+  if (e && e.status === 409) return "That action is no longer available for this case.";
+  if (e && e.status === 422) return "That request could not be understood.";
+  return "Something went wrong loading this. Please try again.";
+}
+
+const STATUS_EDGE = { RECOVERED: "green", PARTIALLY_RECOVERED: "green", CANCELLED: "blue",
+  ESCALATED_TO_HUMAN: "amber", EXHAUSTED: "red", WRITTEN_OFF: "red", PAUSED: "amber" };
 function statusPill(s) {
-  const cls = { RECOVERED: "green", PARTIALLY_RECOVERED: "green", CANCELLED: "blue",
-    ESCALATED_TO_HUMAN: "amber", EXHAUSTED: "red", WRITTEN_OFF: "red",
-    PAUSED: "amber" }[s] || "";
+  const cls = STATUS_EDGE[s] || "";
   return `<span class="pill ${cls}">${titleize(s)}</span>`;
 }
 function toast(msg, isErr) {
@@ -57,8 +68,31 @@ function toast(msg, isErr) {
   setTimeout(() => t.remove(), 3200);
 }
 function setActiveNav(name) {
-  document.querySelectorAll(".nav a").forEach((a) =>
-    a.classList.toggle("active", a.dataset.nav === name));
+  document.querySelectorAll(".nav a").forEach((a) => {
+    const isActive = a.dataset.nav === name;
+    a.classList.toggle("active", isActive);
+    if (isActive) a.setAttribute("aria-current", "page");
+    else a.removeAttribute("aria-current");
+  });
+}
+
+// A frontend-only, no-new-field convention: cases this browser has already
+// generated an AI explanation for in this session are remembered so the
+// dashboard's "AI available, not yet reviewed" dot only lights up for cases
+// that genuinely have not been looked at yet in this session.
+const explainedCases = new Set(
+  JSON.parse(sessionStorage.getItem("torque.explained") || "[]")
+);
+function markExplained(caseId) {
+  explainedCases.add(caseId);
+  sessionStorage.setItem("torque.explained", JSON.stringify([...explainedCases]));
+}
+
+// small skeleton building blocks — layout-matching, not a spinner
+const skelLine = (w) => `<div class="skel skel-line ${w || ""}"></div>`;
+const skelBlock = () => `<div class="skel skel-block"></div>`;
+function skeletonPanel(lines) {
+  return `<div class="panel">${(lines || 3).toString().split("").map(() => skelLine("w60")).join("")}</div>`;
 }
 
 // --- routing --------------------------------------------------------
@@ -66,20 +100,22 @@ async function route() {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   const hash = location.hash.replace(/^#\/?/, "") || "dashboard";
   const [name, arg] = hash.split("/");
-  setActiveNav(name);
+  setActiveNav(name === "console" ? "console" : name);
+  closeMobileNav();
   if (!MERCHANT) { await bootstrapMerchant(); }
-  view.innerHTML = '<div class="loading">Loading…</div>';
+  view.classList.remove("fade-in");
   try {
-    if (name === "dashboard") return await renderDashboard();
-    if (name === "cases" && arg) return await renderCaseDetail(arg);
-    if (name === "cases") return await renderCases();
-    if (name === "console" && arg) return await renderConsole(arg);
-    if (name === "console") return await renderConsole(null);
-    if (name === "demo") return await renderDemo();
-    view.innerHTML = '<div class="empty">Not found</div>';
+    if (name === "dashboard") { renderDashboardSkeleton(); await renderDashboard(); }
+    else if (name === "cases" && arg) { renderCaseViewSkeleton(); await renderCaseView(arg, { viaConsole: false }); }
+    else if (name === "cases") { renderCasesSkeleton(); await renderCases(); }
+    else if (name === "console" && arg) { renderCaseViewSkeleton(); await renderCaseView(arg, { viaConsole: true }); }
+    else if (name === "console") { renderConsoleSkeleton(); await renderConsole(); }
+    else if (name === "demo") { renderDemoSkeleton(); await renderDemo(); }
+    else { view.innerHTML = '<div class="empty">Not found</div>'; }
+    view.classList.add("fade-in");
   } catch (e) {
-    view.innerHTML = `<div class="panel"><h2>Could not load</h2>
-      <p class="muted">${esc(e.message)}</p>
+    view.innerHTML = `<div class="panel"><h2>Could not load this page</h2>
+      <p class="muted">${esc(friendlyError(e))}</p>
       <p class="faint">merchant: <code>${esc(MERCHANT)}</code></p></div>`;
   }
 }
@@ -94,57 +130,244 @@ async function bootstrapMerchant() {
   merchantInput.value = MERCHANT;
 }
 
-// --- dashboard (§10.1 / 10.2 / 10.3 / 10.4 / 10.11) ---------------
+// --- loading skeletons (layout-aware, per screen) -------------------
+function renderDashboardSkeleton() {
+  view.innerHTML = `
+  <div class="panel hero"><div class="skel skel-hero"></div></div>
+  <div class="loop mt">${"123".split("").map(() => `<div class="loop-stage">${skelLine("w40")}${skelLine("w60")}</div>`).join("")}</div>
+  <div class="grid cols-2 mt">${skeletonPanel(5)}${skeletonPanel(5)}</div>
+  ${skeletonPanel(4)}`;
+}
+function renderCasesSkeleton() {
+  view.innerHTML = `<div class="panel">${skelLine("w40")}
+    ${"12345".split("").map(() => `<div class="skel skel-row"></div>`).join("")}</div>`;
+}
+function renderCaseViewSkeleton() {
+  view.innerHTML = `
+  <div class="skel skel-line w40" style="margin-bottom:12px"></div>
+  <div class="panel casehead lg">${skelLine("w60")}${skelLine("w40")}${skelBlock()}</div>
+  <div class="grid cols-2 mt">${skeletonPanel(4)}${skeletonPanel(4)}</div>
+  ${skeletonPanel(6)}`;
+}
+function renderConsoleSkeleton() {
+  view.innerHTML = `<div class="panel">${skelLine("w40")}
+    ${"123".split("").map(() => `<div class="skel skel-row"></div>`).join("")}</div>`;
+}
+function renderDemoSkeleton() {
+  view.innerHTML = `<div class="grid cols-2">${skeletonPanel(4)}${skeletonPanel(6)}</div>`;
+}
+
+// =====================================================================
+// Component: the recovery loop rendered in money, not stat tiles.
+// Each stage is an independent, honestly-labeled figure straight off
+// RecoverySummary — never a proportional/stacked chart that would imply
+// an exact waterfall between them (the four figures are not disjoint
+// partitions of one total; showing them as a proportional Sankey would
+// overstate the precision of that relationship).
+// =====================================================================
+function loopPipeline(rep) {
+  const heldBack = Number(rep.blocked_amount || 0) + Number(rep.deferred_amount || 0);
+  const stage = (cls, k, v, cap) => `<div class="loop-stage ${cls}">
+    <div class="k">${k}</div><div class="v mono">${v}</div><div class="cap">${cap}</div></div>`;
+  const arrow = `<div class="loop-arrow" aria-hidden="true">&rarr;</div>`;
+  return `
+  <div class="loop">
+    ${stage("risk", "Revenue at risk", rupees(rep.revenue_at_risk), `${num(rep.case_count)} cases opened`)}
+    ${arrow}
+    ${stage("hold", "Held back by guardrails", rupees(heldBack), "compliance-by-construction")}
+    ${arrow}
+    ${stage("active", "Still in motion", rupees(rep.unresolved_amount), `${num(rep.unresolved_case_count)} cases open`)}
+    ${arrow}
+    ${stage("recovered", "Recovered", rupees(rep.recovered_amount), `${num(rep.recovered_case_count)} cases closed`)}
+  </div>
+  ${rep.escalated_case_count ? `<div class="loop-note"><span class="pill amber">human</span>
+    ${num(rep.escalated_case_count)} case${rep.escalated_case_count === 1 ? "" : "s"} escalated to a human reviewer — restraint, not failure</div>` : ""}`;
+}
+
+// =====================================================================
+// Component: an interactive area/line chart with a hover tooltip and a
+// real bucket toggle (Day/Week/Month — all three already accepted by
+// GET /reports/{m}/over-time?bucket=). Pure inline SVG, no library.
+// =====================================================================
+
+// `series` is real backend buckets (one entry per day/week/month that has
+// ANY recovered amount, ascending) — this function never invents a value.
+// With few real buckets a naive render reads as one decorative block
+// rather than a trend, so we left-pad with explicit zero-recovery periods
+// immediately before the earliest real bucket (a period with no recovery
+// genuinely recovered ₹0 — this is not a fabricated number, just the true
+// value for periods the backend has no row for) up to a minimum count.
+const MIN_BARS = 7;
+function padSeries(series, bucket) {
+  let padded = series;
+  if (padded.length && padded.length < MIN_BARS) {
+    const earliest = new Date(padded[0].bucket_start);
+    const filler = [];
+    for (let i = MIN_BARS - padded.length; i >= 1; i--) {
+      const d = new Date(earliest);
+      if (bucket === "month") d.setUTCMonth(d.getUTCMonth() - i);
+      else if (bucket === "week") d.setUTCDate(d.getUTCDate() - i * 7);
+      else d.setUTCDate(d.getUTCDate() - i);
+      filler.push({ bucket_start: d.toISOString(), recovered_amount: "0" });
+    }
+    padded = filler.concat(padded);
+  }
+  return padded.slice(-24);
+}
+
+function areaChartSvg(series) {
+  const W = 640, H = 160, PAD = 6;
+  const max = Math.max(...series.map((s) => Number(s.recovered_amount)), 1);
+  const n = series.length;
+  const x = (i) => (n === 1 ? W / 2 : (i / (n - 1)) * W);
+  const y = (v) => H - PAD - (Number(v) / max) * (H - PAD * 2);
+  const pts = series.map((s, i) => [x(i), y(s.recovered_amount)]);
+  const line = pts.map(([px, py], i) => `${i === 0 ? "M" : "L"}${px.toFixed(1)},${py.toFixed(1)}`).join(" ");
+  const area = `${line} L${x(n - 1).toFixed(1)},${H} L${x(0).toFixed(1)},${H} Z`;
+  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Recovered amount over time">
+    <defs><linearGradient id="areafill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="var(--green)" stop-opacity=".35" />
+      <stop offset="100%" stop-color="var(--green)" stop-opacity="0" />
+    </linearGradient></defs>
+    <path d="${area}" fill="url(#areafill)" stroke="none"></path>
+    <path d="${line}" fill="none" stroke="var(--green)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"></path>
+    <line class="chart-guide" id="chartGuide" x1="0" y1="0" x2="0" y2="${H}"></line>
+    <circle class="chart-dot" id="chartDot" r="4"></circle>
+  </svg>`;
+}
+
+function renderChartCard(series, bucket) {
+  const padded = padSeries(series, bucket);
+  return `
+  <div class="rowflex">
+    <h2>Recovery over time</h2>
+    <div class="chart-tabs" role="tablist" aria-label="Time bucket">
+      ${["day", "week", "month"].map((b) => `<button type="button" role="tab" aria-selected="${b === bucket}"
+        class="${b === bucket ? "active" : ""}" data-bucket="${b}">${titleize(b)}</button>`).join("")}
+    </div>
+  </div>
+  ${series.length ? `<div class="chart-wrap" id="chartWrap">${areaChartSvg(padded)}<div class="chart-tip" id="chartTip"></div></div>`
+    : '<div class="hatch">No recoveries in range yet</div>'}
+  <div class="faint" style="margin-top:8px">Torque-credited recoveries, by ${bucket} (UTC). Hover to inspect a point.</div>`;
+}
+
+function wireChartInteraction(container, padded) {
+  const wrap = container.querySelector("#chartWrap");
+  if (!wrap) return;
+  const svg = wrap.querySelector("svg");
+  const guide = wrap.querySelector("#chartGuide");
+  const dot = wrap.querySelector("#chartDot");
+  const tip = wrap.querySelector("#chartTip");
+  const W = 640, H = 160;
+  const n = padded.length;
+  const move = (clientX) => {
+    const rect = svg.getBoundingClientRect();
+    const frac = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    const i = Math.round(frac * (n - 1));
+    const s = padded[i];
+    if (!s) return;
+    const px = n === 1 ? W / 2 : (i / (n - 1)) * W;
+    const max = Math.max(...padded.map((p) => Number(p.recovered_amount)), 1);
+    const py = H - 6 - (Number(s.recovered_amount) / max) * (H - 12);
+    guide.setAttribute("x1", px); guide.setAttribute("x2", px); guide.style.opacity = "1";
+    dot.setAttribute("cx", px); dot.setAttribute("cy", py); dot.style.opacity = "1";
+    const tipLeftPct = (px / W) * 100;
+    tip.style.left = tipLeftPct + "%";
+    tip.style.top = (py / H) * 100 + "%";
+    const d = new Date(s.bucket_start);
+    tip.innerHTML = `<span class="date">${d.toDateString()}</span><br><span class="amt">${rupeesExact(s.recovered_amount)}</span>`;
+    tip.classList.add("show");
+  };
+  const leave = () => {
+    guide.style.opacity = "0"; dot.style.opacity = "0"; tip.classList.remove("show");
+  };
+  svg.addEventListener("pointermove", (e) => move(e.clientX));
+  svg.addEventListener("pointerdown", (e) => move(e.clientX));
+  svg.addEventListener("pointerleave", leave);
+}
+
+// =====================================================================
+// Component: proportional leg bars — replaces a plain leg table with a
+// scannable at-risk-vs-recovered comparison across the four legs.
+// =====================================================================
+function legBars(legs) {
+  const max = Math.max(...legs.map((l) => Number(l.revenue_at_risk)), 1);
+  return `<div class="legbars">${legs.map((l) => {
+    const fillPct = Math.min(100, (Number(l.recovered_amount) / max) * 100);
+    const trackPct = Math.min(100, (Number(l.revenue_at_risk) / max) * 100);
+    return `<div class="legbar-row">
+      <div class="hd"><span class="name">${titleize(l.leg_type)}</span>
+        <span class="rate">${pct(l.amount_recovery_rate)} recovered</span></div>
+      <div class="legbar-track" style="width:${trackPct}%">
+        <div class="legbar-fill" style="width:${(fillPct / Math.max(trackPct, 0.01) * 100).toFixed(1)}%"></div>
+      </div>
+      <div class="meta"><span>${num(l.cases_recovered)}/${num(l.cases_attempted)} cases recovered</span>
+        <span>${rupees(l.recovered_amount)} of ${rupees(l.revenue_at_risk)}</span></div>
+    </div>`;
+  }).join("")}</div>`;
+}
+
+// =====================================================================
+// Component: a priority feed row — used for both the dashboard's
+// top-at-risk list and the Agent Console's human queue. A triage feed,
+// not a spreadsheet: one glance gives identity, why it matters
+// economically, and where it stands.
+// =====================================================================
+function feedRow({ caseId, href, edge, title, badges, sub, amountLabel, amount, metaLines }) {
+  const hrefAttr = href ? ` data-href="${esc(href)}"` : "";
+  return `<div class="feed-row ${edge}" data-case="${caseId}"${hrefAttr} tabindex="0" role="button">
+    <div class="identity">
+      <div class="name">${title}${badges || ""}</div>
+      <div class="sub">${sub}</div>
+    </div>
+    <div class="amt"><div class="v mono">${amount}</div><div class="k">${amountLabel}</div></div>
+    <div class="meta">${metaLines}</div>
+  </div>`;
+}
+
+function priorityFeed(rows) {
+  return `<div class="feedlist">${rows.join("") || '<div class="empty">Nothing here right now</div>'}</div>`;
+}
+
+function wireFeedRows(container) {
+  container.querySelectorAll("[data-case]").forEach((row) => {
+    const go = () => { location.hash = row.dataset.href || ("#/cases/" + row.dataset.case); };
+    row.addEventListener("click", go);
+    row.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
+  });
+}
+
+// --- dashboard --------------------------------------------------------
+let dashboardState = { bucket: "day" };
 async function renderDashboard() {
   const m = encodeURIComponent(MERCHANT);
   const [rep, legs, series, top, exc, inc] = await Promise.all([
     api(`/reports/${m}/summary`),
     api(`/reports/${m}/by-intervention?by=leg`),
-    api(`/reports/${m}/over-time?bucket=day`),
+    api(`/reports/${m}/over-time?bucket=${dashboardState.bucket}`),
     api(`/reports/${m}/top-at-risk?limit=8`),
     api(`/reports/${m}/exceptions`),
     api(`/reports/${m}/incrementality`),
   ]);
 
-  const ce = rep.cost_efficiency_ratio;
   view.innerHTML = `
-  <div class="grid cols-2">
-    <div class="panel hero">
-      <div class="label">Revenue recovered by Torque</div>
-      <div class="big mono">${rupees(rep.recovered_amount)}</div>
-      <div class="sub">${num(rep.recovered_case_count)} recovered cases &middot;
-        self-recovered (not counted): ${rupees(rep.self_recovered_amount)}</div>
-    </div>
-    <div class="stats">
-      ${stat("Revenue at risk", rupees(rep.revenue_at_risk))}
-      ${stat("Recovery rate", pct(rep.amount_recovery_rate), "pos")}
-      ${stat("Unresolved", `${num(rep.unresolved_case_count)} &middot; ${rupees(rep.unresolved_amount)}`)}
-      ${stat("Human escalations", num(rep.escalated_case_count), "warn")}
-      ${stat("Blocked (by rule)", rupees(rep.blocked_amount), "warn")}
-      ${stat("Deferred (by rule)", rupees(rep.deferred_amount), "warn")}
-      ${stat("Recovered cases", num(rep.recovered_case_count), "pos")}
-      ${stat("Cost efficiency", ce == null ? "—" : Number(ce).toFixed(0) + "×")}
-    </div>
+  <div class="panel hero">
+    <div class="label">Revenue recovered by Torque</div>
+    <div class="big mono">${rupees(rep.recovered_amount)}</div>
+    <div class="sub">${num(rep.recovered_case_count)} recovered cases &middot;
+      ${pct(rep.amount_recovery_rate)} of at-risk revenue &middot;
+      self-recovered (not counted): ${rupees(rep.self_recovered_amount)}</div>
   </div>
+
+  <div class="mt">${loopPipeline(rep)}</div>
 
   <div class="grid cols-2 mt">
     <div class="panel">
       <h2>Recovery by leg</h2>
-      <table><thead><tr><th>Leg</th><th class="num">Cases</th>
-        <th class="num">At risk</th><th class="num">Recovered</th>
-        <th class="num">Rate</th></tr></thead><tbody>
-        ${legs.map((l) => `<tr>
-          <td>${titleize(l.leg_type)}</td>
-          <td class="num">${num(l.cases_attempted)} / <span class="faint">${num(l.cases_recovered)} rec.</span></td>
-          <td class="num">${rupees(l.revenue_at_risk)}</td>
-          <td class="num" style="color:var(--green)">${rupees(l.recovered_amount)}</td>
-          <td class="num">${pct(l.amount_recovery_rate)}</td></tr>`).join("")}
-      </tbody></table>
+      ${legBars(legs)}
     </div>
-    <div class="panel">
-      <h2>Recovery over time</h2>
-      ${series.length ? barChart(series) : '<div class="empty">No recoveries in range yet</div>'}
-      <div class="faint" style="margin-top:8px">Torque-credited recoveries, by day (UTC).</div>
+    <div class="panel" id="chartCard">
+      ${renderChartCard(series, dashboardState.bucket)}
     </div>
   </div>
 
@@ -152,46 +375,57 @@ async function renderDashboard() {
 
   <div class="panel mt">
     <div class="rowflex"><h2>Top at-risk cases</h2>
-      <span class="faint">ranked by Module&nbsp;8 recovery score (backend order)</span></div>
-    <table><thead><tr><th>Customer</th><th>Leg</th><th>Status</th>
-      <th class="num">At risk</th><th class="num">Probability</th>
-      <th class="num">Score</th><th>Next</th></tr></thead><tbody>
-      ${top.items.map((c) => `<tr class="clickable" data-case="${c.case_id}">
-        <td>${esc(c.counterparty_label)}${c.escalated ? ' <span class="pill amber">human</span>' : ""}</td>
-        <td>${titleize(c.leg_type)}</td><td>${statusPill(c.status)}</td>
-        <td class="num">${rupees(c.amount_at_risk)}</td>
-        <td class="num">${prob(c.recovery_probability)}</td>
-        <td class="num mono">${c.recovery_score == null ? "—" : num(Math.round(c.recovery_score))}</td>
-        <td class="faint">${c.next_intervention ? titleize(c.next_intervention) : "—"}</td>
-      </tr>`).join("") || '<tr><td colspan="7" class="empty">No open cases</td></tr>'}
-    </tbody></table>
+      <span class="faint">ranked by recovery score (backend order)</span></div>
+    ${priorityFeed(top.items.map((c) => {
+      const notReviewed = c.escalated && !explainedCases.has(c.case_id);
+      return feedRow({
+        caseId: c.case_id,
+        edge: STATUS_EDGE[c.status] || "",
+        title: `${notReviewed ? '<span class="aidot" title="AI assessment available, not yet reviewed"></span>' : ""}${esc(c.counterparty_label)}`,
+        badges: c.escalated ? ' <span class="pill amber">human</span>' : "",
+        sub: `${titleize(c.leg_type)} &middot; ${statusPill(c.status)}`,
+        amountLabel: "At risk",
+        amount: rupees(c.amount_at_risk),
+        metaLines: `<div class="score">${prob(c.recovery_probability)} probability</div>
+          <div>${c.next_intervention ? "Next: " + titleize(c.next_intervention) : "Score " + (c.recovery_score == null ? "—" : num(Math.round(c.recovery_score)))}</div>`,
+      });
+    }))}
   </div>
 
   <div class="panel mt">
     <div class="rowflex"><h2>Where Torque deliberately held back</h2>
       <span class="faint">compliance-by-construction &mdash; not failures</span></div>
-    <table><thead><tr><th>Guardrail block reason</th><th class="num">Actions</th>
+    <div class="table-wrap"><table class="stackable"><thead><tr><th>Guardrail block reason</th><th class="num">Actions</th>
       <th class="num">Cases</th><th class="num">Revenue held</th></tr></thead><tbody>
       ${exc.blocked_by_reason.map((b) => `<tr>
-        <td><span class="pill amber">${titleize(b.block_reason)}</span></td>
-        <td class="num">${num(b.action_count)}</td>
-        <td class="num">${num(b.case_count)}</td>
-        <td class="num">${rupees(b.revenue_at_risk)}</td></tr>`).join("")
+        <td data-label="Reason"><span class="pill amber">${titleize(b.block_reason)}</span></td>
+        <td class="num" data-label="Actions">${num(b.action_count)}</td>
+        <td class="num" data-label="Cases">${num(b.case_count)}</td>
+        <td class="num" data-label="Revenue held">${rupees(b.revenue_at_risk)}</td></tr>`).join("")
         || '<tr><td colspan="4" class="empty">No blocked actions</td></tr>'}
-      ${exc.deferred_action_count ? `<tr><td><span class="pill amber">Outreach Coordinator Deferred</span></td>
-        <td class="num">${num(exc.deferred_action_count)}</td>
-        <td class="num">${num(exc.deferred_case_count)}</td><td class="num faint">rescheduled</td></tr>` : ""}
-    </tbody></table>
+      ${exc.deferred_action_count ? `<tr><td data-label="Reason"><span class="pill amber">Outreach Coordinator Deferred</span></td>
+        <td class="num" data-label="Actions">${num(exc.deferred_action_count)}</td>
+        <td class="num" data-label="Cases">${num(exc.deferred_case_count)}</td><td class="num faint" data-label="Revenue held">rescheduled</td></tr>` : ""}
+    </tbody></table></div>
   </div>`;
 
-  view.querySelectorAll("tr[data-case]").forEach((tr) =>
-    tr.addEventListener("click", () => { location.hash = "#/cases/" + tr.dataset.case; }));
+  wireFeedRows(view);
+  wireChartInteraction(view, padSeries(series, dashboardState.bucket));
+  view.querySelectorAll("[data-bucket]").forEach((btn) => btn.onclick = async () => {
+    dashboardState.bucket = btn.dataset.bucket;
+    try {
+      const s2 = await api(`/reports/${m}/over-time?bucket=${dashboardState.bucket}`);
+      const card = $("#chartCard");
+      card.innerHTML = renderChartCard(s2, dashboardState.bucket);
+      wireChartInteraction(view, padSeries(s2, dashboardState.bucket));
+      card.querySelectorAll("[data-bucket]").forEach((b2) => b2.onclick = btn.onclick);
+    } catch (e) { toast(friendlyError(e), true); }
+  });
 }
-const stat = (k, v, cls = "") =>
-  `<div class="stat"><div class="k">${k}</div><div class="v ${cls} mono">${v}</div></div>`;
 
-// Module 9b — the causal layer. Renders ONLY numbers from the /incrementality
-// response; it computes no rate, lift, or interval itself.
+// The causal layer. Renders ONLY numbers from the /incrementality response;
+// it computes no rate, lift, or interval itself. Statistical, not
+// AI-generated — blue is the correct, honest color here, never gold.
 function incrementalityCard(inc) {
   const ci = (o) => (o.ci_low == null ? "" :
     `<span class="ci">95% CI ${pctSigned(o.ci_low)} … ${pctSigned(o.ci_high)}</span>`);
@@ -227,45 +461,12 @@ function incrementalityCard(inc) {
     </div>
     <p class="faint mt">${esc(s.note)}</p>
     <p class="faint">${esc(inc.recovery_definition)}</p>
-    ` : `<div class="empty">Not enough cohort data yet &mdash; assign a control holdout
+    ` : `<div class="hatch">Not enough cohort data yet &mdash; assign a control holdout
       (${num(inc.treatment.total)} treatment, ${num(inc.control.total)} control cases in range).</div>`}
   </div>`;
 }
 
-// `series` is real backend buckets (one entry per day that has ANY
-// recovered amount, ascending) from /reports/{m}/over-time?bucket=day — this
-// function never invents a value. With few real buckets a naive render
-// stretches a single bar to the full container width (flex:1 on one child),
-// which reads as a decorative block rather than a trend. To keep the chart
-// legible at a glance regardless of how sparse the real data is, left-pad
-// with explicit zero-recovery days immediately before the earliest real
-// bucket (a day with no recovery genuinely recovered ₹0 — this is not a
-// fabricated number, just the true value for days the backend has no row
-// for) up to a minimum bar count, then render the same way as before.
-const MIN_BARS = 7;
-function barChart(series) {
-  let padded = series;
-  if (padded.length && padded.length < MIN_BARS) {
-    const earliest = new Date(padded[0].bucket_start);
-    const filler = [];
-    for (let i = MIN_BARS - padded.length; i >= 1; i--) {
-      const d = new Date(earliest);
-      d.setUTCDate(d.getUTCDate() - i);
-      filler.push({ bucket_start: d.toISOString(), recovered_amount: "0" });
-    }
-    padded = filler.concat(padded);
-  }
-  const max = Math.max(...padded.map((s) => Number(s.recovered_amount)), 1);
-  return `<div class="bars">${padded.slice(-14).map((s) => {
-    const h = Math.round((Number(s.recovered_amount) / max) * 118);
-    const d = new Date(s.bucket_start);
-    return `<div class="bar" title="${rupeesExact(s.recovered_amount)} on ${d.toDateString()}">
-      <div class="col" style="height:${h}px"></div>
-      <div class="cap">${d.getUTCDate()}/${d.getUTCMonth() + 1}</div></div>`;
-  }).join("")}</div>`;
-}
-
-// --- cases list (§10.1) ---------------------------------------------
+// --- cases list -------------------------------------------------------
 let casesFilter = { leg: "", status: "", offset: 0 };
 async function renderCases() {
   const m = encodeURIComponent(MERCHANT);
@@ -281,24 +482,24 @@ async function renderCases() {
     <div class="rowflex">
       <h2>Cases &mdash; ${num(data.total)}</h2>
       <div class="btnrow">
-        <select id="fleg"><option value="">All legs</option>
+        <select id="fleg" aria-label="Filter by leg"><option value="">All legs</option>
           ${legs.map((l) => `<option value="${l}" ${casesFilter.leg === l ? "selected" : ""}>${titleize(l)}</option>`).join("")}</select>
-        <select id="fstatus"><option value="">All statuses</option>
+        <select id="fstatus" aria-label="Filter by status"><option value="">All statuses</option>
           ${statuses.map((s) => `<option value="${s}" ${casesFilter.status === s ? "selected" : ""}>${titleize(s)}</option>`).join("")}</select>
       </div>
     </div>
-    <table><thead><tr><th>Case</th><th>Leg</th><th>Status</th>
+    <div class="table-wrap"><table class="stackable"><thead><tr><th>Case</th><th>Leg</th><th>Status</th>
       <th class="num">Revenue at risk</th><th>Attribution</th>
       <th class="num">Recovered</th><th>Opened</th></tr></thead><tbody>
-      ${data.items.map((c) => `<tr class="clickable" data-case="${c.case_id}">
-        <td class="faint mono">${c.case_id.slice(0, 8)}</td>
-        <td>${titleize(c.leg_type)}</td><td>${statusPill(c.status)}</td>
-        <td class="num">${rupees(c.revenue_at_risk)}</td>
-        <td>${c.recovery_type ? `<span class="pill ${c.recovery_type === "SELF_RECOVERED" ? "blue" : "green"}">${titleize(c.recovery_type)}</span>` : '<span class="faint">—</span>'}</td>
-        <td class="num">${c.recovered_amount ? rupees(c.recovered_amount) : "—"}</td>
-        <td class="faint">${when(c.opened_at)}</td></tr>`).join("")
+      ${data.items.map((c) => `<tr class="clickable edge-row" tabindex="0" role="button" data-case="${c.case_id}">
+        <td class="edge ${STATUS_EDGE[c.status] || ""}" data-label="Case"><span class="faint mono">${c.case_id.slice(0, 8)}</span></td>
+        <td data-label="Leg">${titleize(c.leg_type)}</td><td data-label="Status">${statusPill(c.status)}</td>
+        <td class="num" data-label="Revenue at risk">${rupees(c.revenue_at_risk)}</td>
+        <td data-label="Attribution">${c.recovery_type ? `<span class="pill ${c.recovery_type === "SELF_RECOVERED" ? "blue" : "green"}">${titleize(c.recovery_type)}</span>` : '<span class="faint">—</span>'}</td>
+        <td class="num" data-label="Recovered">${c.recovered_amount ? rupees(c.recovered_amount) : "—"}</td>
+        <td class="faint" data-label="Opened">${when(c.opened_at)}</td></tr>`).join("")
         || '<tr><td colspan="7" class="empty">No cases match</td></tr>'}
-    </tbody></table>
+    </tbody></table></div>
     <div class="btnrow mt">
       <button ${casesFilter.offset === 0 ? "disabled" : ""} id="prev">&larr; Prev</button>
       <button ${casesFilter.offset + 25 >= data.total ? "disabled" : ""} id="next">Next &rarr;</button>
@@ -309,12 +510,30 @@ async function renderCases() {
   $("#fstatus").onchange = (e) => { casesFilter.status = e.target.value; casesFilter.offset = 0; renderCases(); };
   $("#prev").onclick = () => { casesFilter.offset = Math.max(0, casesFilter.offset - 25); renderCases(); };
   $("#next").onclick = () => { casesFilter.offset += 25; renderCases(); };
-  view.querySelectorAll("tr[data-case]").forEach((tr) =>
-    tr.addEventListener("click", () => { location.hash = "#/cases/" + tr.dataset.case; }));
+  wireClickableRows();
+}
+function wireClickableRows() {
+  view.querySelectorAll("tr[data-case]").forEach((tr) => {
+    const go = () => { location.hash = "#/cases/" + tr.dataset.case; };
+    tr.addEventListener("click", go);
+    tr.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); }
+    });
+  });
 }
 
-// --- case detail + explainability (§10.5 / 10.6) ------------------
-async function renderCaseDetail(caseId) {
+// --- canonical Case View (#/cases/:id and #/console/:id alias) --------
+// One component replaces the former split of a read-only case detail and a
+// separate, action-bearing console pane. Everything above the action rail
+// is always visible regardless of entry point; the action rail itself is
+// state-gated exactly as it always has been (canResolve/canPause/canUnpause).
+//
+// Composition mirrors the decision workspace this case represents: what
+// happened -> how much is at risk -> why Torque believes recovery is
+// possible -> what the AI adds -> what will happen next -> what a human
+// can do -> the full trace -> the evidence -> comparable precedent.
+async function renderCaseView(caseId, opts) {
+  const viaConsole = !!(opts && opts.viaConsole);
   const m = encodeURIComponent(MERCHANT);
   const [c, events] = await Promise.all([
     api(`/reports/${m}/cases/${caseId}`),
@@ -322,51 +541,179 @@ async function renderCaseDetail(caseId) {
   ]);
   const b = c.recovery_score_breakdown;
   const ex = b && b.explain;
+  const canResolve = c.status === "ESCALATED_TO_HUMAN";
+  const canPause = c.status === "PLAYBOOK_ACTIVE";
+  const canUnpause = c.status === "PAUSED";
+  const showActionRail = canResolve || canPause || canUnpause;
+  const showNextStep = !c.is_terminal && b && b.next_step_action_type;
+
   view.innerHTML = `
-  <a class="back" href="#/cases">&larr; All cases</a>
-  <div class="grid cols-2 mt">
-    <div class="panel">
-      <h2>Case overview</h2>
-      <div class="rowflex"><div>
-        <div style="font-size:18px;font-weight:650">${esc(c.counterparty_label)}</div>
-        <div class="faint mono">${c.case_id}</div>
-      </div>${statusPill(c.status)}</div>
-      <table class="mt"><tbody>
-        ${kv("Leg", titleize(c.leg_type))}
-        ${kv("Revenue at risk", rupeesExact(c.revenue_at_risk))}
-        ${kv("Amount at risk (current)", rupeesExact(c.amount_at_risk))}
-        ${kv("Root cause", c.root_cause_code ? titleize(c.root_cause_code) : "—")}
-        ${kv("Diagnosis confidence", c.diagnosis_confidence == null ? "—" : c.diagnosis_confidence.toFixed(2))}
-        ${kv("Recovery score", c.recovery_score == null ? "—" : num(Math.round(c.recovery_score)))}
-        ${kv("Recovery probability", prob(c.recovery_probability))}
-        ${kv("Attribution", c.recovery_type ? titleize(c.recovery_type) : "—")}
-        ${kv("Recovered", c.recovered_amount ? rupeesExact(c.recovered_amount) : "—")}
-        ${c.escalation_resolution ? kv("Human resolution", `${titleize(c.escalation_resolution)} (by ${esc(c.escalation_resolved_by || "agent")})`) : ""}
-        ${c.in_human_queue ? kv("Human queue", titleize(c.human_queue_reason)) : ""}
-      </tbody></table>
-    </div>
-    <div class="panel">
-      <h2>Why this case?</h2>
-      ${ex ? `<div class="why">
-        <div class="metric"><div class="k">Recovery probability</div><div class="v">${prob(b.probability)}</div></div>
-        <div class="metric"><div class="k">Amount at risk</div><div class="v">${rupeesExact(ex.amount_at_risk)}</div></div>
-        <div class="metric"><div class="k">Expected intervention cost</div><div class="v">${rupeesExact(ex.expected_cost)}</div></div>
-        <div class="metric"><div class="k">Priority score</div><div class="v">${num(Math.round(Number(ex.priority_score)))}</div></div>
+  <a class="back" href="${viaConsole ? "#/console" : "#/cases"}">&larr; ${viaConsole ? "Queue" : "All cases"}</a>
+
+  <div class="panel casehead lg mt" id="case-snapshot">
+    <div class="idrow">
+      <div>
+        <div class="who">${esc(c.counterparty_label)}</div>
+        <div class="cid mono">${c.case_id}</div>
       </div>
-      <ul class="why-lines">${(ex.why || []).map((w) => `<li>${esc(w)}</li>`).join("")}</ul>
-      <div class="faint">probability &times; amount &divide; expected cost &mdash; computed by Module&nbsp;8, rendered verbatim.</div>`
-      : '<div class="empty">Not scored yet (terminal or pre-diagnosis case).</div>'}
+      <div style="display:flex;align-items:center;gap:16px">
+        ${statusPill(c.status)}
+        ${c.recovery_score != null ? `<div class="gauge-card">
+          ${confidenceRing(c.recovery_probability, 88, 50)}
+          <div class="v mono">${prob(c.recovery_probability)}</div>
+          <div class="k">Recovery probability</div>
+        </div>` : ""}
+      </div>
+    </div>
+    <div class="casefacts">
+      ${fact("Leg", titleize(c.leg_type))}
+      ${fact("Revenue at risk", rupeesExact(c.revenue_at_risk))}
+      ${fact("Amount at risk now", rupeesExact(c.amount_at_risk))}
+      ${fact("Root cause", c.root_cause_code ? titleize(c.root_cause_code) : "—")}
+      ${fact("Opened", when(c.opened_at))}
+      ${fact("Attribution", c.recovery_type ? titleize(c.recovery_type) : "—")}
+      ${fact("Recovered", c.recovered_amount ? rupeesExact(c.recovered_amount) : "—")}
+      ${c.escalation_resolution ? fact("Human resolution", `${titleize(c.escalation_resolution)} (${esc(c.escalation_resolved_by || "agent")})`) : c.in_human_queue ? fact("Human queue", titleize(c.human_queue_reason)) : fact("Diagnosis confidence", c.diagnosis_confidence == null ? "—" : c.diagnosis_confidence.toFixed(2))}
     </div>
   </div>
 
+  ${showNextStep ? `<div class="next-step mt">
+    <span class="tag">Next</span>
+    <span>Torque plans to attempt <b>${titleize(b.next_step_action_type)}</b>${b.cost_channels && b.cost_channels.length ? " via " + esc(b.cost_channels[0]) : ""} for this case.</span>
+  </div>` : ""}
+
+  <div class="grid cols-2 mt">
+    <div class="panel">
+      <h2>Why Torque prioritized this case</h2>
+      ${ex ? `
+      <ul class="signals">
+        ${(ex.why || []).map((w) => `<li>${esc(w)}</li>`).join("")}
+        ${b && b.promise_keeping_rate != null ? `<li>Customer has kept ${prob(b.promise_keeping_rate)} of past payment promises</li>` : ""}
+      </ul>
+      <div class="faint mt" style="margin-top:10px">Amount at risk ${rupeesExact(ex.amount_at_risk)} &middot;
+        expected intervention cost ${rupeesExact(ex.expected_cost)} &middot; priority score ${num(Math.round(Number(ex.priority_score)))}.
+        probability &times; amount &divide; expected cost &mdash; computed server-side, rendered verbatim.</div>`
+      : '<div class="empty">Not scored yet (terminal or pre-diagnosis case).</div>'}
+    </div>
+
+    <div class="panel ai-card" id="aiCard">
+      <div class="rowflex"><h2><span class="aihdr">AI Assessment</span></h2></div>
+      <p class="ai-intro">Torque's AI reads this case's evidence and explains it. It never changes anything.</p>
+      <button type="button" class="ai" id="doExplain">Explain this case</button>
+      <div id="aiPanel"></div>
+    </div>
+  </div>
+
+  ${showActionRail ? `
+  <div class="panel mt action-rail" id="actionRail">
+    <h2>Actions</h2>
+    <div class="btnrow">
+      <select id="res" aria-label="Resolution">
+        <option value="RECOVERED_BY_HUMAN">Resolve — recovered</option>
+        <option value="PARTIALLY_RECOVERED_BY_HUMAN">Resolve — partial</option>
+        <option value="WRITTEN_OFF">Write off</option>
+      </select>
+      <input id="amt" type="number" placeholder="recovered ₹ (optional)" style="width:170px" aria-label="Recovered amount" />
+      <button class="primary" id="doResolve" ${canResolve ? "" : "disabled"}>Resolve</button>
+      <button id="doPause" ${canPause ? "" : "disabled"}>Pause</button>
+      <button id="doUnpause" ${canUnpause ? "" : "disabled"}>Un-pause</button>
+    </div>
+    <div class="faint" style="margin-top:6px">Resolve is available only for an escalated case; pause only for one still in a playbook.</div>
+  </div>` : ""}
+
   <div class="panel mt">
-    <h2>Audit trail &mdash; why the agent did this</h2>
+    <h2>Timeline</h2>
     <ul class="timeline">
       ${events.map(renderEvent).join("") || '<li class="empty">No events</li>'}
     </ul>
+  </div>
+
+  ${evidencePanel(c)}
+
+  <div class="panel mt" id="precedentCard">
+    <h2>Similar cases</h2>
+    <div class="faint" style="margin-bottom:8px">Generate an AI assessment to surface comparable resolved cases.</div>
+  </div>`;
+
+  const pane = view;
+  $("#doExplain").onclick = () => explainCase(m, caseId, pane);
+  $("#aiPanel").addEventListener("click", (e) => {
+    const chip = e.target.closest("[data-cite]");
+    if (chip) focusCitation(chip.dataset.cite);
+  });
+
+  if (showActionRail) {
+    const act = async (path, body) => {
+      try {
+        const out = await api(`/agent-console/${m}/cases/${caseId}/${path}`, {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        toast(`${titleize(out.from_status)} → ${titleize(out.to_status)}`);
+        await renderCaseView(caseId, opts);
+      } catch (e) { toast(friendlyError(e), true); }
+    };
+    $("#doResolve").onclick = () => act("resolve", {
+      resolution: $("#res").value, agent_id: "demo-agent",
+      recovered_amount: $("#amt").value || null,
+    });
+    $("#doPause").onclick = () => act("pause", { agent_id: "demo-agent" });
+    $("#doUnpause").onclick = () => act("unpause", { agent_id: "demo-agent" });
+    if (viaConsole) $("#actionRail").scrollIntoView({ block: "nearest" });
+  }
+}
+const fact = (k, v) => `<div class="fact"><div class="k">${k}</div><div class="v">${v}</div></div>`;
+
+// A single semi-circular gauge — used sparingly (the case header's recovery
+// probability), never as a dashboard-wide pattern. Pure inline SVG, no
+// charting library. `size`/`h` let it size up for the header gauge-card.
+function confidenceRing(p, size, h) {
+  if (p == null) return "";
+  const frac = Math.max(0, Math.min(1, Number(p)));
+  const W = size || 64, H = h || 36;
+  const r = 26, c = Math.PI * r; // half-circumference (semicircle)
+  const dash = c * frac;
+  return `<svg class="ring" width="${W}" height="${H}" viewBox="0 0 64 36" aria-hidden="true">
+    <path d="M 4 34 A 28 28 0 0 1 60 34" fill="none" stroke="var(--line)" stroke-width="6" stroke-linecap="round" />
+    <path d="M 4 34 A 28 28 0 0 1 60 34" fill="none" stroke="var(--blue)" stroke-width="6" stroke-linecap="round"
+      stroke-dasharray="${dash.toFixed(1)} ${c.toFixed(1)}" />
+  </svg>`;
+}
+
+// Evidence — Actions taken rendered as a dedicated, scannable list (first-
+// class evidence, not folded only into the timeline), grouped so a
+// guardrail block reads as its own category rather than one row among
+// many. Promises are not shown here: CaseDetail exposes no promise list
+// today — the honest choice is to omit the section rather than fabricate
+// one from data the API does not return.
+function evidenceRow(a) {
+  return `<li>
+    <div>
+      <div class="et">${titleize(a.action_type)}${a.channel ? " · " + titleize(a.channel) : ""}</div>
+      <div class="em">${a.executed_at ? when(a.executed_at) : "not executed"}${a.block_reason ? " · " + titleize(a.block_reason) : ""}</div>
+    </div>
+    <span class="pill ${a.outcome === "BLOCKED_BY_GUARDRAIL" ? "amber" : a.outcome === "FAILED" || a.outcome === "NO_RESPONSE" ? "red" : "green"}">${titleize(a.outcome)}</span>
+  </li>`;
+}
+function evidencePanel(c) {
+  const actions = c.actions || [];
+  if (!actions.length) {
+    return `<div class="panel mt"><h2>Evidence</h2><div class="empty">No actions recorded yet.</div></div>`;
+  }
+  const blocked = actions.filter((a) => a.outcome === "BLOCKED_BY_GUARDRAIL");
+  const executed = actions.filter((a) => a.outcome !== "BLOCKED_BY_GUARDRAIL");
+  return `<div class="panel mt">
+    <h2>Evidence</h2>
+    ${blocked.length ? `<div class="evidence-group blocked">
+      <div class="gk">Blocked by guardrail</div>
+      <ul class="evidence-list">${blocked.map(evidenceRow).join("")}</ul>
+    </div>` : ""}
+    ${executed.length ? `<div class="evidence-group executed">
+      <div class="gk">Executed</div>
+      <ul class="evidence-list">${executed.map(evidenceRow).join("")}</ul>
+    </div>` : ""}
   </div>`;
 }
-const kv = (k, v) => `<tr><td class="faint">${k}</td><td class="right">${v}</td></tr>`;
 
 function renderEvent(e) {
   const cls = e.event_type === "PAYMENT_RECONCILED" ? "ok"
@@ -386,18 +733,20 @@ function renderEvent(e) {
     extra = `<span class="why">${titleize(p.from_status)} → ${titleize(p.to_status)}</span>`;
   else if (e.event_type === "HUMAN_RESOLVED")
     extra = `<span class="why">${titleize(p.resolution)} by ${esc(p.agent_id)}</span>`;
-  return `<li class="${cls}" data-event-seq="${e.event_seq_id}">
+  const actionAttr = p.action_id ? ` data-action-id="${esc(p.action_id)}"` : "";
+  const promiseAttr = p.promise_id ? ` data-promise-id="${esc(p.promise_id)}"` : "";
+  return `<li class="${cls}" data-event-seq="${e.event_seq_id}"${actionAttr}${promiseAttr}>
     <div class="ts">${when(e.timestamp)} &middot; #${e.event_seq_id} &middot; ${e.actor}</div>
     <div class="ev">${titleize(e.event_type)}</div>
     ${e.reasoning ? `<div class="why">${esc(e.reasoning)}</div>` : extra}
   </li>`;
 }
 
-// --- AI case explanation (Phase 6) --------------------------------
+// --- AI case explanation --------------------------------------------
 // Read-only decision support: a citation-grounded narrative fetched only on
 // request (never on page load), rendered from the CaseNarrative schema
 // as-is — no parallel frontend representation, no chat UI. Every citation
-// resolves back to a row already shown in the audit trail below it.
+// resolves back to a row already shown in the case view above it.
 
 function citationLabel(id) {
   const [type, ref] = String(id).split(":");
@@ -429,18 +778,18 @@ function claimList(arr) {
 
 function renderPrecedent(p) {
   if (!p.found || !p.cases.length) {
-    return `<div class="empty">${esc(p.note)}</div>`;
+    return `<div class="hatch">${esc(p.note)}</div>`;
   }
-  return `<table><thead><tr><th>Case</th><th>Root cause</th><th>Outcome</th>
+  return `<div class="table-wrap"><table class="stackable"><thead><tr><th>Case</th><th>Root cause</th><th>Outcome</th>
     <th>Evidence</th></tr></thead><tbody>
     ${p.cases.map((pc) => `<tr>
-      <td class="faint mono">${esc(pc.case_id).slice(0, 8)}</td>
-      <td>${esc(titleize(pc.root_cause_code))}</td>
-      <td>${pc.recovered ? '<span class="pill green">Recovered</span>' : '<span class="pill">Not recovered</span>'}
+      <td class="faint mono" data-label="Case">${esc(pc.case_id).slice(0, 8)}</td>
+      <td data-label="Root cause">${esc(titleize(pc.root_cause_code))}</td>
+      <td data-label="Outcome">${pc.recovered ? '<span class="pill green">Recovered</span>' : '<span class="pill">Not recovered</span>'}
         <span class="faint">${esc(pc.outcome_summary)}</span></td>
-      <td>${citeGroup([pc.evidence_id])}</td>
+      <td data-label="Evidence">${citeGroup([pc.evidence_id])}</td>
     </tr>`).join("")}
-  </tbody></table>`;
+  </tbody></table></div>`;
 }
 
 function renderNarrative(n) {
@@ -452,10 +801,9 @@ function renderNarrative(n) {
     <div class="ai-block"><div class="ai-k">Timeline</div>${claimList(n.timeline)}</div>
     <div class="ai-block"><div class="ai-k">Actions taken</div>${claimList(n.actions_taken)}</div>
     ${n.guardrail_explanation.length ? `<div class="ai-block"><div class="ai-k">Guardrails</div>${claimList(n.guardrail_explanation)}</div>` : ""}
-    <div class="ai-block"><div class="ai-k">Precedent</div>${renderPrecedent(n.precedent)}</div>
-    ${n.recommended_human_attention ? `<div class="ai-block"><div class="ai-k">Recommended attention</div><p>${esc(n.recommended_human_attention)}</p></div>` : ""}
+    ${n.recommended_human_attention ? `<div class="ai-block"><div class="ai-k">Worth a second look</div><div class="ai-callout">${esc(n.recommended_human_attention)}</div></div>` : ""}
     <div class="ai-block"><div class="ai-k">Uncertainty</div><p class="faint">${esc(n.uncertainty)}</p></div>
-    ${n.evidence_gaps.length ? `<div class="ai-block"><div class="ai-k">Evidence gaps</div><ul class="why-lines">${n.evidence_gaps.map((g) => `<li>${esc(g)}</li>`).join("")}</ul></div>` : ""}
+    ${n.evidence_gaps.length ? `<div class="ai-block"><div class="ai-k">What Torque doesn't know yet</div><ul class="why-lines">${n.evidence_gaps.map((g) => `<li>${esc(g)}</li>`).join("")}</ul></div>` : ""}
     <div class="faint ai-meta">Generated ${when(n.generated_at)} &middot; ${esc(n.provider_id)} &middot; ${esc(n.prompt_version)}</div>
   </div>`;
 }
@@ -464,10 +812,14 @@ async function explainCase(m, caseId, pane) {
   const btn = pane.querySelector("#doExplain");
   const out = pane.querySelector("#aiPanel");
   btn.disabled = true;
-  out.innerHTML = '<div class="ai-loading">Generating explanation&hellip;</div>';
+  out.innerHTML = `<div class="ai-loading">${skelLine("w80")}${skelLine("w60")}${skelLine("w40")}</div>`;
   try {
     const n = await api(`/ai/${m}/cases/${caseId}/explain`);
     out.innerHTML = renderNarrative(n);
+    markExplained(caseId);
+    const pc = pane.querySelector("#precedentCard");
+    if (pc) pc.outerHTML = `<div class="panel mt ai-card" id="precedentCard">
+      <h2><span class="aihdr">Similar cases</span></h2>${renderPrecedent(n.precedent)}</div>`;
   } catch (e) {
     let msg = "Could not generate an explanation right now.";
     if (e.status === 503) msg = "AI explanations are not enabled for this deployment.";
@@ -478,114 +830,79 @@ async function explainCase(m, caseId, pane) {
   btn.disabled = false;
 }
 
-// A citation id is only ever `source_type:source_id` from Phase 2's own
-// scheme (torque.ai.schemas.EvidenceReference.reference_id) — validated with
-// a strict pattern before it ever becomes part of a CSS selector, so a
+// A citation id is only ever `source_type:source_id` from the AI schema's
+// own scheme (torque.ai.schemas.EvidenceReference.reference_id) — validated
+// with a strict pattern before it ever becomes part of a CSS selector, so a
 // citation string can never be used to inject an arbitrary selector.
 function focusCitation(id) {
-  const m = /^case_event:(\d+)$/.exec(String(id));
-  if (!m) { toast("Referenced: " + citationLabel(id)); return; }
-  const li = view.querySelector(`li[data-event-seq="${m[1]}"]`);
-  if (!li) { toast(`Event #${m[1]} is not shown in this view`); return; }
-  li.scrollIntoView({ behavior: "smooth", block: "center" });
-  li.classList.add("cite-hit");
-  setTimeout(() => li.classList.remove("cite-hit"), 1600);
+  const s = String(id);
+  let m = /^case_event:(\d+)$/.exec(s);
+  if (m) {
+    const li = view.querySelector(`li[data-event-seq="${m[1]}"]`);
+    if (!li) { toast(`Event #${m[1]} is not shown in this view`); return; }
+    return flashElement(li);
+  }
+  m = /^action:([0-9a-fA-F-]+)$/.exec(s);
+  if (m) {
+    const li = view.querySelector(`li[data-action-id="${cssEscape(m[1])}"]`);
+    if (!li) { toast("Referenced: " + citationLabel(id)); return; }
+    return flashElement(li);
+  }
+  m = /^promise:([0-9a-fA-F-]+)$/.exec(s);
+  if (m) {
+    const li = view.querySelector(`li[data-promise-id="${cssEscape(m[1])}"]`);
+    if (!li) { toast("Referenced: " + citationLabel(id)); return; }
+    return flashElement(li);
+  }
+  if (/^case:/.test(s)) {
+    const el = view.querySelector("#case-snapshot");
+    if (!el) { toast("Referenced: " + citationLabel(id)); return; }
+    el.classList.add("case-anchor");
+    return flashElement(el);
+  }
+  if (/^counterparty_relationship:/.test(s)) {
+    toast("Customer relationship — not shown in this view");
+    return;
+  }
+  toast("Referenced: " + citationLabel(id));
+}
+// Defensive escaping for a value used inside an attribute-selector string —
+// CSS.escape when available, a conservative manual fallback otherwise.
+function cssEscape(s) {
+  if (window.CSS && CSS.escape) return CSS.escape(s);
+  return String(s).replace(/[^a-zA-Z0-9_-]/g, "\\$&");
+}
+function flashElement(el) {
+  el.scrollIntoView({ behavior: "smooth", block: "center" });
+  el.classList.add("cite-hit");
+  setTimeout(() => el.classList.remove("cite-hit"), 1600);
 }
 
-// --- Agent Console (§10.7 / 10.8) --------------------------------
-async function renderConsole(caseId) {
+// --- Agent Console ----------------------------------------------------
+async function renderConsole() {
   const m = encodeURIComponent(MERCHANT);
   const queue = await api(`/reports/${m}/human-queue`);
-  const detail = caseId
-    ? `<div id="cpane" class="panel">Loading case…</div>`
-    : `<div class="panel"><div class="empty">Select a case from the queue.</div></div>`;
   view.innerHTML = `
-  <div class="grid cols-2">
-    <div class="panel">
-      <div class="rowflex"><h2>Human queue &mdash; ${queue.items.length}</h2>
-        <span class="faint">ordered by economic priority (Module&nbsp;8 seam)</span></div>
-      <table><thead><tr><th>Customer</th><th>Reason</th><th>Status</th>
-        <th class="num">At risk</th><th class="num">Priority</th></tr></thead><tbody>
-        ${queue.items.map((q) => `<tr class="clickable" data-case="${q.case_id}">
-          <td>${esc(q.counterparty_label)}</td>
-          <td><span class="pill amber">${titleize(q.reason)}</span></td>
-          <td>${statusPill(q.status)}</td>
-          <td class="num">${rupees(q.amount_at_risk)}</td>
-          <td class="num mono">${num(Math.round(q.priority))}</td></tr>`).join("")
-          || '<tr><td colspan="5" class="empty">Queue is empty</td></tr>'}
-      </tbody></table>
-    </div>
-    ${detail}
+  <div class="panel">
+    <div class="rowflex"><h2>Human queue &mdash; ${queue.items.length}</h2>
+      <span class="faint">ordered by economic priority</span></div>
+    ${priorityFeed(queue.items.map((q) => feedRow({
+      caseId: q.case_id,
+      href: "#/console/" + q.case_id,
+      edge: "amber",
+      title: esc(q.counterparty_label),
+      badges: "",
+      sub: `${titleize(q.leg_type)} &middot; ${statusPill(q.status)}`,
+      amountLabel: "At risk",
+      amount: rupees(q.amount_at_risk),
+      metaLines: `<div><span class="pill amber">${titleize(q.reason)}</span></div>
+        <div>Priority ${num(Math.round(q.priority))}</div>`,
+    })))}
   </div>`;
-  view.querySelectorAll("tr[data-case]").forEach((tr) =>
-    tr.addEventListener("click", () => { location.hash = "#/console/" + tr.dataset.case; }));
-  if (caseId) await renderConsolePane(caseId);
+  wireFeedRows(view);
 }
 
-async function renderConsolePane(caseId) {
-  const m = encodeURIComponent(MERCHANT);
-  const pane = $("#cpane");
-  const [c, events] = await Promise.all([
-    api(`/reports/${m}/cases/${caseId}`),
-    api(`/reports/${m}/cases/${caseId}/events`),
-  ]);
-  const b = c.recovery_score_breakdown, ex = b && b.explain;
-  const canResolve = c.status === "ESCALATED_TO_HUMAN";
-  const canPause = c.status === "PLAYBOOK_ACTIVE";
-  const canUnpause = c.status === "PAUSED";
-  pane.innerHTML = `
-    <div class="rowflex"><div>
-      <div style="font-size:16px;font-weight:650">${esc(c.counterparty_label)}</div>
-      <div class="faint mono">${c.case_id.slice(0, 8)} &middot; ${titleize(c.leg_type)}</div>
-    </div>${statusPill(c.status)}</div>
-    <div class="stats mt" style="grid-template-columns:repeat(2,1fr)">
-      ${stat("Revenue at risk", rupees(c.revenue_at_risk))}
-      ${stat("Recovery score", c.recovery_score == null ? "—" : num(Math.round(c.recovery_score)))}
-    </div>
-    ${ex ? `<ul class="why-lines mt">${(ex.why || []).map((w) => `<li>${esc(w)}</li>`).join("")}</ul>` : ""}
-    <div class="btnrow mt">
-      <select id="res">
-        <option value="RECOVERED_BY_HUMAN">Resolve — recovered</option>
-        <option value="PARTIALLY_RECOVERED_BY_HUMAN">Resolve — partial</option>
-        <option value="WRITTEN_OFF">Write off</option>
-      </select>
-      <input id="amt" type="number" placeholder="recovered ₹ (optional)" style="width:170px" />
-      <button class="primary" id="doResolve" ${canResolve ? "" : "disabled"}>Resolve</button>
-      <button id="doPause" ${canPause ? "" : "disabled"}>Pause</button>
-      <button id="doUnpause" ${canUnpause ? "" : "disabled"}>Un-pause</button>
-    </div>
-    <div class="faint" style="margin-top:6px">Resolve is available only for an escalated case; pause only for one still in a playbook.</div>
-    <div class="rowflex mt"><h2>AI explanation</h2>
-      <button id="doExplain">Explain this case</button></div>
-    <div id="aiPanel"></div>
-    <h2 class="mt">Audit trail</h2>
-    <ul class="timeline">${events.map(renderEvent).join("") || '<li class="empty">No events</li>'}</ul>`;
-
-  $("#doExplain").onclick = () => explainCase(m, caseId, pane);
-  pane.querySelector("#aiPanel").addEventListener("click", (e) => {
-    const chip = e.target.closest("[data-cite]");
-    if (chip) focusCitation(chip.dataset.cite);
-  });
-
-  const act = async (path, body) => {
-    try {
-      const out = await api(`/agent-console/${m}/cases/${caseId}/${path}`, {
-        method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      toast(`${titleize(out.from_status)} → ${titleize(out.to_status)}`);
-      await renderConsole(caseId);
-    } catch (e) { toast(e.message, true); }
-  };
-  $("#doResolve").onclick = () => act("resolve", {
-    resolution: $("#res").value, agent_id: "demo-agent",
-    recovered_amount: $("#amt").value || null,
-  });
-  $("#doPause").onclick = () => act("pause", { agent_id: "demo-agent" });
-  $("#doUnpause").onclick = () => act("unpause", { agent_id: "demo-agent" });
-}
-
-// --- Live Demo (§10.9 / 10.10 / 10.17) --------------------------
+// --- Live Demo ----------------------------------------------------
 async function renderDemo() {
   const m = encodeURIComponent(MERCHANT);
   const [scenarios, dm] = await Promise.all([
@@ -608,7 +925,7 @@ async function renderDemo() {
     </div>
     <div class="panel">
       <div class="rowflex"><h2>Live feed</h2><span id="dot" class="faint">polling every 3s…</span></div>
-      <ul class="feed" id="feed"><li class="empty">Waiting for events…</li></ul>
+      <ul class="feed" id="feed" aria-live="polite"><li class="empty">Waiting for events…</li></ul>
     </div>
   </div>`;
 
@@ -618,14 +935,14 @@ async function renderDemo() {
       const out = await api(`/demo/inject/${btn.dataset.key}`, { method: "POST" });
       toast(`Injected — case ${out.case_id.slice(0, 8)} ${out.block_reason ? "blocked (" + titleize(out.block_reason) + ")" : "created"}`);
       await pollFeed(true);
-    } catch (e) { toast(e.message, true); }
+    } catch (e) { toast(friendlyError(e), true); }
     btn.disabled = false;
   });
   $("#seed").onclick = async () => {
     $("#seed").disabled = true;
     try { const r = await api("/demo/seed?reset=true", { method: "POST" });
       toast(`Seeded — ${r.case_count} cases`); await pollFeed(true); }
-    catch (e) { toast(e.message, true); }
+    catch (e) { toast(friendlyError(e), true); }
     $("#seed").disabled = false;
   };
 
@@ -647,6 +964,20 @@ async function renderDemo() {
   }
   await pollFeed(true);
   pollTimer = setInterval(pollFeed, 3000);
+}
+
+// --- mobile nav ------------------------------------------------------
+const navToggle = $("#navToggle");
+const navEl = $("#nav");
+function closeMobileNav() {
+  navEl.classList.remove("open");
+  if (navToggle) navToggle.setAttribute("aria-expanded", "false");
+}
+if (navToggle) {
+  navToggle.addEventListener("click", () => {
+    const open = navEl.classList.toggle("open");
+    navToggle.setAttribute("aria-expanded", open ? "true" : "false");
+  });
 }
 
 // --- boot ----------------------------------------------------------

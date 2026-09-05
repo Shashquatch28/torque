@@ -1,22 +1,34 @@
 # CURRENT STATE — read this first
 
-**Last updated:** 2026-09-04 (Module 12a run), amended below (post-Module-12a
-commit + AI Phase 0+1) — see the "Post-Module-12a-commit amendment" note
-right after "Where we are".
-**Reconstructed from:** committed Modules 1–12 (HEAD `fc813ab`) + the
-uncommitted Module 12a changes + `Torque_Blueprint_v7_FullSystem.md`.
+**Last updated:** 2026-09-04 (Module 12a run) — **superseded by the
+"AI Phase 0-8 amendment" below, which is the current authoritative summary.**
+The rest of this file (from "Where we are" onward) is preserved as an
+accurate historical record of the state *as of Module 12a* and is not
+reliable for anything past that point — read the amendment first.
 **This file is derived documentation, not authoritative.** The repo and blueprint win.
 
-> **Amendment note (superseding the "uncommitted" framing below):** Module
-> 12a is **now committed** on `main` as `a0fb0f3` "Module 12a: close the
-> autonomous loop" — every "uncommitted" reference in this file's original
-> Module 12a section below is historical (accurate at the time it was
-> written) and describes what that commit *contains*, not its current
-> commit status. `main` was clean at `a0fb0f3` when the `ai-layer` branch
-> was forked from it for **AI Phase 0 + Phase 1 — COMPLETE** (read-only AI
-> evidence foundation; see `documentation/ai-memory/AI_BLUEPRINT.md` and the
-> matching `MILESTONES.md` section). That work lives on `ai-layer`, not
-> `main` — nothing below about `main`'s own state is affected by it.
+> **AI Phase 0-8 amendment (2026-09-05, current) — read this first.**
+> Everything below "Where we are" describes the repository as of Module 12a
+> (git `a0fb0f3` on `main`). Since then, **AI Phases 0 through 8 have all
+> been completed and merged to `main`** (the `ai-layer` branch this file
+> originally described as separate is no longer separate — `git log
+> --oneline main` shows Phase 2, 4, 5, 6, 7, 8 commits directly on `main`,
+> ending at `20b6a57` "Phase 8 — Hardening"). Full phase-by-phase detail:
+> `documentation/ai-memory/AI_BLUEPRINT.md` (phase table) and
+> `documentation/ai-memory/MILESTONES.md` (§10b and the "AI Phase N"
+> sections) — both were kept current through Phase 8 and are trustworthy.
+> Verified facts as of this amendment: **test suite 1436 passed** (`uv run
+> pytest`), Alembic head still `0018_escalation_resolution` (no AI-phase
+> migration — the AI layer added no schema), `state_machine.py` and
+> `guards.py` still byte-unchanged since Module 1. The frontend
+> (`src/torque/ui/static/`) has also since been substantially reworked twice
+> beyond what this file describes — see `documentation/UIX_BLUEPRINT.md` and
+> `documentation/demo/ARCHITECTURE.md` for that history; the root
+> [`README.md`](../../README.md) is the current, accurate entry point for
+> system architecture. **Do not use this file's "Where we are" / "Verified
+> facts" / "Next milestone" sections below as current status — they predate
+> all of the above.** They remain below only as a historical snapshot of the
+> Module 12a milestone.
 
 ---
 
